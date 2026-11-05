@@ -302,34 +302,72 @@ if ($adminAttrs.SessionUser -ne $ExpectedAdminUser -or $adminAttrs.CurrentUser -
 }
 Write-Host "[PASS] Gate 9: erp_dev identity and fixture privilege (BYPASSRLS) verified." -ForegroundColor Green
 
-# Gate 9.1: Post-Restoration Migration Ledger State Invariant
-Write-Host "Gate 9.1: Verifying migration ledger state in public.schema_migrations..." -ForegroundColor Cyan
+# Gate 9.1: Post-Restoration Migration Ledger State Invariant (Exact 14-Version Set Verification)
+Write-Host "Gate 9.1: Verifying exact migration ledger state in public.schema_migrations..." -ForegroundColor Cyan
+$expectedVersions = @(
+    "001_platform_foundation",
+    "002_inventory",
+    "003_local_dev_bootstrap",
+    "004_offline_sync_foundation",
+    "005_oidc_identity_and_permissions",
+    "006_oidc_workspace_lookup",
+    "007_inventory_workflow_permissions",
+    "008_sync_change_feed",
+    "009_sync_change_feed_index",
+    "010_offline_device_enrollment",
+    "011_purchasing",
+    "012_saas_tenant_onboarding",
+    "013_double_entry_accounting",
+    "014_finance_chart_of_accounts_seed"
+)
+
 $connLedger = New-Object Npgsql.NpgsqlConnection($adminBuilder.ConnectionString)
 try {
     $connLedger.Open()
     $cmdLedger = $connLedger.CreateCommand()
-    $cmdLedger.CommandText = @"
-        SELECT 
-            COUNT(*) FILTER (WHERE version LIKE '001_%' OR version LIKE '002_%' OR version LIKE '003_%' OR version LIKE '004_%' OR version LIKE '005_%' OR version LIKE '006_%' OR version LIKE '007_%' OR version LIKE '008_%' OR version LIKE '009_%' OR version LIKE '010_%' OR version LIKE '011_%' OR version LIKE '012_%' OR version LIKE '013_%' OR version LIKE '014_%')::int,
-            COUNT(*) FILTER (WHERE version LIKE '015%' OR version LIKE '016%' OR version LIKE '017%' OR version LIKE '018%' OR version LIKE '019%')::int,
-            (SELECT COUNT(*) FROM public.schema_migrations)::int;
-"@
+    $cmdLedger.CommandText = "SELECT version FROM public.schema_migrations ORDER BY version ASC;"
     $readerLedger = $cmdLedger.ExecuteReader()
-    if (-not $readerLedger.Read()) { throw "Failed to read ledger state from public.schema_migrations." }
-    $baselineCount = $readerLedger.GetInt32(0)
-    $unauthorizedCount = $readerLedger.GetInt32(1)
-    $totalCount = $readerLedger.GetInt32(2)
+    $actualVersions = New-Object System.Collections.Generic.List[string]
+    while ($readerLedger.Read()) {
+        $actualVersions.Add($readerLedger.GetString(0))
+    }
     $readerLedger.Close()
 
-    if ($unauthorizedCount -gt 0) {
-        Write-Host "[FAIL-CLOSED] Gate 9.1: Unauthorized migrations 015-019 ($unauthorizedCount rows) detected in public.schema_migrations! Execution strictly blocked." -ForegroundColor Red
+    # 1. Exact total count
+    if ($actualVersions.Count -ne 14) {
+        Write-Host "[FAIL-CLOSED] Gate 9.1: Total ledger version count ($($actualVersions.Count)) is not exactly 14!" -ForegroundColor Red
         exit 1
     }
-    if ($baselineCount -ne 14 -or $totalCount -ne 14) {
-        Write-Host "[FAIL-CLOSED] Gate 9.1: Ledger state anomaly! Expected exactly 14 baseline versions (001-014), found Baseline=$baselineCount, Total=$totalCount." -ForegroundColor Red
+
+    # 2. Check for unauthorized migrations (015-019 range)
+    $unauthorized = $actualVersions | Where-Object { $_ -match "^(015|016|017|018|019)\b" }
+    if ($unauthorized) {
+        Write-Host "[FAIL-CLOSED] Gate 9.1: Unauthorized migrations detected in ledger: $($unauthorized -join ', ')!" -ForegroundColor Red
         exit 1
     }
-    Write-Host "[PASS] Gate 9.1: Migration ledger verified (exactly 14 baseline migrations 001-014, 0 unauthorized 015-019 entries)." -ForegroundColor Green
+
+    # 3. Check for duplicates
+    $duplicates = $actualVersions | Group-Object | Where-Object { $_.Count -gt 1 }
+    if ($duplicates) {
+        Write-Host "[FAIL-CLOSED] Gate 9.1: Duplicate migration entries detected in ledger: $($duplicates.Name -join ', ')!" -ForegroundColor Red
+        exit 1
+    }
+
+    # 4. Check for missing required baseline versions
+    $missing = $expectedVersions | Where-Object { $_ -notin $actualVersions }
+    if ($missing) {
+        Write-Host "[FAIL-CLOSED] Gate 9.1: Missing required baseline migrations in ledger: $($missing -join ', ')!" -ForegroundColor Red
+        exit 1
+    }
+
+    # 5. Check for unexpected versions
+    $unexpected = $actualVersions | Where-Object { $_ -notin $expectedVersions }
+    if ($unexpected) {
+        Write-Host "[FAIL-CLOSED] Gate 9.1: Unexpected migration entries detected in ledger: $($unexpected -join ', ')!" -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host "[PASS] Gate 9.1: Exact 14 baseline migration versions verified (0 missing, 0 unexpected, 0 duplicates, 0 unauthorized 015-019)." -ForegroundColor Green
 }
 finally {
     if ($connLedger.State -eq [System.Data.ConnectionState]::Open) { $connLedger.Close() }
