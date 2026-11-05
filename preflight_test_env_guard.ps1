@@ -302,6 +302,39 @@ if ($adminAttrs.SessionUser -ne $ExpectedAdminUser -or $adminAttrs.CurrentUser -
 }
 Write-Host "[PASS] Gate 9: erp_dev identity and fixture privilege (BYPASSRLS) verified." -ForegroundColor Green
 
+# Gate 9.1: Post-Restoration Migration Ledger State Invariant
+Write-Host "Gate 9.1: Verifying migration ledger state in public.schema_migrations..." -ForegroundColor Cyan
+$connLedger = New-Object Npgsql.NpgsqlConnection($adminBuilder.ConnectionString)
+try {
+    $connLedger.Open()
+    $cmdLedger = $connLedger.CreateCommand()
+    $cmdLedger.CommandText = @"
+        SELECT 
+            COUNT(*) FILTER (WHERE version LIKE '001_%' OR version LIKE '002_%' OR version LIKE '003_%' OR version LIKE '004_%' OR version LIKE '005_%' OR version LIKE '006_%' OR version LIKE '007_%' OR version LIKE '008_%' OR version LIKE '009_%' OR version LIKE '010_%' OR version LIKE '011_%' OR version LIKE '012_%' OR version LIKE '013_%' OR version LIKE '014_%')::int,
+            COUNT(*) FILTER (WHERE version LIKE '015%' OR version LIKE '016%' OR version LIKE '017%' OR version LIKE '018%' OR version LIKE '019%')::int,
+            (SELECT COUNT(*) FROM public.schema_migrations)::int;
+"@
+    $readerLedger = $cmdLedger.ExecuteReader()
+    if (-not $readerLedger.Read()) { throw "Failed to read ledger state from public.schema_migrations." }
+    $baselineCount = $readerLedger.GetInt32(0)
+    $unauthorizedCount = $readerLedger.GetInt32(1)
+    $totalCount = $readerLedger.GetInt32(2)
+    $readerLedger.Close()
+
+    if ($unauthorizedCount -gt 0) {
+        Write-Host "[FAIL-CLOSED] Gate 9.1: Unauthorized migrations 015-019 ($unauthorizedCount rows) detected in public.schema_migrations! Execution strictly blocked." -ForegroundColor Red
+        exit 1
+    }
+    if ($baselineCount -ne 14 -or $totalCount -ne 14) {
+        Write-Host "[FAIL-CLOSED] Gate 9.1: Ledger state anomaly! Expected exactly 14 baseline versions (001-014), found Baseline=$baselineCount, Total=$totalCount." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[PASS] Gate 9.1: Migration ledger verified (exactly 14 baseline migrations 001-014, 0 unauthorized 015-019 entries)." -ForegroundColor Green
+}
+finally {
+    if ($connLedger.State -eq [System.Data.ConnectionState]::Open) { $connLedger.Close() }
+}
+
 # Gate 10: Cryptographically Verified Backup Provenance
 Write-Host "Gate 10: Verifying cryptographic provenance of backup artifact and manifest..." -ForegroundColor Cyan
 if (-not (Test-Path $BackupFilePath) -or -not (Test-Path $ManifestPath) -or -not (Test-Path $SignaturePath) -or -not (Test-Path $PublicKeyPath)) {
