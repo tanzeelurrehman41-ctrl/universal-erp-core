@@ -179,19 +179,74 @@ CREATE INDEX IF NOT EXISTS ix_sales_outbox_unpub ON erp_sales.outbox_event(occur
 DO $$
 DECLARE
     tbl text;
+    approved_tables text[] := ARRAY['customer', 'sales_order', 'sales_order_line', 'sales_invoice', 'sales_invoice_line', 'outbox_event'];
+    existing_pol RECORD;
+    pol_count int;
+    expected_expr text := '((tenant_id = (NULLIF(current_setting(''app.tenant_id''::text, true), ''''::text))::uuid) AND (company_id = (NULLIF(current_setting(''app.company_id''::text, true), ''''::text))::uuid))';
 BEGIN
+    -- 1. Assert all 6 approved sales tables exist prior to RLS processing
+    FOREACH tbl IN ARRAY approved_tables LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'erp_sales' AND tablename = tbl) THEN
+            RAISE EXCEPTION 'Mandatory sales table erp_sales.% does not exist before RLS processing!', tbl;
+        END IF;
+    END LOOP;
+
+    -- 2. Assert no unauthorized tables exist in erp_sales
     FOR tbl IN SELECT tablename FROM pg_tables WHERE schemaname = 'erp_sales'
+    LOOP
+        IF tbl != ALL(approved_tables) THEN
+            RAISE EXCEPTION 'Unauthorized table erp_sales.% detected outside approved sales inventory!', tbl;
+        END IF;
+    END LOOP;
+
+    -- 3. Process each approved table safely
+    FOREACH tbl IN ARRAY approved_tables
     LOOP
         EXECUTE format('ALTER TABLE erp_sales.%I ENABLE ROW LEVEL SECURITY;', tbl);
         EXECUTE format('ALTER TABLE erp_sales.%I FORCE ROW LEVEL SECURITY;', tbl);
-        EXECUTE format(
-          $p$CREATE POLICY tenant_company_scope ON erp_sales.%I
-             USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
-                AND company_id = NULLIF(current_setting('app.company_id', true), '')::uuid)
-             WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
-                AND company_id = NULLIF(current_setting('app.company_id', true), '')::uuid)$p$,
-          tbl
-        );
+
+        SELECT count(*)
+        INTO pol_count
+        FROM pg_policy p
+        JOIN pg_class c ON c.oid = p.polrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'erp_sales' AND c.relname = tbl;
+
+        IF pol_count = 0 THEN
+            EXECUTE format(
+              $p$CREATE POLICY tenant_company_scope ON erp_sales.%I
+                 USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+                    AND company_id = NULLIF(current_setting('app.company_id', true), '')::uuid)
+                 WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+                    AND company_id = NULLIF(current_setting('app.company_id', true), '')::uuid)$p$,
+              tbl
+            );
+        ELSIF pol_count = 1 THEN
+            SELECT p.polname, p.polcmd, p.polpermissive, p.polroles,
+                   pg_get_expr(p.polqual, p.polrelid) AS using_expr,
+                   pg_get_expr(p.polwithcheck, p.polrelid) AS check_expr
+            INTO existing_pol
+            FROM pg_policy p
+            JOIN pg_class c ON c.oid = p.polrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'erp_sales' AND c.relname = tbl AND p.polname = 'tenant_company_scope';
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Single existing policy on erp_sales.% is not named tenant_company_scope!', tbl;
+            END IF;
+
+            IF existing_pol.polcmd IS DISTINCT FROM '*' OR
+               existing_pol.polpermissive IS DISTINCT FROM true OR
+               existing_pol.polroles::text IS DISTINCT FROM '{0}' OR
+               existing_pol.using_expr IS NULL OR
+               existing_pol.check_expr IS NULL OR
+               existing_pol.using_expr IS DISTINCT FROM expected_expr OR
+               existing_pol.check_expr IS DISTINCT FROM expected_expr THEN
+                RAISE EXCEPTION 'Existing policy tenant_company_scope on erp_sales.% diverges from mandatory security semantics!', tbl;
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'Multiple policies (% detected) on erp_sales.%; additional permissive policies threaten tenant isolation!', pol_count, tbl;
+        END IF;
     END LOOP;
 END $$;
 

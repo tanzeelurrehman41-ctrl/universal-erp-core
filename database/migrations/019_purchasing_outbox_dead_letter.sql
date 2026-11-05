@@ -9,10 +9,17 @@ ALTER TABLE erp_purchasing.outbox_event
   ADD COLUMN IF NOT EXISTS redrive_count INTEGER NOT NULL DEFAULT 0 CHECK (redrive_count >= 0),
   ADD COLUMN IF NOT EXISTS last_redriven_at TIMESTAMPTZ;
 
--- Backfill status for already published rows
+-- Safe backfill for legacy published rows:
+-- MUST NOT overwrite existing dead-letter, retry, redriven, or operator-triaged records.
 UPDATE erp_purchasing.outbox_event
 SET status = 'published'
-WHERE published_at IS NOT NULL AND status != 'published';
+WHERE published_at IS NOT NULL
+  AND status = 'pending'
+  AND status != 'dead_letter'
+  AND last_error IS NULL
+  AND next_retry_at IS NULL
+  AND redrive_count = 0
+  AND last_redriven_at IS NULL;
 
 -- Index for pending events eligible for processing/retry
 CREATE INDEX IF NOT EXISTS ix_purchasing_outbox_pending

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <RunConfiguration>
+    <EnvironmentVariables>
+      <UNIVERSAL_ERP_TEST_TARGET_HOST>127.0.0.1</UNIVERSAL_ERP_TEST_TARGET_HOST>
+      <UNIVERSAL_ERP_TEST_TARGET_PORT>5434</UNIVERSAL_ERP_TEST_TARGET_PORT>
+      <UNIVERSAL_ERP_TEST_TARGET_DB>universal_erp_disposable_test</UNIVERSAL_ERP_TEST_TARGET_DB>
+    </EnvironmentVariables>
+  </RunConfiguration>
+</RunSettings>

@@ -22,17 +22,39 @@ namespace UniversalErp.Api.Tests;
 /// </summary>
 public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposable
 {
-    private static readonly string ConnectionString = ResolveConnectionString();
+    private static readonly string AppConnectionString = ResolveAppConnectionString();
+    private static readonly string AdminConnectionString = ResolveAdminConnectionString();
 
-    private readonly NpgsqlDataSource _dataSource;
+    private readonly NpgsqlDataSource _appDataSource;
+    private readonly NpgsqlDataSource _adminDataSource;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public PostgresOfflineReceiptSyncIntegrationTests()
     {
-        _dataSource = NpgsqlDataSource.Create(ConnectionString);
+        _appDataSource = NpgsqlDataSource.Create(AppConnectionString);
+        _adminDataSource = NpgsqlDataSource.Create(AdminConnectionString);
+
+        // Fail-closed runtime identity and privilege assertions
+        using var appConn = _appDataSource.OpenConnection();
+        using var appCmd = appConn.CreateCommand();
+        appCmd.CommandText = "SELECT current_user, session_user, (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user);";
+        using var appReader = appCmd.ExecuteReader();
+        if (!appReader.Read() || appReader.GetString(0) != "erp_app" || appReader.GetBoolean(2))
+        {
+            throw new InvalidOperationException("Fail-closed: _appDataSource must connect strictly as erp_app without RLS bypass privileges.");
+        }
+
+        using var adminConn = _adminDataSource.OpenConnection();
+        using var adminCmd = adminConn.CreateCommand();
+        adminCmd.CommandText = "SELECT current_user;";
+        var adminUser = (string?)adminCmd.ExecuteScalar();
+        if (adminUser != "erp_dev")
+        {
+            throw new InvalidOperationException("Fail-closed: _adminDataSource must connect strictly as erp_dev for fixture setup and teardown.");
+        }
     }
 
-    private static string ResolveConnectionString()
+    private static string ResolveAppConnectionString()
     {
         var env = Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_CONNECTION_STRING")
             ?? Environment.GetEnvironmentVariable("ConnectionStrings__UniversalErpTest");
@@ -41,38 +63,37 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             return env;
         }
 
-        var current = AppContext.BaseDirectory;
-        for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
+        var pwd = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_APP");
+        if (!string.IsNullOrWhiteSpace(pwd))
         {
-            var configPath = Path.Combine(current, "appsettings.Development.json");
-            if (File.Exists(configPath))
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(configPath));
-                if (doc.RootElement.TryGetProperty("ConnectionStrings", out var cs) &&
-                    cs.TryGetProperty("UniversalErpTest", out var testCs))
-                {
-                    return testCs.GetString()!;
-                }
-            }
-            var candidateInApi = Path.Combine(current, "src", "UniversalErp.Api", "appsettings.Development.json");
-            if (File.Exists(candidateInApi))
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(candidateInApi));
-                if (doc.RootElement.TryGetProperty("ConnectionStrings", out var cs) &&
-                    cs.TryGetProperty("UniversalErpTest", out var testCs))
-                {
-                    return testCs.GetString()!;
-                }
-            }
-            current = Directory.GetParent(current)?.FullName;
+            return $"Host=127.0.0.1;Port=5434;Database=universal_erp_disposable_test;Username=erp_app;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
         }
 
-        return "Host=127.0.0.1;Port=5433;Database=universal_erp;Username=erp_dev;Password=local_dev_change_me;Pooling=true;Minimum Pool Size=2;Maximum Pool Size=20";
+        throw new InvalidOperationException("Fail-closed: Neither UNIVERSAL_ERP_TEST_CONNECTION_STRING nor PGPASSWORD_ERP_APP environment variable is configured for erp_app test execution.");
+    }
+
+    private static string ResolveAdminConnectionString()
+    {
+        var env = Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_ADMIN_CONNECTION_STRING")
+            ?? Environment.GetEnvironmentVariable("ConnectionStrings__UniversalErpTestAdmin");
+        if (!string.IsNullOrWhiteSpace(env))
+        {
+            return env;
+        }
+
+        var pwd = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_DEV");
+        if (!string.IsNullOrWhiteSpace(pwd))
+        {
+            return $"Host=127.0.0.1;Port=5434;Database=universal_erp_disposable_test;Username=erp_dev;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
+        }
+
+        throw new InvalidOperationException("Fail-closed: Neither UNIVERSAL_ERP_TEST_ADMIN_CONNECTION_STRING nor PGPASSWORD_ERP_DEV environment variable is configured for erp_dev administrative test setup.");
     }
 
     public async ValueTask DisposeAsync()
     {
-        await _dataSource.DisposeAsync();
+        await _appDataSource.DisposeAsync();
+        await _adminDataSource.DisposeAsync();
     }
 
     private static string ComputeHash(OfflineReceiptOperation operation)
@@ -122,7 +143,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
         var binId = Guid.NewGuid();
         var clientDeviceId = Guid.NewGuid();
 
-        await using var conn = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var conn = await _adminDataSource.OpenConnectionAsync(cancellationToken);
 
         // 1. Tenant
         await using (var cmd = new NpgsqlCommand(
@@ -245,7 +266,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        var repository = new PostgresOfflineReceiptSyncRepository(_dataSource);
+        var repository = new PostgresOfflineReceiptSyncRepository(_appDataSource);
         var context = new TenantContext(tenantId, companyId, userId);
 
         // 7. Register Device & Grant
@@ -270,7 +291,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
     {
         try
         {
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -365,7 +386,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             }
 
             // Verify in PostgreSQL database: Exactly 1 inventory movement exists
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -439,7 +460,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             Assert.NotNull(conflict);
 
             // Verify original operation remains accepted in sync.operation_inbox
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -510,7 +531,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
 
             // 2. Simulate server crash / interruption before posting:
             // The row exists in sync.operation_inbox with outcome = 'deferred'
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -606,7 +627,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             Assert.Equal(expectedMovementId, retryResult.Receipt.MovementId);
 
             // Verify in PostgreSQL: Exactly 1 inventory movement, not 2
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -720,7 +741,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
         var fixture = await CreateFixtureAsync();
         try
         {
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -851,7 +872,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             var hash = ComputeHash(op);
 
             // Manually insert into sync.operation_inbox with outcome = 'deferred' and an expired lease from 1 minute ago
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -935,7 +956,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             var initialClaimToken = reservation.ClaimToken!.Value;
 
             // 2. Simulate another worker overtaking the lease and changing the claim_token
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -957,7 +978,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             // 3. Simulating first worker attempting to acknowledge with its outdated initialClaimToken
             var ackException = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             {
-                await using var ackConn = await _dataSource.OpenConnectionAsync();
+                await using var ackConn = await _adminDataSource.OpenConnectionAsync();
                 await using var tx = await ackConn.BeginTransactionAsync();
                 await using var ackScope = new NpgsqlCommand(
                     "SELECT set_config('app.tenant_id', @t, true), set_config('app.company_id', @c, true)", ackConn, tx);
@@ -1036,7 +1057,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             // Now attempt to record terminal rejection with an arbitrary claim token against the accepted operation
             // The predicate requires outcome = 'deferred' and matching claim token.
             // Since outcome is 'accepted', 0 rows are updated, throwing InvalidOperationException
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using var tx = await conn.BeginTransactionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, true), set_config('app.company_id', @c, true)", conn, tx))
@@ -1097,7 +1118,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
         var fixture = await CreateFixtureAsync();
         try
         {
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -1180,7 +1201,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             var opId = Guid.NewGuid();
             var foreignResourceId = Guid.NewGuid();
 
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -1266,7 +1287,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             var batch = new OfflineReceiptBatchRequest(Guid.NewGuid(), fixture.DeviceId, fixture.GrantId, fixture.GrantToken, [op]);
 
             // Open an uncommitted transaction that revokes the device company scope
-            await using var revokeConn = await _dataSource.OpenConnectionAsync();
+            await using var revokeConn = await _adminDataSource.OpenConnectionAsync();
             await using var revokeTx = await revokeConn.BeginTransactionAsync();
             await using (var scopeCmd = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, true), set_config('app.company_id', @c, true)", revokeConn, revokeTx))
@@ -1303,7 +1324,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             Assert.Equal("OFFLINE_DEVICE_OR_GRANT_INVALID", result.Code);
 
             // Verify in PostgreSQL: Zero inventory movements were created
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var countCmd = new NpgsqlCommand(
                 "SELECT COUNT(*) FROM erp_inventory.inventory_movement WHERE tenant_id = @t AND client_transaction_id = @opId", conn))
             {
@@ -1332,7 +1353,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             var binId2 = Guid.NewGuid();
             var clientDeviceId2 = Guid.NewGuid();
 
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {
@@ -1617,7 +1638,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
                 Guid.NewGuid(), fixture.DeviceId, fixture.GrantId, fixture.GrantToken, [offlineOp]);
 
             // 2. Online Request (qty = 25)
-            var onlineRepo = new PostgresInventoryWorkflowRepository(_dataSource);
+            var onlineRepo = new PostgresInventoryWorkflowRepository(_appDataSource);
             var onlineRequest = new PostInventoryReceiptRequest(
                 fixture.VariantId, fixture.WarehouseId, fixture.BinId, 25m, fixture.BaseUomId, null, null, null, "Online Receipt");
 
@@ -1676,7 +1697,7 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
             }
 
             // 5. Verify in PostgreSQL: Exactly 1 inventory movement exists globally for this client_transaction_id
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await using (var scope = new NpgsqlCommand(
                 "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
             {

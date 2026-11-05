@@ -19,5 +19,8 @@
     <None Include="..\..\src\UniversalErp.Api\appsettings.Development.json" Link="appsettings.Development.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="test.runsettings">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 </Project>

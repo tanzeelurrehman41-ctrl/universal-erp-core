@@ -12,15 +12,38 @@ namespace UniversalErp.Api.Tests;
 /// </summary>
 public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
 {
-    private static readonly string ConnectionString = ResolveConnectionString();
-    private readonly NpgsqlDataSource _dataSource;
+    private static readonly string AppConnectionString = ResolveAppConnectionString();
+    private static readonly string AdminConnectionString = ResolveAdminConnectionString();
+
+    private readonly NpgsqlDataSource _appDataSource;
+    private readonly NpgsqlDataSource _adminDataSource;
 
     public PostgresSupplyChainOutboxIntegrationTests()
     {
-        _dataSource = NpgsqlDataSource.Create(ConnectionString);
+        _appDataSource = NpgsqlDataSource.Create(AppConnectionString);
+        _adminDataSource = NpgsqlDataSource.Create(AdminConnectionString);
+
+        // Fail-closed runtime identity and privilege assertions
+        using var appConn = _appDataSource.OpenConnection();
+        using var appCmd = appConn.CreateCommand();
+        appCmd.CommandText = "SELECT current_user, session_user, (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user);";
+        using var appReader = appCmd.ExecuteReader();
+        if (!appReader.Read() || appReader.GetString(0) != "erp_app" || appReader.GetBoolean(2))
+        {
+            throw new InvalidOperationException("Fail-closed: _appDataSource must connect strictly as erp_app without RLS bypass privileges.");
+        }
+
+        using var adminConn = _adminDataSource.OpenConnection();
+        using var adminCmd = adminConn.CreateCommand();
+        adminCmd.CommandText = "SELECT current_user;";
+        var adminUser = (string?)adminCmd.ExecuteScalar();
+        if (adminUser != "erp_dev")
+        {
+            throw new InvalidOperationException("Fail-closed: _adminDataSource must connect strictly as erp_dev for fixture setup and teardown.");
+        }
     }
 
-    private static string ResolveConnectionString()
+    private static string ResolveAppConnectionString()
     {
         var env = Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_CONNECTION_STRING")
             ?? Environment.GetEnvironmentVariable("ConnectionStrings__UniversalErpTest");
@@ -29,38 +52,37 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
             return env;
         }
 
-        var current = AppContext.BaseDirectory;
-        for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
+        var pwd = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_APP");
+        if (!string.IsNullOrWhiteSpace(pwd))
         {
-            var configPath = Path.Combine(current, "appsettings.Development.json");
-            if (File.Exists(configPath))
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(configPath));
-                if (doc.RootElement.TryGetProperty("ConnectionStrings", out var cs) &&
-                    cs.TryGetProperty("UniversalErpTest", out var testCs))
-                {
-                    return testCs.GetString()!;
-                }
-            }
-            var candidateInApi = Path.Combine(current, "src", "UniversalErp.Api", "appsettings.Development.json");
-            if (File.Exists(candidateInApi))
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(candidateInApi));
-                if (doc.RootElement.TryGetProperty("ConnectionStrings", out var cs) &&
-                    cs.TryGetProperty("UniversalErpTest", out var testCs))
-                {
-                    return testCs.GetString()!;
-                }
-            }
-            current = Directory.GetParent(current)?.FullName;
+            return $"Host=127.0.0.1;Port=5434;Database=universal_erp_disposable_test;Username=erp_app;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
         }
 
-        return "Host=127.0.0.1;Port=5433;Database=universal_erp;Username=erp_dev;Password=local_dev_change_me;Pooling=true;Minimum Pool Size=2;Maximum Pool Size=20";
+        throw new InvalidOperationException("Fail-closed: Neither UNIVERSAL_ERP_TEST_CONNECTION_STRING nor PGPASSWORD_ERP_APP environment variable is configured for erp_app test execution.");
+    }
+
+    private static string ResolveAdminConnectionString()
+    {
+        var env = Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_ADMIN_CONNECTION_STRING")
+            ?? Environment.GetEnvironmentVariable("ConnectionStrings__UniversalErpTestAdmin");
+        if (!string.IsNullOrWhiteSpace(env))
+        {
+            return env;
+        }
+
+        var pwd = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_DEV");
+        if (!string.IsNullOrWhiteSpace(pwd))
+        {
+            return $"Host=127.0.0.1;Port=5434;Database=universal_erp_disposable_test;Username=erp_dev;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
+        }
+
+        throw new InvalidOperationException("Fail-closed: Neither UNIVERSAL_ERP_TEST_ADMIN_CONNECTION_STRING nor PGPASSWORD_ERP_DEV environment variable is configured for erp_dev administrative test setup.");
     }
 
     public async ValueTask DisposeAsync()
     {
-        await _dataSource.DisposeAsync();
+        await _appDataSource.DisposeAsync();
+        await _adminDataSource.DisposeAsync();
     }
 
     private sealed record TestFixture(
@@ -106,7 +128,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
         const decimal receivedQty = 15m;
         const decimal unitPrice = 750m;
 
-        await using var conn = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var conn = await _adminDataSource.OpenConnectionAsync(cancellationToken);
 
         // 1. Tenant
         await using (var cmd = new NpgsqlCommand(
@@ -426,7 +448,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
     {
         try
         {
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             var t = fixture.Context.TenantId;
             var c = fixture.Context.CompanyId;
 
@@ -478,7 +500,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
         var fixture = await CreateFixtureAsync();
         try
         {
-            var repo = new PostgresSupplyChainOutboxRepository(_dataSource);
+            var repo = new PostgresSupplyChainOutboxRepository(_appDataSource);
 
             // --- Step 1: Initial Processing ---
             var firstResult = await repo.ProcessPendingOutboxEventsAsync(
@@ -488,7 +510,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
             Assert.Equal(1, firstResult.StockMovementsCreated);
             Assert.Equal(1, firstResult.JournalsPosted);
 
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await SetRlsAsync(conn, fixture.Context);
 
             // 1. Exactly 1 inventory movement exists for this GRN
@@ -627,7 +649,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
         var fixture = await CreateFixtureAsync();
         try
         {
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await SetRlsAsync(conn, fixture.Context);
 
             // Create Event 1 (Poison): points to nonexistent bin UUID -> foreign key violation
@@ -668,7 +690,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
             }
 
             // Event 2 is the fixture's healthy event (already seeded with valid bin)
-            var repo = new PostgresSupplyChainOutboxRepository(_dataSource);
+            var repo = new PostgresSupplyChainOutboxRepository(_appDataSource);
             var result = await repo.ProcessPendingOutboxEventsAsync(
                 fixture.Context.TenantId, fixture.Context.CompanyId, fixture.Context.UserId, CancellationToken.None);
 
@@ -732,7 +754,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
         var fixture = await CreateFixtureAsync();
         try
         {
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await SetRlsAsync(conn, fixture.Context);
 
             // Poison the event by referencing a nonexistent variant
@@ -765,7 +787,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
                 await cmd.ExecuteNonQueryAsync();
             }
 
-            var repo = new PostgresSupplyChainOutboxRepository(_dataSource);
+            var repo = new PostgresSupplyChainOutboxRepository(_appDataSource);
             var result = await repo.ProcessPendingOutboxEventsAsync(
                 fixture.Context.TenantId, fixture.Context.CompanyId, fixture.Context.UserId, CancellationToken.None);
 
@@ -800,7 +822,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
         var fixture = await CreateFixtureAsync();
         try
         {
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await SetRlsAsync(conn, fixture.Context);
 
             // Poison payload & seed attempt_count = 4 (one attempt away from MaxRetryAttempts=5)
@@ -833,7 +855,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
                 await cmd.ExecuteNonQueryAsync();
             }
 
-            var repo = new PostgresSupplyChainOutboxRepository(_dataSource);
+            var repo = new PostgresSupplyChainOutboxRepository(_appDataSource);
             var result = await repo.ProcessPendingOutboxEventsAsync(
                 fixture.Context.TenantId, fixture.Context.CompanyId, fixture.Context.UserId, CancellationToken.None);
 
@@ -874,7 +896,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
         var fixture = await CreateFixtureAsync();
         try
         {
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await SetRlsAsync(conn, fixture.Context);
 
             // Mark event as dead_letter directly
@@ -885,7 +907,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
                 await cmd.ExecuteNonQueryAsync();
             }
 
-            var repo = new PostgresSupplyChainOutboxRepository(_dataSource);
+            var repo = new PostgresSupplyChainOutboxRepository(_appDataSource);
 
             // Redrive dead letter event
             var redrivenCount = await repo.RedriveDeadLetterEventsAsync(
@@ -938,7 +960,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
         var fixture = await CreateFixtureAsync();
         try
         {
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await SetRlsAsync(conn, fixture.Context);
 
             // Seed a second healthy event
@@ -998,8 +1020,8 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
             }
 
             // Launch two workers concurrently
-            var repo1 = new PostgresSupplyChainOutboxRepository(_dataSource);
-            var repo2 = new PostgresSupplyChainOutboxRepository(_dataSource);
+            var repo1 = new PostgresSupplyChainOutboxRepository(_appDataSource);
+            var repo2 = new PostgresSupplyChainOutboxRepository(_appDataSource);
 
             var task1 = repo1.ProcessPendingOutboxEventsAsync(
                 fixture.Context.TenantId, fixture.Context.CompanyId, fixture.Context.UserId, CancellationToken.None);
@@ -1060,7 +1082,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
         var fixture = await CreateFixtureAsync();
         try
         {
-            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
             await SetRlsAsync(conn, fixture.Context);
 
             // Event A: Unsupported event type
@@ -1103,7 +1125,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
                 await cmd.ExecuteNonQueryAsync();
             }
 
-            var repo = new PostgresSupplyChainOutboxRepository(_dataSource);
+            var repo = new PostgresSupplyChainOutboxRepository(_appDataSource);
             var result = await repo.ProcessPendingOutboxEventsAsync(
                 fixture.Context.TenantId, fixture.Context.CompanyId, fixture.Context.UserId, CancellationToken.None);
 
