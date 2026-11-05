@@ -1,0 +1,38 @@
+services:
+  postgres-test:
+    image: postgres:17.11-bookworm@sha256:4a3dfb128540b616ec485d2da8a96495db6ea0fa4f8f4803ea6ff910c2ec857c
+    container_name: universal-erp-postgres-test
+    restart: "no"
+    environment:
+      POSTGRES_DB: universal_erp_disposable_test
+      POSTGRES_USER: test_bootstrap_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/bootstrap_admin_pwd
+    ports:
+      # Dedicated test host port strictly bound to localhost loopback
+      - "127.0.0.1:5434:5432"
+    volumes:
+      # Dedicated test volume with explicit naming
+      - erp_postgres_test_data:/var/lib/postgresql/data
+      # Secret files mounted read-only
+      - ./test_secrets/bootstrap_admin_pwd.txt:/run/secrets/bootstrap_admin_pwd:ro
+      - ./test_secrets/test_admin_pwd.txt:/run/secrets/test_admin_pwd:ro
+      - ./test_secrets/test_app_pwd.txt:/run/secrets/test_app_pwd:ro
+      # Initialization scripts
+      - ./test_init/01_init_roles.sql:/docker-entrypoint-initdb.d/01_init_roles.sql:ro
+    networks:
+      - universal-erp-test-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_bootstrap_admin -d universal_erp_disposable_test -p 5432"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+networks:
+  universal-erp-test-net:
+    name: universal-erp-test-net
+    driver: bridge
+
+volumes:
+  erp_postgres_test_data:
+    name: erp_postgres_test_data
+    driver: local
