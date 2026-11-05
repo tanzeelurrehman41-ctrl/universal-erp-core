@@ -541,7 +541,11 @@ Write-Host "[PASS] Gate 10: Cryptographic backup artifact, manifest provenance, 
 
 # Gate 11: Dedicated RLS Configuration & Policy Audit
 Write-Host "Gate 11: Executing Row Level Security (RLS) configuration & policy audit..." -ForegroundColor Cyan
-if (-not (Test-Path $RlsAuditSqlPath)) { Write-Host "[FAIL-CLOSED] Gate 11: RLS Audit SQL script not found at '$RlsAuditSqlPath'!" -ForegroundColor Red; exit 1 }
+if (-not (Test-Path $RlsAuditSqlPath)) {
+    $repoRls = Join-Path $PSScriptRoot "audit_rls_policies.sql"
+    if (Test-Path $repoRls) { $RlsAuditSqlPath = $repoRls }
+    else { Write-Host "[FAIL-CLOSED] Gate 11: RLS Audit SQL script not found at '$RlsAuditSqlPath'!" -ForegroundColor Red; exit 1 }
+}
 $rlsSql = Get-Content $RlsAuditSqlPath -Raw
 
 function Invoke-AuditQuery($connString, $sqlScript) {
@@ -582,7 +586,11 @@ Write-Host "[PASS] Gate 11: Row Level Security policies verified." -ForegroundCo
 
 # Gate 12: Exhaustive Effective Privilege Catalog Audit
 Write-Host "Gate 12: Executing exhaustive effective privilege catalog audit..." -ForegroundColor Cyan
-if (-not (Test-Path $AuditSqlPath)) { Write-Host "[FAIL-CLOSED] Gate 12: Audit SQL script not found at '$AuditSqlPath'!" -ForegroundColor Red; exit 1 }
+if (-not (Test-Path $AuditSqlPath)) {
+    $repoAudit = Join-Path $PSScriptRoot "audit_effective_privileges.sql"
+    if (Test-Path $repoAudit) { $AuditSqlPath = $repoAudit }
+    else { Write-Host "[FAIL-CLOSED] Gate 12: Audit SQL script not found at '$AuditSqlPath'!" -ForegroundColor Red; exit 1 }
+}
 $auditSql = Get-Content $AuditSqlPath -Raw
 
 $violations = Invoke-AuditQuery $appConnStr $auditSql

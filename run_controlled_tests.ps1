@@ -65,6 +65,16 @@ if (-not (Test-Path $testProject)) { Write-Host "[FAIL-CLOSED] Test project not 
 if (-not (Test-Path $runsettings)) { Write-Host "[FAIL-CLOSED] Runsettings file not found at '$runsettings'!" -ForegroundColor Red; exit 1 }
 if (-not (Test-Path $preflightScript)) { Write-Host "[FAIL-CLOSED] Preflight script not found at '$preflightScript'!" -ForegroundColor Red; exit 1 }
 
+# Auto-resolve audit scripts from repository if default C:\backups path does not exist
+if (-not (Test-Path $AuditSqlPath)) {
+    $repoAudit = Join-Path $repoRoot "audit_effective_privileges.sql"
+    if (Test-Path $repoAudit) { $AuditSqlPath = $repoAudit }
+}
+if (-not (Test-Path $RlsAuditSqlPath)) {
+    $repoRls = Join-Path $repoRoot "audit_rls_policies.sql"
+    if (Test-Path $repoRls) { $RlsAuditSqlPath = $repoRls }
+}
+
 try {
     # 2. Release Compilation Phase (Explicitly Non-Incremental)
     if (-not $SkipBuild) {
