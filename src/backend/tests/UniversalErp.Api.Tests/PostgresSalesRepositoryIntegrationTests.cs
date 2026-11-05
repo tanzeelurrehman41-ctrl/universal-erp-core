@@ -28,18 +28,32 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
         _adminDataSource = NpgsqlDataSource.Create(AdminConnectionString);
     }
 
+    private static void ValidateApprovedEndpoint(string connectionString, string expectedUser)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        bool isLoopback = builder.Host == "127.0.0.1" || builder.Host == "localhost";
+        if (!isLoopback || builder.Port != 5434 || builder.Database != "universal_erp_disposable_test" || builder.Username != expectedUser)
+        {
+            throw new InvalidOperationException(
+                $"[FAIL-CLOSED] Connection string targets unapproved endpoint! Expected Host=127.0.0.1, Port=5434, Database=universal_erp_disposable_test, Username={expectedUser}. Got Host={builder.Host}, Port={builder.Port}, Database={builder.Database}, Username={builder.Username}. Accidental connections to production, staging, or development instances are strictly prevented.");
+        }
+    }
+
     private static string ResolveAppConnectionString()
     {
         var env = Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_CONNECTION_STRING")
             ?? Environment.GetEnvironmentVariable("ConnectionStrings__UniversalErpTest");
         if (!string.IsNullOrWhiteSpace(env))
         {
+            ValidateApprovedEndpoint(env, expectedUser: "erp_app");
             return env;
         }
         var pass = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_APP");
         if (!string.IsNullOrWhiteSpace(pass))
         {
-            return $"Host=127.0.0.1;Port=5434;Database=universal_erp_disposable_test;Username=erp_app;Password={pass};Include Error Detail=true";
+            var cs = $"Host=127.0.0.1;Port=5434;Database=universal_erp_disposable_test;Username=erp_app;Password={pass};Include Error Detail=true";
+            ValidateApprovedEndpoint(cs, expectedUser: "erp_app");
+            return cs;
         }
         throw new InvalidOperationException("[FAIL-CLOSED] UNIVERSAL_ERP_TEST_CONNECTION_STRING or PGPASSWORD_ERP_APP environment variable is not configured. Plaintext passwords must not be hardcoded in test source code or runsettings.");
     }
@@ -50,12 +64,15 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
             ?? Environment.GetEnvironmentVariable("ConnectionStrings__UniversalErpTestAdmin");
         if (!string.IsNullOrWhiteSpace(env))
         {
+            ValidateApprovedEndpoint(env, expectedUser: "erp_dev");
             return env;
         }
         var pass = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_DEV");
         if (!string.IsNullOrWhiteSpace(pass))
         {
-            return $"Host=127.0.0.1;Port=5434;Database=universal_erp_disposable_test;Username=erp_dev;Password={pass};Include Error Detail=true";
+            var cs = $"Host=127.0.0.1;Port=5434;Database=universal_erp_disposable_test;Username=erp_dev;Password={pass};Include Error Detail=true";
+            ValidateApprovedEndpoint(cs, expectedUser: "erp_dev");
+            return cs;
         }
         throw new InvalidOperationException("[FAIL-CLOSED] UNIVERSAL_ERP_TEST_ADMIN_CONNECTION_STRING or PGPASSWORD_ERP_DEV environment variable is not configured. Plaintext passwords must not be hardcoded in test source code or runsettings.");
     }
