@@ -405,7 +405,7 @@ if (-not $sigValid) {
     exit 1
 }
 
-# Parse manifest with strict schema
+# Parse manifest with strict schema and value validation
 function Parse-StrictManifest($filePath) {
     $allowedKeys = @("ARTIFACT_NAME", "FILE_SIZE_BYTES", "SHA256", "APPROVED_BY", "APPROVAL_DATE", "SCHEMA_INVENTORY", "SEED_FIXTURES", "SANITIZATION_ASSERTION")
     $dict = @{}
@@ -425,20 +425,60 @@ function Parse-StrictManifest($filePath) {
     foreach ($ak in $allowedKeys) {
         if (-not $dict.ContainsKey($ak)) { throw "Missing mandatory key in manifest: '$ak'" }
     }
+
+    # Strict Manifest Value Validations
+    if ($dict["ARTIFACT_NAME"] -ne "universal_erp_m001_m019_baseline_sanitized.dump") {
+        throw "Invalid ARTIFACT_NAME: '$($dict["ARTIFACT_NAME"])'. Expected: 'universal_erp_m001_m019_baseline_sanitized.dump'"
+    }
+
     $sizeVal = 0
     if (-not [int64]::TryParse($dict["FILE_SIZE_BYTES"], [ref]$sizeVal) -or $sizeVal -le 0) {
-        throw "Invalid FILE_SIZE_BYTES value: '$($dict["FILE_SIZE_BYTES"])'"
+        throw "Invalid FILE_SIZE_BYTES value: '$($dict["FILE_SIZE_BYTES"])'. Must be a positive integer greater than 0."
     }
+
     if ($dict["SHA256"] -notmatch "^[a-fA-F0-9]{64}$") {
-        throw "Invalid SHA256 format: '$($dict["SHA256"])'"
+        throw "Invalid SHA256 format: '$($dict["SHA256"])'. Must be exactly 64 hexadecimal characters."
     }
+    if ($dict["SHA256"].ToLowerInvariant() -eq "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") {
+        throw "Invalid SHA256: Hash corresponds to an empty string (0-byte file)."
+    }
+
+    if ($dict["APPROVED_BY"] -match "<.*>" -or $dict["APPROVED_BY"].Trim().Length -lt 3) {
+        throw "Invalid APPROVED_BY value: '$($dict["APPROVED_BY"])'. Must identify the actual certifying DBA."
+    }
+
+    $approvalDate = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($dict["APPROVAL_DATE"], [ref]$approvalDate)) {
+        throw "Invalid APPROVAL_DATE format: '$($dict["APPROVAL_DATE"])'. Must be a valid ISO 8601 timestamp."
+    }
+    if ($approvalDate -gt [DateTimeOffset]::UtcNow.AddHours(1)) {
+        throw "Invalid APPROVAL_DATE: Timestamp is in the future: '$($dict["APPROVAL_DATE"])'."
+    }
+    if ($approvalDate -lt [DateTimeOffset]::Parse("2026-01-01T00:00:00Z")) {
+        throw "Invalid APPROVAL_DATE: Timestamp precedes valid project baseline: '$($dict["APPROVAL_DATE"])'."
+    }
+
+    $expectedSchemas = @("audit", "authorization", "erp_inventory", "erp_purchasing", "erp_sales", "finance", "identity", "organization", "platform", "sync")
+    $actualSchemas = $dict["SCHEMA_INVENTORY"].Split(",") | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ -ne "" } | Sort-Object
+    if (($actualSchemas -join ",") -ne ($expectedSchemas -join ",")) {
+        throw "Invalid SCHEMA_INVENTORY: Does not match approved 10-schema inventory. Expected: $($expectedSchemas -join ', '), got: $($actualSchemas -join ', ')"
+    }
+
+    if ($dict["SEED_FIXTURES"] -ne "certified_sanitized_seed_v1") {
+        throw "Invalid SEED_FIXTURES value: '$($dict["SEED_FIXTURES"])'. Expected: 'certified_sanitized_seed_v1'."
+    }
+
+    if ($dict["SANITIZATION_ASSERTION"] -ne "zero_pii_zero_live_credentials") {
+        throw "Invalid SANITIZATION_ASSERTION value: '$($dict["SANITIZATION_ASSERTION"])'. Expected: 'zero_pii_zero_live_credentials'."
+    }
+
     return $dict
 }
 
 try {
     $manifestDict = Parse-StrictManifest $ManifestPath
 } catch {
-    Write-Host "[FAIL-CLOSED] Gate 10: Manifest parsing failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[FAIL-CLOSED] Gate 10: Manifest parsing or strict value validation failed: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }
 
@@ -452,7 +492,43 @@ if ($actualHash -ne $manifestDict["SHA256"].ToUpper()) {
     Write-Host "[FAIL-CLOSED] Gate 10: Backup artifact SHA-256 hash mismatch!" -ForegroundColor Red
     exit 1
 }
-Write-Host "[PASS] Gate 10: Cryptographic backup artifact and manifest provenance verified." -ForegroundColor Green
+
+# PostgreSQL Custom Format Magic Header Verification (PGDMP)
+$headerStream = [System.IO.File]::OpenRead($BackupFilePath)
+try {
+    $headerBytes = New-Object byte[] 5
+    $readCount = $headerStream.Read($headerBytes, 0, 5)
+    $expectedMagic = [byte[]]@(0x50, 0x47, 0x44, 0x4D, 0x50) # 'P','G','D','M','P'
+    if ($readCount -ne 5) {
+        Write-Host "[FAIL-CLOSED] Gate 10: Backup artifact too short to contain PostgreSQL custom archive header!" -ForegroundColor Red
+        exit 1
+    }
+    for ($i = 0; $i -lt 5; $i++) {
+        if ($headerBytes[$i] -ne $expectedMagic[$i]) {
+            Write-Host "[FAIL-CLOSED] Gate 10: Invalid archive format! First 5 bytes do not match 'PGDMP' magic header." -ForegroundColor Red
+            exit 1
+        }
+    }
+} finally {
+    $headerStream.Dispose()
+}
+
+# Mandatory PostgreSQL Archive Readability Verification (Fail-Closed)
+$pgRestoreCmd = Get-Command pg_restore -ErrorAction SilentlyContinue
+if (-not $pgRestoreCmd) {
+    Write-Host "[FAIL-CLOSED] Gate 10: Mandatory prerequisite failed: 'pg_restore' CLI is not installed or not in PATH! Archive verification cannot proceed." -ForegroundColor Red
+    exit 1
+}
+$tocOutput = & pg_restore -l $BackupFilePath 2>&1
+$tocRc = $LASTEXITCODE
+if ($tocRc -ne 0) {
+    Write-Host "[FAIL-CLOSED] Gate 10: Archive TOC verification failed! 'pg_restore -l' returned exit code $tocRc." -ForegroundColor Red
+    exit 1
+}
+$tocEntryCount = ($tocOutput | Where-Object { $_ -notmatch '^;' -and $_.Trim() -ne '' }).Count
+Write-Host "[PASS] Gate 10: Archive TOC verified readable via pg_restore ($tocEntryCount catalog entries enumerated)." -ForegroundColor Green
+
+Write-Host "[PASS] Gate 10: Cryptographic backup artifact, manifest provenance, magic header, and archive TOC verified." -ForegroundColor Green
 
 # Gate 11: Dedicated RLS Configuration & Policy Audit
 Write-Host "Gate 11: Executing Row Level Security (RLS) configuration & policy audit..." -ForegroundColor Cyan
