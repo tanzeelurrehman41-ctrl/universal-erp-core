@@ -329,7 +329,16 @@ try {
     $readerLedger = $cmdLedger.ExecuteReader()
     $actualVersions = New-Object System.Collections.Generic.List[string]
     while ($readerLedger.Read()) {
-        $actualVersions.Add($readerLedger.GetString(0))
+        if ($readerLedger.IsDBNull(0)) {
+            Write-Host "[FAIL-CLOSED] Gate 9.1: NULL migration version detected in public.schema_migrations!" -ForegroundColor Red
+            exit 1
+        }
+        $vStr = $readerLedger.GetString(0)
+        if ([string]::IsNullOrWhiteSpace($vStr)) {
+            Write-Host "[FAIL-CLOSED] Gate 9.1: Empty or whitespace migration version detected in public.schema_migrations!" -ForegroundColor Red
+            exit 1
+        }
+        $actualVersions.Add($vStr)
     }
     $readerLedger.Close()
 
@@ -339,29 +348,29 @@ try {
         exit 1
     }
 
-    # 2. Check for unauthorized migrations (015-019 range)
-    $unauthorized = $actualVersions | Where-Object { $_ -match "^(015|016|017|018|019)\b" }
+    # 2. Check for unauthorized migrations (015-019 range) with anchored prefix
+    $unauthorized = $actualVersions | Where-Object { $_ -match "^(015|016|017|018|019)(_|\b|$)" }
     if ($unauthorized) {
         Write-Host "[FAIL-CLOSED] Gate 9.1: Unauthorized migrations detected in ledger: $($unauthorized -join ', ')!" -ForegroundColor Red
         exit 1
     }
 
-    # 3. Check for duplicates
-    $duplicates = $actualVersions | Group-Object | Where-Object { $_.Count -gt 1 }
+    # 3. Check for duplicates (case-sensitive)
+    $duplicates = $actualVersions | Group-Object -CaseSensitive | Where-Object { $_.Count -gt 1 }
     if ($duplicates) {
         Write-Host "[FAIL-CLOSED] Gate 9.1: Duplicate migration entries detected in ledger: $($duplicates.Name -join ', ')!" -ForegroundColor Red
         exit 1
     }
 
-    # 4. Check for missing required baseline versions
-    $missing = $expectedVersions | Where-Object { $_ -notin $actualVersions }
+    # 4. Check for missing required baseline versions (case-sensitive)
+    $missing = $expectedVersions | Where-Object { $_ -cnotin $actualVersions }
     if ($missing) {
         Write-Host "[FAIL-CLOSED] Gate 9.1: Missing required baseline migrations in ledger: $($missing -join ', ')!" -ForegroundColor Red
         exit 1
     }
 
-    # 5. Check for unexpected versions
-    $unexpected = $actualVersions | Where-Object { $_ -notin $expectedVersions }
+    # 5. Check for unexpected versions (case-sensitive)
+    $unexpected = $actualVersions | Where-Object { $_ -cnotin $expectedVersions }
     if ($unexpected) {
         Write-Host "[FAIL-CLOSED] Gate 9.1: Unexpected migration entries detected in ledger: $($unexpected -join ', ')!" -ForegroundColor Red
         exit 1
