@@ -1,0 +1,1055 @@
+using System.Text.Json;
+using Npgsql;
+using NpgsqlTypes;
+using UniversalErp.Application.Inventory;
+using UniversalErp.Domain.Common;
+using UniversalErp.Domain.Tenancy;
+using UniversalErp.Infrastructure.Sync;
+
+namespace UniversalErp.Infrastructure.Inventory;
+
+public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSource)
+    : IInventoryWorkflowRepository
+{
+    public async Task<IReadOnlyList<UnitOfMeasureSummary>> ListUnitsAsync(
+        Guid tenantId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, null, cancellationToken);
+        await using var command = new NpgsqlCommand(
+            "SELECT uom_id, code, name, dimension, decimal_places FROM erp_inventory.unit_of_measure WHERE tenant_id = @tenantId ORDER BY code",
+            db.Connection,
+            db.Transaction);
+        command.Parameters.AddWithValue("tenantId", tenantId);
+        var items = new List<UnitOfMeasureSummary>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) items.Add(ReadUnit(reader));
+        await reader.CloseAsync();
+        await db.Transaction.CommitAsync(cancellationToken);
+        return items;
+    }
+
+    public async Task<Result<UnitOfMeasureSummary>> CreateUnitAsync(
+        Guid tenantId,
+        CreateUnitOfMeasureRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, null, cancellationToken);
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.unit_of_measure (tenant_id, uom_id, code, name, dimension, decimal_places) VALUES (@tenantId, @id, @code, @name, @dimension, @places) RETURNING uom_id, code, name, dimension, decimal_places",
+                db.Connection,
+                db.Transaction);
+            command.Parameters.AddWithValue("tenantId", tenantId);
+            command.Parameters.AddWithValue("id", Guid.NewGuid());
+            command.Parameters.AddWithValue("code", request.Code!);
+            command.Parameters.AddWithValue("name", request.Name!);
+            command.Parameters.AddWithValue("dimension", request.Dimension!);
+            command.Parameters.AddWithValue("places", request.DecimalPlaces);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await reader.ReadAsync(cancellationToken);
+            var unit = ReadUnit(reader);
+            await reader.CloseAsync();
+            await db.Transaction.CommitAsync(cancellationToken);
+            return Result<UnitOfMeasureSummary>.Success(unit);
+        }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            return await RollbackWithFailureAsync<UnitOfMeasureSummary>(db, "DUPLICATE_UOM_CODE", cancellationToken);
+        }
+    }
+
+    public async Task<IReadOnlyList<ProductVariantSummary>> ListVariantsAsync(
+        Guid tenantId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, null, cancellationToken);
+        await using var command = new NpgsqlCommand(VariantSelect + " WHERE variant.tenant_id = @tenantId ORDER BY variant.sku", db.Connection, db.Transaction);
+        command.Parameters.AddWithValue("tenantId", tenantId);
+        var items = new List<ProductVariantSummary>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) items.Add(ReadVariant(reader));
+        await reader.CloseAsync();
+        await db.Transaction.CommitAsync(cancellationToken);
+        return items;
+    }
+
+    public async Task<Result<ProductVariantSummary>> CreateVariantAsync(
+        Guid tenantId,
+        CreateProductVariantRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, null, cancellationToken);
+        await using (var validate = new NpgsqlCommand(
+            "SELECT EXISTS (SELECT 1 FROM erp_inventory.product AS product JOIN erp_inventory.unit_of_measure AS uom ON uom.tenant_id = product.tenant_id WHERE product.tenant_id = @tenantId AND product.product_id = @productId AND product.product_type = 'stock' AND product.is_active AND uom.uom_id = @uomId)",
+            db.Connection,
+            db.Transaction))
+        {
+            validate.Parameters.AddWithValue("tenantId", tenantId);
+            validate.Parameters.AddWithValue("productId", request.ProductId);
+            validate.Parameters.AddWithValue("uomId", request.BaseUnitOfMeasureId);
+            if (await validate.ExecuteScalarAsync(cancellationToken) as bool? != true)
+            {
+                return await RollbackWithFailureAsync<ProductVariantSummary>(db, "INVALID_VARIANT_REFERENCE", cancellationToken);
+            }
+        }
+
+        try
+        {
+            await using var insert = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.product_variant (tenant_id, variant_id, product_id, sku, variant_name, base_uom_id, tracking_mode, costing_method) VALUES (@tenantId, @id, @productId, @sku, @name, @uomId, @tracking, @costing)",
+                db.Connection,
+                db.Transaction);
+            insert.Parameters.AddWithValue("tenantId", tenantId);
+            insert.Parameters.AddWithValue("id", Guid.NewGuid());
+            insert.Parameters.AddWithValue("productId", request.ProductId);
+            insert.Parameters.AddWithValue("sku", request.Sku!);
+            insert.Parameters.AddWithValue("name", (object?)request.VariantName ?? DBNull.Value);
+            insert.Parameters.AddWithValue("uomId", request.BaseUnitOfMeasureId);
+            insert.Parameters.AddWithValue("tracking", request.TrackingMode!);
+            insert.Parameters.AddWithValue("costing", request.CostingMethod!);
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+            var item = await FindVariantAsync(db.Connection, db.Transaction, tenantId, request.Sku!, cancellationToken);
+            await db.Transaction.CommitAsync(cancellationToken);
+            return Result<ProductVariantSummary>.Success(item!);
+        }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            return await RollbackWithFailureAsync<ProductVariantSummary>(db, "DUPLICATE_VARIANT_SKU", cancellationToken);
+        }
+    }
+
+    public async Task<IReadOnlyList<WarehouseSummary>> ListWarehousesAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, companyId, cancellationToken);
+        await using var command = new NpgsqlCommand(
+            "SELECT warehouse_id, code, name, is_active FROM erp_inventory.warehouse WHERE tenant_id = @tenantId AND company_id = @companyId ORDER BY code",
+            db.Connection,
+            db.Transaction);
+        command.Parameters.AddWithValue("tenantId", tenantId);
+        command.Parameters.AddWithValue("companyId", companyId);
+        var items = new List<WarehouseSummary>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) items.Add(ReadWarehouse(reader));
+        await reader.CloseAsync();
+        await db.Transaction.CommitAsync(cancellationToken);
+        return items;
+    }
+
+    public async Task<Result<WarehouseSummary>> CreateWarehouseAsync(
+        Guid tenantId,
+        Guid companyId,
+        CreateWarehouseRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, companyId, cancellationToken);
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.warehouse (tenant_id, company_id, warehouse_id, code, name) VALUES (@tenantId, @companyId, @id, @code, @name) RETURNING warehouse_id, code, name, is_active",
+                db.Connection,
+                db.Transaction);
+            command.Parameters.AddWithValue("tenantId", tenantId);
+            command.Parameters.AddWithValue("companyId", companyId);
+            command.Parameters.AddWithValue("id", Guid.NewGuid());
+            command.Parameters.AddWithValue("code", request.Code!);
+            command.Parameters.AddWithValue("name", request.Name!);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await reader.ReadAsync(cancellationToken);
+            var warehouse = ReadWarehouse(reader);
+            await reader.CloseAsync();
+            await db.Transaction.CommitAsync(cancellationToken);
+            return Result<WarehouseSummary>.Success(warehouse);
+        }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            return await RollbackWithFailureAsync<WarehouseSummary>(db, "DUPLICATE_WAREHOUSE_CODE", cancellationToken);
+        }
+    }
+
+    public async Task<IReadOnlyList<StockBinSummary>> ListBinsAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid? warehouseId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, companyId, cancellationToken);
+        await using var command = new NpgsqlCommand(
+            "SELECT bin_id, warehouse_id, code, bin_type, is_active FROM erp_inventory.stock_bin WHERE tenant_id = @tenantId AND company_id = @companyId AND (@warehouseId IS NULL OR warehouse_id = @warehouseId) ORDER BY warehouse_id, code",
+            db.Connection,
+            db.Transaction);
+        command.Parameters.AddWithValue("tenantId", tenantId);
+        command.Parameters.AddWithValue("companyId", companyId);
+        AddNullableUuid(command, "warehouseId", warehouseId);
+        var items = new List<StockBinSummary>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) items.Add(ReadBin(reader));
+        await reader.CloseAsync();
+        await db.Transaction.CommitAsync(cancellationToken);
+        return items;
+    }
+
+    public async Task<Result<StockBinSummary>> CreateBinAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid warehouseId,
+        CreateStockBinRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, companyId, cancellationToken);
+        await using (var validate = new NpgsqlCommand(
+            "SELECT EXISTS (SELECT 1 FROM erp_inventory.warehouse WHERE tenant_id = @tenantId AND company_id = @companyId AND warehouse_id = @warehouseId AND is_active)",
+            db.Connection,
+            db.Transaction))
+        {
+            validate.Parameters.AddWithValue("tenantId", tenantId);
+            validate.Parameters.AddWithValue("companyId", companyId);
+            validate.Parameters.AddWithValue("warehouseId", warehouseId);
+            if (await validate.ExecuteScalarAsync(cancellationToken) as bool? != true)
+            {
+                return await RollbackWithFailureAsync<StockBinSummary>(db, "WAREHOUSE_NOT_FOUND", cancellationToken);
+            }
+        }
+
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.stock_bin (tenant_id, company_id, warehouse_id, bin_id, code, bin_type) VALUES (@tenantId, @companyId, @warehouseId, @id, @code, @type) RETURNING bin_id, warehouse_id, code, bin_type, is_active",
+                db.Connection,
+                db.Transaction);
+            command.Parameters.AddWithValue("tenantId", tenantId);
+            command.Parameters.AddWithValue("companyId", companyId);
+            command.Parameters.AddWithValue("warehouseId", warehouseId);
+            command.Parameters.AddWithValue("id", Guid.NewGuid());
+            command.Parameters.AddWithValue("code", request.Code!);
+            command.Parameters.AddWithValue("type", request.BinType!);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await reader.ReadAsync(cancellationToken);
+            var bin = ReadBin(reader);
+            await reader.CloseAsync();
+            await db.Transaction.CommitAsync(cancellationToken);
+            return Result<StockBinSummary>.Success(bin);
+        }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            return await RollbackWithFailureAsync<StockBinSummary>(db, "DUPLICATE_BIN_CODE", cancellationToken);
+        }
+    }
+
+    public async Task<IReadOnlyList<InventoryAvailabilitySummary>> ListAvailabilityAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid? variantId,
+        Guid? warehouseId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, companyId, cancellationToken);
+        await using var command = new NpgsqlCommand(
+            "SELECT balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code, balance.on_hand_qty, variant.base_uom_id FROM erp_inventory.stock_balance AS balance JOIN erp_inventory.product_variant AS variant ON variant.tenant_id = balance.tenant_id AND variant.variant_id = balance.variant_id WHERE balance.tenant_id = @tenantId AND balance.company_id = @companyId AND (@variantId IS NULL OR balance.variant_id = @variantId) AND (@warehouseId IS NULL OR balance.warehouse_id = @warehouseId) ORDER BY balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code",
+            db.Connection,
+            db.Transaction);
+        command.Parameters.AddWithValue("tenantId", tenantId);
+        command.Parameters.AddWithValue("companyId", companyId);
+        AddNullableUuid(command, "variantId", variantId);
+        AddNullableUuid(command, "warehouseId", warehouseId);
+        var items = new List<InventoryAvailabilitySummary>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new InventoryAvailabilitySummary(
+                reader.GetGuid(0), reader.GetGuid(1), reader.GetGuid(2), reader.GetString(3),
+                reader.GetDecimal(4), reader.GetGuid(5)));
+        }
+        await reader.CloseAsync();
+        await db.Transaction.CommitAsync(cancellationToken);
+        return items;
+    }
+
+    public async Task<Result<InventoryReceiptSummary>> PostReceiptAsync(
+        TenantContext context,
+        Guid transactionId,
+        string requestHash,
+        PostInventoryReceiptRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(context.TenantId, context.CompanyId, cancellationToken);
+        try
+        {
+            await using (var lockCmd = new NpgsqlCommand(
+                "SELECT pg_advisory_xact_lock(hashtext('cmd_idemp:' || @tenantId::text || ':' || @key::text))",
+                db.Connection,
+                db.Transaction))
+            {
+                lockCmd.Parameters.AddWithValue("tenantId", context.TenantId);
+                lockCmd.Parameters.AddWithValue("key", transactionId);
+                await lockCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var reserve = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.command_idempotency (tenant_id, company_id, idempotency_key, command_code, request_hash) VALUES (@tenantId, @companyId, @key, 'inventory.receipt.post', @hash) ON CONFLICT (tenant_id, idempotency_key) DO NOTHING RETURNING idempotency_key",
+                db.Connection,
+                db.Transaction))
+            {
+                reserve.Parameters.AddWithValue("tenantId", context.TenantId);
+                reserve.Parameters.AddWithValue("companyId", context.CompanyId);
+                reserve.Parameters.AddWithValue("key", transactionId);
+                reserve.Parameters.AddWithValue("hash", requestHash);
+                if (await reserve.ExecuteScalarAsync(cancellationToken) is null)
+                {
+                    var replay = await FindReceiptByKeyAsync(db, context, transactionId, cancellationToken);
+                    if (replay is null)
+                    {
+                        return await RollbackWithFailureAsync<InventoryReceiptSummary>(db, "IDEMPOTENCY_KEY_REUSED", cancellationToken);
+                    }
+                    var saved = replay.Value;
+                    if (saved.RequestHash != requestHash || saved.CommandCode != "inventory.receipt.post")
+                    {
+                        return await RollbackWithFailureAsync<InventoryReceiptSummary>(db, "IDEMPOTENCY_KEY_REUSED", cancellationToken);
+                    }
+                    if (saved.Receipt is null)
+                    {
+                        return await RollbackWithFailureAsync<InventoryReceiptSummary>(db, "IDEMPOTENCY_KEY_REUSED", cancellationToken);
+                    }
+                    await db.Transaction.CommitAsync(cancellationToken);
+                    return Result<InventoryReceiptSummary>.Success(saved.Receipt);
+                }
+            }
+
+            Guid baseUomId;
+            await using (var validateVariant = new NpgsqlCommand(
+                "SELECT variant.base_uom_id FROM erp_inventory.product_variant AS variant JOIN erp_inventory.product AS product ON product.tenant_id = variant.tenant_id AND product.product_id = variant.product_id WHERE variant.tenant_id = @tenantId AND variant.variant_id = @variantId AND variant.is_active AND product.is_active AND product.product_type = 'stock' AND variant.tracking_mode = 'none'",
+                db.Connection,
+                db.Transaction))
+            {
+                validateVariant.Parameters.AddWithValue("tenantId", context.TenantId);
+                validateVariant.Parameters.AddWithValue("variantId", request.VariantId);
+                var result = await validateVariant.ExecuteScalarAsync(cancellationToken);
+                if (result is not Guid foundUom)
+                {
+                    return await RollbackWithFailureAsync<InventoryReceiptSummary>(db, "RECEIPT_VARIANT_NOT_SUPPORTED", cancellationToken);
+                }
+                baseUomId = foundUom;
+            }
+
+            if (baseUomId != request.UnitOfMeasureId)
+            {
+                return await RollbackWithFailureAsync<InventoryReceiptSummary>(db, "RECEIPT_UNIT_MUST_MATCH_BASE_UNIT", cancellationToken);
+            }
+
+            await using (var validateLocation = new NpgsqlCommand(
+                "SELECT EXISTS (SELECT 1 FROM erp_inventory.warehouse AS warehouse JOIN erp_inventory.stock_bin AS bin ON bin.tenant_id = warehouse.tenant_id AND bin.company_id = warehouse.company_id AND bin.warehouse_id = warehouse.warehouse_id WHERE warehouse.tenant_id = @tenantId AND warehouse.company_id = @companyId AND warehouse.warehouse_id = @warehouseId AND warehouse.is_active AND bin.bin_id = @binId AND bin.is_active AND bin.bin_type IN ('storage','receiving'))",
+                db.Connection,
+                db.Transaction))
+            {
+                validateLocation.Parameters.AddWithValue("tenantId", context.TenantId);
+                validateLocation.Parameters.AddWithValue("companyId", context.CompanyId);
+                validateLocation.Parameters.AddWithValue("warehouseId", request.WarehouseId);
+                validateLocation.Parameters.AddWithValue("binId", request.BinId);
+                if (await validateLocation.ExecuteScalarAsync(cancellationToken) as bool? != true)
+                {
+                    return await RollbackWithFailureAsync<InventoryReceiptSummary>(db, "RECEIPT_LOCATION_NOT_SUPPORTED", cancellationToken);
+                }
+            }
+
+            var occurredAt = request.OccurredAt ?? DateTimeOffset.UtcNow;
+            var movementId = Guid.NewGuid();
+            DateTimeOffset postedAt;
+            await using (var movement = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.inventory_movement (tenant_id, company_id, movement_id, client_transaction_id, movement_type, source_document_type, source_document_id, occurred_at, created_by, note) VALUES (@tenantId, @companyId, @movementId, @transactionId, 'receipt', @sourceType, @sourceId, @occurredAt, @createdBy, @note) RETURNING posted_at",
+                db.Connection,
+                db.Transaction))
+            {
+                movement.Parameters.AddWithValue("tenantId", context.TenantId);
+                movement.Parameters.AddWithValue("companyId", context.CompanyId);
+                movement.Parameters.AddWithValue("movementId", movementId);
+                movement.Parameters.AddWithValue("transactionId", transactionId);
+                movement.Parameters.AddWithValue("sourceType", (object?)request.SourceDocumentType ?? DBNull.Value);
+                movement.Parameters.AddWithValue("sourceId", (object?)request.SourceDocumentId ?? DBNull.Value);
+                movement.Parameters.AddWithValue("occurredAt", occurredAt);
+                movement.Parameters.AddWithValue("createdBy", context.UserId);
+                movement.Parameters.AddWithValue("note", (object?)request.Note ?? DBNull.Value);
+                var postedAtValue = await movement.ExecuteScalarAsync(cancellationToken)
+                    ?? throw new InvalidOperationException("The stock receipt was not posted.");
+                postedAt = postedAtValue switch
+                {
+                    DateTimeOffset timestamp => timestamp.ToUniversalTime(),
+                    DateTime timestamp => new DateTimeOffset(timestamp.ToUniversalTime()),
+                    _ => throw new InvalidOperationException("PostgreSQL returned an invalid posting time."),
+                };
+            }
+
+            await using (var leg = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.inventory_movement_leg (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id, bin_id, status_code, quantity_delta, base_uom_id) VALUES (@tenantId, @companyId, @movementId, 1, @variantId, @warehouseId, @binId, 'available', @quantity, @uomId)",
+                db.Connection,
+                db.Transaction))
+            {
+                leg.Parameters.AddWithValue("tenantId", context.TenantId);
+                leg.Parameters.AddWithValue("companyId", context.CompanyId);
+                leg.Parameters.AddWithValue("movementId", movementId);
+                leg.Parameters.AddWithValue("variantId", request.VariantId);
+                leg.Parameters.AddWithValue("warehouseId", request.WarehouseId);
+                leg.Parameters.AddWithValue("binId", request.BinId);
+                leg.Parameters.AddWithValue("quantity", request.Quantity);
+                leg.Parameters.AddWithValue("uomId", baseUomId);
+                await leg.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var balance = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.stock_balance (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, on_hand_qty, balance_id) VALUES (@tenantId, @companyId, @variantId, @warehouseId, @binId, 'available', @quantity, @balanceId) ON CONFLICT (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, (COALESCE(lot_id, '00000000-0000-0000-0000-000000000000'::uuid))) DO UPDATE SET on_hand_qty = erp_inventory.stock_balance.on_hand_qty + EXCLUDED.on_hand_qty, updated_at = now()",
+                db.Connection,
+                db.Transaction))
+            {
+                balance.Parameters.AddWithValue("tenantId", context.TenantId);
+                balance.Parameters.AddWithValue("companyId", context.CompanyId);
+                balance.Parameters.AddWithValue("variantId", request.VariantId);
+                balance.Parameters.AddWithValue("warehouseId", request.WarehouseId);
+                balance.Parameters.AddWithValue("binId", request.BinId);
+                balance.Parameters.AddWithValue("quantity", request.Quantity);
+                balance.Parameters.AddWithValue("balanceId", Guid.NewGuid());
+                await balance.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var eventPayload = JsonSerializer.Serialize(new
+            {
+                transactionId,
+                movementId,
+                request.VariantId,
+                request.WarehouseId,
+                request.BinId,
+                request.Quantity,
+                unitOfMeasureId = baseUomId,
+                occurredAt,
+                postedAt,
+            });
+            await using (var outbox = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.outbox_event (tenant_id, company_id, event_id, aggregate_type, aggregate_id, event_type, payload, occurred_at) VALUES (@tenantId, @companyId, @eventId, 'inventory_movement', @movementId, 'inventory.receipt.posted', @payload, @occurredAt)",
+                db.Connection,
+                db.Transaction))
+            {
+                outbox.Parameters.AddWithValue("tenantId", context.TenantId);
+                outbox.Parameters.AddWithValue("companyId", context.CompanyId);
+                outbox.Parameters.AddWithValue("eventId", Guid.NewGuid());
+                outbox.Parameters.AddWithValue("movementId", movementId);
+                outbox.Parameters.Add("payload", NpgsqlDbType.Jsonb).Value = eventPayload;
+                outbox.Parameters.AddWithValue("occurredAt", occurredAt);
+                await outbox.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await CompanyChangeLogWriter.AppendAsync(
+                db.Connection,
+                db.Transaction,
+                context.TenantId,
+                context.CompanyId,
+                "inventory_movement",
+                movementId,
+                1,
+                "upsert",
+                eventPayload,
+                cancellationToken);
+
+            await using (var saveResult = new NpgsqlCommand(
+                "UPDATE erp_inventory.command_idempotency SET resource_id = @movementId WHERE tenant_id = @tenantId AND idempotency_key = @key",
+                db.Connection,
+                db.Transaction))
+            {
+                saveResult.Parameters.AddWithValue("tenantId", context.TenantId);
+                saveResult.Parameters.AddWithValue("key", transactionId);
+                saveResult.Parameters.AddWithValue("movementId", movementId);
+                await saveResult.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await db.Transaction.CommitAsync(cancellationToken);
+            return Result<InventoryReceiptSummary>.Success(new InventoryReceiptSummary(
+                transactionId, movementId, request.VariantId, request.WarehouseId, request.BinId,
+                request.Quantity, baseUomId, occurredAt, postedAt));
+        }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            return await RollbackWithFailureAsync<InventoryReceiptSummary>(db, "INVENTORY_TRANSACTION_CONFLICT", cancellationToken);
+        }
+    }
+
+    public async Task<Result<InventoryTransferSummary>> PostTransferAsync(
+        TenantContext context,
+        Guid transactionId,
+        string requestHash,
+        PostInventoryTransferRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(context.TenantId, context.CompanyId, cancellationToken);
+        try
+        {
+            // 1. Idempotency reservation with advisory lock
+            await using (var lockCmd = new NpgsqlCommand(
+                "SELECT pg_advisory_xact_lock(hashtext('cmd_idemp:' || @tenantId::text || ':' || @key::text))",
+                db.Connection,
+                db.Transaction))
+            {
+                lockCmd.Parameters.AddWithValue("tenantId", context.TenantId);
+                lockCmd.Parameters.AddWithValue("key", transactionId);
+                await lockCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var reserve = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.command_idempotency (tenant_id, company_id, idempotency_key, command_code, request_hash) VALUES (@tenantId, @companyId, @key, 'inventory.transfer.post', @hash) ON CONFLICT (tenant_id, idempotency_key) DO NOTHING RETURNING idempotency_key",
+                db.Connection,
+                db.Transaction))
+            {
+                reserve.Parameters.AddWithValue("tenantId", context.TenantId);
+                reserve.Parameters.AddWithValue("companyId", context.CompanyId);
+                reserve.Parameters.AddWithValue("key", transactionId);
+                reserve.Parameters.AddWithValue("hash", requestHash);
+                if (await reserve.ExecuteScalarAsync(cancellationToken) is null)
+                {
+                    return await RollbackWithFailureAsync<InventoryTransferSummary>(db, "IDEMPOTENCY_KEY_REUSED", cancellationToken);
+                }
+            }
+
+            // 2. Validate Variant
+            Guid baseUomId;
+            await using (var valVar = new NpgsqlCommand(
+                "SELECT variant.base_uom_id FROM erp_inventory.product_variant AS variant JOIN erp_inventory.product AS product ON product.tenant_id = variant.tenant_id AND product.product_id = variant.product_id WHERE variant.tenant_id = @tenantId AND variant.variant_id = @variantId AND variant.is_active AND product.is_active",
+                db.Connection,
+                db.Transaction))
+            {
+                valVar.Parameters.AddWithValue("tenantId", context.TenantId);
+                valVar.Parameters.AddWithValue("variantId", request.VariantId);
+                var uomResult = await valVar.ExecuteScalarAsync(cancellationToken);
+                if (uomResult is not Guid foundUom)
+                {
+                    return await RollbackWithFailureAsync<InventoryTransferSummary>(db, "VARIANT_NOT_FOUND", cancellationToken);
+                }
+                baseUomId = foundUom;
+            }
+
+            // 3. Check source stock balance
+            decimal sourceOnHand = 0;
+            await using (var checkStock = new NpgsqlCommand(
+                "SELECT on_hand_qty FROM erp_inventory.stock_balance WHERE tenant_id = @tenantId AND company_id = @companyId AND variant_id = @variantId AND warehouse_id = @whId AND bin_id = @binId AND status_code = 'available'",
+                db.Connection,
+                db.Transaction))
+            {
+                checkStock.Parameters.AddWithValue("tenantId", context.TenantId);
+                checkStock.Parameters.AddWithValue("companyId", context.CompanyId);
+                checkStock.Parameters.AddWithValue("variantId", request.VariantId);
+                checkStock.Parameters.AddWithValue("whId", request.SourceWarehouseId);
+                checkStock.Parameters.AddWithValue("binId", request.SourceBinId);
+                var balanceVal = await checkStock.ExecuteScalarAsync(cancellationToken);
+                if (balanceVal is decimal onHand)
+                {
+                    sourceOnHand = onHand;
+                }
+            }
+
+            if (sourceOnHand < request.Quantity)
+            {
+                return await RollbackWithFailureAsync<InventoryTransferSummary>(db, "INSUFFICIENT_STOCK", cancellationToken);
+            }
+
+            // 4. Validate destination bin exists
+            await using (var valDest = new NpgsqlCommand(
+                "SELECT EXISTS (SELECT 1 FROM erp_inventory.stock_bin WHERE tenant_id = @tenantId AND company_id = @companyId AND warehouse_id = @whId AND bin_id = @binId AND is_active)",
+                db.Connection,
+                db.Transaction))
+            {
+                valDest.Parameters.AddWithValue("tenantId", context.TenantId);
+                valDest.Parameters.AddWithValue("companyId", context.CompanyId);
+                valDest.Parameters.AddWithValue("whId", request.DestinationWarehouseId);
+                valDest.Parameters.AddWithValue("binId", request.DestinationBinId);
+                if (await valDest.ExecuteScalarAsync(cancellationToken) as bool? != true)
+                {
+                    return await RollbackWithFailureAsync<InventoryTransferSummary>(db, "DESTINATION_LOCATION_NOT_FOUND", cancellationToken);
+                }
+            }
+
+            var movementId = Guid.NewGuid();
+            var occurredAt = DateTimeOffset.UtcNow;
+            DateTimeOffset postedAt;
+
+            // 5. Insert transfer movement
+            await using (var movementCmd = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.inventory_movement (tenant_id, company_id, movement_id, client_transaction_id, movement_type, occurred_at, created_by, note) VALUES (@tenantId, @companyId, @movementId, @transactionId, 'transfer', @occurredAt, @createdBy, @note) RETURNING posted_at",
+                db.Connection,
+                db.Transaction))
+            {
+                movementCmd.Parameters.AddWithValue("tenantId", context.TenantId);
+                movementCmd.Parameters.AddWithValue("companyId", context.CompanyId);
+                movementCmd.Parameters.AddWithValue("movementId", movementId);
+                movementCmd.Parameters.AddWithValue("transactionId", transactionId);
+                movementCmd.Parameters.AddWithValue("occurredAt", occurredAt);
+                movementCmd.Parameters.AddWithValue("createdBy", context.UserId);
+                movementCmd.Parameters.AddWithValue("note", (object?)request.Note ?? DBNull.Value);
+
+                var postedVal = await movementCmd.ExecuteScalarAsync(cancellationToken);
+                postedAt = postedVal is DateTimeOffset dt ? dt.ToUniversalTime() : DateTimeOffset.UtcNow;
+            }
+
+            // 6. Insert Leg 1 (Source: negative delta)
+            await using (var leg1 = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.inventory_movement_leg (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id, bin_id, status_code, quantity_delta, base_uom_id) VALUES (@tenantId, @companyId, @movementId, 1, @variantId, @whId, @binId, 'available', @qtyDelta, @uomId)",
+                db.Connection,
+                db.Transaction))
+            {
+                leg1.Parameters.AddWithValue("tenantId", context.TenantId);
+                leg1.Parameters.AddWithValue("companyId", context.CompanyId);
+                leg1.Parameters.AddWithValue("movementId", movementId);
+                leg1.Parameters.AddWithValue("variantId", request.VariantId);
+                leg1.Parameters.AddWithValue("whId", request.SourceWarehouseId);
+                leg1.Parameters.AddWithValue("binId", request.SourceBinId);
+                leg1.Parameters.AddWithValue("qtyDelta", -request.Quantity);
+                leg1.Parameters.AddWithValue("uomId", baseUomId);
+                await leg1.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 7. Insert Leg 2 (Destination: positive delta)
+            await using (var leg2 = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.inventory_movement_leg (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id, bin_id, status_code, quantity_delta, base_uom_id) VALUES (@tenantId, @companyId, @movementId, 2, @variantId, @whId, @binId, 'available', @qtyDelta, @uomId)",
+                db.Connection,
+                db.Transaction))
+            {
+                leg2.Parameters.AddWithValue("tenantId", context.TenantId);
+                leg2.Parameters.AddWithValue("companyId", context.CompanyId);
+                leg2.Parameters.AddWithValue("movementId", movementId);
+                leg2.Parameters.AddWithValue("variantId", request.VariantId);
+                leg2.Parameters.AddWithValue("whId", request.DestinationWarehouseId);
+                leg2.Parameters.AddWithValue("binId", request.DestinationBinId);
+                leg2.Parameters.AddWithValue("qtyDelta", request.Quantity);
+                leg2.Parameters.AddWithValue("uomId", baseUomId);
+                await leg2.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 8. Update source balance
+            await using (var updateSource = new NpgsqlCommand(
+                "UPDATE erp_inventory.stock_balance SET on_hand_qty = on_hand_qty - @qty, updated_at = now() WHERE tenant_id = @tenantId AND company_id = @companyId AND variant_id = @variantId AND warehouse_id = @whId AND bin_id = @binId AND status_code = 'available'",
+                db.Connection,
+                db.Transaction))
+            {
+                updateSource.Parameters.AddWithValue("tenantId", context.TenantId);
+                updateSource.Parameters.AddWithValue("companyId", context.CompanyId);
+                updateSource.Parameters.AddWithValue("variantId", request.VariantId);
+                updateSource.Parameters.AddWithValue("whId", request.SourceWarehouseId);
+                updateSource.Parameters.AddWithValue("binId", request.SourceBinId);
+                updateSource.Parameters.AddWithValue("qty", request.Quantity);
+                await updateSource.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 9. Upsert destination balance
+            await using (var upsertDest = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.stock_balance (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, on_hand_qty, balance_id) VALUES (@tenantId, @companyId, @variantId, @whId, @binId, 'available', @qty, @balanceId) ON CONFLICT (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, (COALESCE(lot_id, '00000000-0000-0000-0000-000000000000'::uuid))) DO UPDATE SET on_hand_qty = erp_inventory.stock_balance.on_hand_qty + EXCLUDED.on_hand_qty, updated_at = now()",
+                db.Connection,
+                db.Transaction))
+            {
+                upsertDest.Parameters.AddWithValue("tenantId", context.TenantId);
+                upsertDest.Parameters.AddWithValue("companyId", context.CompanyId);
+                upsertDest.Parameters.AddWithValue("variantId", request.VariantId);
+                upsertDest.Parameters.AddWithValue("whId", request.DestinationWarehouseId);
+                upsertDest.Parameters.AddWithValue("binId", request.DestinationBinId);
+                upsertDest.Parameters.AddWithValue("qty", request.Quantity);
+                upsertDest.Parameters.AddWithValue("balanceId", Guid.NewGuid());
+                await upsertDest.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 10. Outbox event
+            var eventPayload = JsonSerializer.Serialize(new
+            {
+                transactionId,
+                movementId,
+                request.VariantId,
+                request.SourceWarehouseId,
+                request.SourceBinId,
+                request.DestinationWarehouseId,
+                request.DestinationBinId,
+                request.Quantity,
+                unitOfMeasureId = baseUomId,
+                occurredAt,
+                postedAt,
+            });
+            await using (var outbox = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.outbox_event (tenant_id, company_id, event_id, aggregate_type, aggregate_id, event_type, payload, occurred_at) VALUES (@tenantId, @companyId, @eventId, 'inventory_movement', @movementId, 'inventory.transfer.posted', @payload, @occurredAt)",
+                db.Connection,
+                db.Transaction))
+            {
+                outbox.Parameters.AddWithValue("tenantId", context.TenantId);
+                outbox.Parameters.AddWithValue("companyId", context.CompanyId);
+                outbox.Parameters.AddWithValue("eventId", Guid.NewGuid());
+                outbox.Parameters.AddWithValue("movementId", movementId);
+                outbox.Parameters.Add("payload", NpgsqlDbType.Jsonb).Value = eventPayload;
+                outbox.Parameters.AddWithValue("occurredAt", occurredAt);
+                await outbox.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 11. Update idempotency record
+            await using (var saveResult = new NpgsqlCommand(
+                "UPDATE erp_inventory.command_idempotency SET resource_id = @movementId WHERE tenant_id = @tenantId AND idempotency_key = @key",
+                db.Connection,
+                db.Transaction))
+            {
+                saveResult.Parameters.AddWithValue("tenantId", context.TenantId);
+                saveResult.Parameters.AddWithValue("key", transactionId);
+                saveResult.Parameters.AddWithValue("movementId", movementId);
+                await saveResult.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 12. Write to sync change_log so offline clients can download this transfer.
+            await CompanyChangeLogWriter.AppendAsync(
+                db.Connection,
+                db.Transaction,
+                context.TenantId,
+                context.CompanyId,
+                "inventory_movement",
+                movementId,
+                1,
+                "upsert",
+                eventPayload,
+                cancellationToken);
+
+            await db.Transaction.CommitAsync(cancellationToken);
+            return Result<InventoryTransferSummary>.Success(new InventoryTransferSummary(
+                transactionId, movementId, request.VariantId, request.SourceWarehouseId, request.SourceBinId,
+                request.DestinationWarehouseId, request.DestinationBinId, request.Quantity, baseUomId, postedAt));
+        }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            return await RollbackWithFailureAsync<InventoryTransferSummary>(db, "INVENTORY_TRANSACTION_CONFLICT", cancellationToken);
+        }
+    }
+
+    public async Task<Result<InventoryAdjustmentSummary>> PostAdjustmentAsync(
+        TenantContext context,
+        Guid transactionId,
+        string requestHash,
+        PostInventoryAdjustmentRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(context.TenantId, context.CompanyId, cancellationToken);
+        try
+        {
+            // 1. Idempotency reservation with advisory lock
+            await using (var lockCmd = new NpgsqlCommand(
+                "SELECT pg_advisory_xact_lock(hashtext('cmd_idemp:' || @tenantId::text || ':' || @key::text))",
+                db.Connection,
+                db.Transaction))
+            {
+                lockCmd.Parameters.AddWithValue("tenantId", context.TenantId);
+                lockCmd.Parameters.AddWithValue("key", transactionId);
+                await lockCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var reserve = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.command_idempotency (tenant_id, company_id, idempotency_key, command_code, request_hash) VALUES (@tenantId, @companyId, @key, 'inventory.adjustment.post', @hash) ON CONFLICT (tenant_id, idempotency_key) DO NOTHING RETURNING idempotency_key",
+                db.Connection,
+                db.Transaction))
+            {
+                reserve.Parameters.AddWithValue("tenantId", context.TenantId);
+                reserve.Parameters.AddWithValue("companyId", context.CompanyId);
+                reserve.Parameters.AddWithValue("key", transactionId);
+                reserve.Parameters.AddWithValue("hash", requestHash);
+                if (await reserve.ExecuteScalarAsync(cancellationToken) is null)
+                {
+                    return await RollbackWithFailureAsync<InventoryAdjustmentSummary>(db, "IDEMPOTENCY_KEY_REUSED", cancellationToken);
+                }
+            }
+
+            // 2. Validate Variant
+            Guid baseUomId;
+            await using (var valVar = new NpgsqlCommand(
+                "SELECT variant.base_uom_id FROM erp_inventory.product_variant AS variant JOIN erp_inventory.product AS product ON product.tenant_id = variant.tenant_id AND product.product_id = variant.product_id WHERE variant.tenant_id = @tenantId AND variant.variant_id = @variantId AND variant.is_active AND product.is_active",
+                db.Connection,
+                db.Transaction))
+            {
+                valVar.Parameters.AddWithValue("tenantId", context.TenantId);
+                valVar.Parameters.AddWithValue("variantId", request.VariantId);
+                var uomResult = await valVar.ExecuteScalarAsync(cancellationToken);
+                if (uomResult is not Guid foundUom)
+                {
+                    return await RollbackWithFailureAsync<InventoryAdjustmentSummary>(db, "VARIANT_NOT_FOUND", cancellationToken);
+                }
+                baseUomId = foundUom;
+            }
+
+            // 3. If negative adjustment, verify available stock
+            if (request.QuantityDelta < 0)
+            {
+                decimal currentStock = 0;
+                await using (var checkStock = new NpgsqlCommand(
+                    "SELECT on_hand_qty FROM erp_inventory.stock_balance WHERE tenant_id = @tenantId AND company_id = @companyId AND variant_id = @variantId AND warehouse_id = @whId AND bin_id = @binId AND status_code = 'available'",
+                    db.Connection,
+                    db.Transaction))
+                {
+                    checkStock.Parameters.AddWithValue("tenantId", context.TenantId);
+                    checkStock.Parameters.AddWithValue("companyId", context.CompanyId);
+                    checkStock.Parameters.AddWithValue("variantId", request.VariantId);
+                    checkStock.Parameters.AddWithValue("whId", request.WarehouseId);
+                    checkStock.Parameters.AddWithValue("binId", request.BinId);
+                    var balanceVal = await checkStock.ExecuteScalarAsync(cancellationToken);
+                    if (balanceVal is decimal onHand)
+                    {
+                        currentStock = onHand;
+                    }
+                }
+
+                if (currentStock + request.QuantityDelta < 0)
+                {
+                    return await RollbackWithFailureAsync<InventoryAdjustmentSummary>(db, "INSUFFICIENT_STOCK", cancellationToken);
+                }
+            }
+
+            var movementId = Guid.NewGuid();
+            var occurredAt = DateTimeOffset.UtcNow;
+            DateTimeOffset postedAt;
+
+            // 4. Insert adjustment movement
+            var note = $"Reason: {request.ReasonCode}. {request.Note}".Trim();
+            await using (var movementCmd = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.inventory_movement (tenant_id, company_id, movement_id, client_transaction_id, movement_type, occurred_at, created_by, note) VALUES (@tenantId, @companyId, @movementId, @transactionId, 'adjustment', @occurredAt, @createdBy, @note) RETURNING posted_at",
+                db.Connection,
+                db.Transaction))
+            {
+                movementCmd.Parameters.AddWithValue("tenantId", context.TenantId);
+                movementCmd.Parameters.AddWithValue("companyId", context.CompanyId);
+                movementCmd.Parameters.AddWithValue("movementId", movementId);
+                movementCmd.Parameters.AddWithValue("transactionId", transactionId);
+                movementCmd.Parameters.AddWithValue("occurredAt", occurredAt);
+                movementCmd.Parameters.AddWithValue("createdBy", context.UserId);
+                movementCmd.Parameters.AddWithValue("note", note);
+
+                var postedVal = await movementCmd.ExecuteScalarAsync(cancellationToken);
+                postedAt = postedVal is DateTimeOffset dt ? dt.ToUniversalTime() : DateTimeOffset.UtcNow;
+            }
+
+            // 5. Insert Leg
+            await using (var leg = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.inventory_movement_leg (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id, bin_id, status_code, quantity_delta, base_uom_id) VALUES (@tenantId, @companyId, @movementId, 1, @variantId, @whId, @binId, 'available', @qtyDelta, @uomId)",
+                db.Connection,
+                db.Transaction))
+            {
+                leg.Parameters.AddWithValue("tenantId", context.TenantId);
+                leg.Parameters.AddWithValue("companyId", context.CompanyId);
+                leg.Parameters.AddWithValue("movementId", movementId);
+                leg.Parameters.AddWithValue("variantId", request.VariantId);
+                leg.Parameters.AddWithValue("whId", request.WarehouseId);
+                leg.Parameters.AddWithValue("binId", request.BinId);
+                leg.Parameters.AddWithValue("qtyDelta", request.QuantityDelta);
+                leg.Parameters.AddWithValue("uomId", baseUomId);
+                await leg.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 6. Upsert balance
+            await using (var upsertBalance = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.stock_balance (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, on_hand_qty, balance_id) VALUES (@tenantId, @companyId, @variantId, @whId, @binId, 'available', @qtyDelta, @balanceId) ON CONFLICT (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, (COALESCE(lot_id, '00000000-0000-0000-0000-000000000000'::uuid))) DO UPDATE SET on_hand_qty = erp_inventory.stock_balance.on_hand_qty + EXCLUDED.on_hand_qty, updated_at = now()",
+                db.Connection,
+                db.Transaction))
+            {
+                upsertBalance.Parameters.AddWithValue("tenantId", context.TenantId);
+                upsertBalance.Parameters.AddWithValue("companyId", context.CompanyId);
+                upsertBalance.Parameters.AddWithValue("variantId", request.VariantId);
+                upsertBalance.Parameters.AddWithValue("whId", request.WarehouseId);
+                upsertBalance.Parameters.AddWithValue("binId", request.BinId);
+                upsertBalance.Parameters.AddWithValue("qtyDelta", request.QuantityDelta);
+                upsertBalance.Parameters.AddWithValue("balanceId", Guid.NewGuid());
+                await upsertBalance.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 7. Outbox event
+            var eventPayload = JsonSerializer.Serialize(new
+            {
+                transactionId,
+                movementId,
+                request.VariantId,
+                request.WarehouseId,
+                request.BinId,
+                request.QuantityDelta,
+                unitOfMeasureId = baseUomId,
+                request.ReasonCode,
+                occurredAt,
+                postedAt,
+            });
+            await using (var outbox = new NpgsqlCommand(
+                "INSERT INTO erp_inventory.outbox_event (tenant_id, company_id, event_id, aggregate_type, aggregate_id, event_type, payload, occurred_at) VALUES (@tenantId, @companyId, @eventId, 'inventory_movement', @movementId, 'inventory.adjustment.posted', @payload, @occurredAt)",
+                db.Connection,
+                db.Transaction))
+            {
+                outbox.Parameters.AddWithValue("tenantId", context.TenantId);
+                outbox.Parameters.AddWithValue("companyId", context.CompanyId);
+                outbox.Parameters.AddWithValue("eventId", Guid.NewGuid());
+                outbox.Parameters.AddWithValue("movementId", movementId);
+                outbox.Parameters.Add("payload", NpgsqlDbType.Jsonb).Value = eventPayload;
+                outbox.Parameters.AddWithValue("occurredAt", occurredAt);
+                await outbox.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 8. Update idempotency
+            await using (var saveResult = new NpgsqlCommand(
+                "UPDATE erp_inventory.command_idempotency SET resource_id = @movementId WHERE tenant_id = @tenantId AND idempotency_key = @key",
+                db.Connection,
+                db.Transaction))
+            {
+                saveResult.Parameters.AddWithValue("tenantId", context.TenantId);
+                saveResult.Parameters.AddWithValue("key", transactionId);
+                saveResult.Parameters.AddWithValue("movementId", movementId);
+                await saveResult.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 9. Write to sync change_log so offline clients can download this adjustment.
+            await CompanyChangeLogWriter.AppendAsync(
+                db.Connection,
+                db.Transaction,
+                context.TenantId,
+                context.CompanyId,
+                "inventory_movement",
+                movementId,
+                1,
+                "upsert",
+                eventPayload,
+                cancellationToken);
+
+            await db.Transaction.CommitAsync(cancellationToken);
+            return Result<InventoryAdjustmentSummary>.Success(new InventoryAdjustmentSummary(
+                transactionId, movementId, request.VariantId, request.WarehouseId, request.BinId,
+                request.QuantityDelta, baseUomId, request.ReasonCode, postedAt));
+        }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            return await RollbackWithFailureAsync<InventoryAdjustmentSummary>(db, "INVENTORY_TRANSACTION_CONFLICT", cancellationToken);
+        }
+    }
+
+    private static readonly string VariantSelect = """
+        SELECT variant.variant_id, variant.product_id, product.product_code, product.name,
+               variant.sku, variant.variant_name, variant.base_uom_id, uom.code,
+               variant.tracking_mode, variant.costing_method, variant.is_active
+        FROM erp_inventory.product_variant AS variant
+        JOIN erp_inventory.product AS product
+          ON product.tenant_id = variant.tenant_id AND product.product_id = variant.product_id
+        JOIN erp_inventory.unit_of_measure AS uom
+          ON uom.tenant_id = variant.tenant_id AND uom.uom_id = variant.base_uom_id
+        """;
+
+    private static async Task<ProductVariantSummary?> FindVariantAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid tenantId,
+        string sku,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(VariantSelect + " WHERE variant.tenant_id = @tenantId AND variant.sku = @sku", connection, transaction);
+        command.Parameters.AddWithValue("tenantId", tenantId);
+        command.Parameters.AddWithValue("sku", sku);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadVariant(reader) : null;
+    }
+
+    private static async Task<(string CommandCode, string RequestHash, InventoryReceiptSummary? Receipt)?> FindReceiptByKeyAsync(
+        DbScope db,
+        TenantContext context,
+        Guid transactionId,
+        CancellationToken cancellationToken)
+    {
+        Guid? movementId;
+        string commandCode;
+        string requestHash;
+        await using (var command = new NpgsqlCommand(
+            "SELECT command_code, request_hash, resource_id FROM erp_inventory.command_idempotency WHERE tenant_id = @tenantId AND idempotency_key = @key FOR UPDATE",
+            db.Connection,
+            db.Transaction))
+        {
+            command.Parameters.AddWithValue("tenantId", context.TenantId);
+            command.Parameters.AddWithValue("key", transactionId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return null;
+            commandCode = reader.GetString(0);
+            requestHash = reader.GetString(1).Trim();
+            movementId = reader.IsDBNull(2) ? null : reader.GetGuid(2);
+        }
+
+        if (movementId is null) return (commandCode, requestHash, null);
+        await using var findMovement = new NpgsqlCommand(
+            "SELECT movement.movement_id, movement.occurred_at, movement.posted_at, leg.variant_id, leg.warehouse_id, leg.bin_id, leg.quantity_delta, leg.base_uom_id FROM erp_inventory.inventory_movement AS movement JOIN erp_inventory.inventory_movement_leg AS leg ON leg.tenant_id = movement.tenant_id AND leg.company_id = movement.company_id AND leg.movement_id = movement.movement_id AND leg.leg_number = 1 WHERE movement.tenant_id = @tenantId AND movement.company_id = @companyId AND movement.movement_id = @movementId AND movement.client_transaction_id = @transactionId",
+            db.Connection,
+            db.Transaction);
+        findMovement.Parameters.AddWithValue("tenantId", context.TenantId);
+        findMovement.Parameters.AddWithValue("companyId", context.CompanyId);
+        findMovement.Parameters.AddWithValue("movementId", movementId.Value);
+        findMovement.Parameters.AddWithValue("transactionId", transactionId);
+        await using var movementReader = await findMovement.ExecuteReaderAsync(cancellationToken);
+        if (!await movementReader.ReadAsync(cancellationToken)) return (commandCode, requestHash, null);
+        var receipt = new InventoryReceiptSummary(
+            transactionId,
+            movementReader.GetGuid(0),
+            movementReader.GetGuid(3),
+            movementReader.GetGuid(4),
+            movementReader.GetGuid(5),
+            movementReader.GetDecimal(6),
+            movementReader.GetGuid(7),
+            movementReader.GetFieldValue<DateTimeOffset>(1),
+            movementReader.GetFieldValue<DateTimeOffset>(2));
+        return (commandCode, requestHash, receipt);
+    }
+
+    private async Task<DbScope> OpenScopeAsync(Guid tenantId, Guid? companyId, CancellationToken cancellationToken)
+    {
+        var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        try
+        {
+            var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(
+                "SELECT set_config('app.tenant_id', @tenantId, true), set_config('app.company_id', @companyId, true)",
+                connection,
+                transaction);
+            command.Parameters.AddWithValue("tenantId", tenantId.ToString());
+            command.Parameters.AddWithValue("companyId", companyId?.ToString() ?? string.Empty);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            return new DbScope(connection, transaction);
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+    }
+
+    private static async Task<Result<T>> RollbackWithFailureAsync<T>(
+        DbScope db,
+        string error,
+        CancellationToken cancellationToken)
+    {
+        await db.Transaction.RollbackAsync(cancellationToken);
+        return Result<T>.Failure(error);
+    }
+
+    private static void AddNullableUuid(NpgsqlCommand command, string name, Guid? value) =>
+        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Uuid)
+        {
+            Value = (object?)value ?? DBNull.Value,
+        });
+
+    private static UnitOfMeasureSummary ReadUnit(NpgsqlDataReader reader) => new(
+        reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt16(4));
+
+    private static ProductVariantSummary ReadVariant(NpgsqlDataReader reader) => new(
+        reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
+        reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetGuid(6), reader.GetString(7),
+        reader.GetString(8), reader.GetString(9), reader.GetBoolean(10));
+
+    private static WarehouseSummary ReadWarehouse(NpgsqlDataReader reader) => new(
+        reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetBoolean(3));
+
+    private static StockBinSummary ReadBin(NpgsqlDataReader reader) => new(
+        reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetBoolean(4));
+
+    private sealed class DbScope(NpgsqlConnection connection, NpgsqlTransaction transaction) : IAsyncDisposable
+    {
+        public NpgsqlConnection Connection { get; } = connection;
+        public NpgsqlTransaction Transaction { get; } = transaction;
+
+        public async ValueTask DisposeAsync()
+        {
+            await Transaction.DisposeAsync();
+            await Connection.DisposeAsync();
+        }
+    }
+}

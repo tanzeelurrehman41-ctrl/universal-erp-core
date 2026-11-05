@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: universal-erp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: universal_erp
+      POSTGRES_USER: erp_dev
+      POSTGRES_PASSWORD: local_dev_change_me
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - erp_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erp_dev -d universal_erp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  erp_postgres_data:

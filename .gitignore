@@ -1,0 +1,26 @@
+# .NET
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+appsettings.*.Local.json
+
+# IDE
+.idea/
+.vscode/
