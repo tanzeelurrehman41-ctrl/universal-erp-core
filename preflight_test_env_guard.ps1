@@ -266,12 +266,16 @@ function Query-EndpointAttributes($builder, $label) {
 $appAttrs = Query-EndpointAttributes $appBuilder "Application"
 $adminAttrs = Query-EndpointAttributes $adminBuilder "Admin"
 
-# Gate 1: Exact Version 17.11
+# Gate 1: Exact Version 17.11 & Target Database Identity
 if ($appAttrs.Version -notmatch "^PostgreSQL 17\.11\b" -or $adminAttrs.Version -notmatch "^PostgreSQL 17\.11\b") {
     Write-Host "[FAIL-CLOSED] Gate 1: Exact PostgreSQL 17.11 required! Got: '$($appAttrs.Version)'." -ForegroundColor Red
     exit 1
 }
-Write-Host "[PASS] Gate 1: Exact PostgreSQL 17.11 verified on both endpoints." -ForegroundColor Green
+if ($appAttrs.Database -ne $ExpectedDatabase -or $adminAttrs.Database -ne $ExpectedDatabase) {
+    Write-Host "[FAIL-CLOSED] Gate 1: Live database identity violation! Expected '$ExpectedDatabase', got app='$($appAttrs.Database)', admin='$($adminAttrs.Database)'." -ForegroundColor Red
+    exit 1
+}
+Write-Host "[PASS] Gate 1: Exact PostgreSQL 17.11 and live database '$ExpectedDatabase' verified on both endpoints." -ForegroundColor Green
 
 # Gate 7: Operational Cluster Parity
 if ($appAttrs.SystemIdentifier -ne $adminAttrs.SystemIdentifier -or
@@ -315,7 +319,8 @@ $rsa.ImportFromPem((Get-Content -LiteralPath $PublicKeyPath -Raw))
 $sha = [System.Security.Cryptography.SHA256]::Create()
 $pubDer = $rsa.ExportSubjectPublicKeyInfo()
 $pubFp = [BitConverter]::ToString($sha.ComputeHash($pubDer)).Replace("-", "").ToUpperInvariant()
-if ($pubFp -ne $TrustedKeyFingerprint.Trim().ToUpperInvariant()) {
+$normExpected = $TrustedKeyFingerprint.Trim().Replace(":", "").Replace("-", "").ToUpperInvariant()
+if ($pubFp -ne $normExpected) {
     Write-Host "[FAIL-CLOSED] Gate 10: Public key fingerprint mismatch! Expected: $TrustedKeyFingerprint, Got: $pubFp" -ForegroundColor Red
     exit 1
 }
