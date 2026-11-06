@@ -22,6 +22,7 @@ DO $$
 DECLARE 
     s text;
     r RECORD;
+    rol text;
 BEGIN
     FOR s IN SELECT unnest(ARRAY['sync', 'erp_inventory', 'erp_purchasing', 'erp_sales', 'finance', 'platform', 'identity', 'organization', 'authorization', 'audit'])
     LOOP
@@ -31,8 +32,8 @@ BEGIN
         EXECUTE format('REVOKE ALL ON ALL ROUTINES IN SCHEMA %I FROM PUBLIC;', s);
     END LOOP;
 
-    -- Sensitive Schemas: Explicitly REVOKE ALL from erp_app on existing objects in authorization and audit
-    FOR s IN SELECT unnest(ARRAY['authorization', 'audit'])
+    -- Explicitly REVOKE ALL from erp_app on existing objects in all 10 application schemas + public to clear dump-inherited over-grants
+    FOR s IN SELECT unnest(ARRAY['sync', 'erp_inventory', 'erp_purchasing', 'erp_sales', 'finance', 'platform', 'identity', 'organization', 'authorization', 'audit', 'public'])
     LOOP
         EXECUTE format('REVOKE ALL ON SCHEMA %I FROM erp_app CASCADE;', s);
         EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM erp_app CASCADE;', s);
@@ -57,49 +58,49 @@ BEGIN
     END LOOP;
 
     -- A. Global Default Privilege Neutralization (defaclnamespace = 0)
-    FOR r IN SELECT unnest(ARRAY['test_bootstrap_admin', 'erp_dev', 'postgres'])
+    FOR rol IN SELECT unnest(ARRAY['test_bootstrap_admin', 'erp_dev', 'postgres'])
     LOOP
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE ALL ON TABLES FROM PUBLIC, erp_app;', r);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE ALL ON SEQUENCES FROM PUBLIC, erp_app;', r);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE ALL ON ROUTINES FROM PUBLIC, erp_app;', r);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE ALL ON TYPES FROM PUBLIC, erp_app;', r);
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE ALL ON TABLES FROM PUBLIC, erp_app;', rol);
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE ALL ON SEQUENCES FROM PUBLIC, erp_app;', rol);
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE ALL ON ROUTINES FROM PUBLIC, erp_app;', rol);
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE ALL ON TYPES FROM PUBLIC, erp_app;', rol);
 
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT ALL ON TABLES TO erp_dev;', r);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT ALL ON SEQUENCES TO erp_dev;', r);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT ALL ON ROUTINES TO erp_dev;', r);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT ALL ON TYPES TO erp_dev;', r);
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT ALL ON TABLES TO erp_dev;', rol);
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT ALL ON SEQUENCES TO erp_dev;', rol);
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT ALL ON ROUTINES TO erp_dev;', rol);
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT ALL ON TYPES TO erp_dev;', rol);
     END LOOP;
 
     -- B. Per-Schema Default Privileges in Operational Domain Schemas + public
     FOR s IN SELECT unnest(ARRAY['sync', 'erp_inventory', 'erp_purchasing', 'erp_sales', 'finance', 'platform', 'identity', 'organization', 'public'])
     LOOP
-        FOR r IN SELECT unnest(ARRAY['test_bootstrap_admin', 'erp_dev', 'postgres'])
+        FOR rol IN SELECT unnest(ARRAY['test_bootstrap_admin', 'erp_dev', 'postgres'])
         LOOP
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TABLES FROM PUBLIC, erp_app;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM PUBLIC, erp_app;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON ROUTINES FROM PUBLIC, erp_app;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TYPES FROM PUBLIC, erp_app;', r, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TABLES FROM PUBLIC, erp_app;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM PUBLIC, erp_app;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON ROUTINES FROM PUBLIC, erp_app;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TYPES FROM PUBLIC, erp_app;', rol, s);
 
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON TABLES TO erp_dev;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON SEQUENCES TO erp_dev;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON ROUTINES TO erp_dev;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT USAGE ON TYPES TO erp_dev, erp_app;', r, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON TABLES TO erp_dev;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON SEQUENCES TO erp_dev;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON ROUTINES TO erp_dev;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT USAGE ON TYPES TO erp_dev, erp_app;', rol, s);
         END LOOP;
     END LOOP;
 
     -- C. Sensitive Schemas Default Privileges: in 'authorization' and 'audit'
     FOR s IN SELECT unnest(ARRAY['authorization', 'audit'])
     LOOP
-        FOR r IN SELECT unnest(ARRAY['test_bootstrap_admin', 'erp_dev', 'postgres'])
+        FOR rol IN SELECT unnest(ARRAY['test_bootstrap_admin', 'erp_dev', 'postgres'])
         LOOP
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TABLES FROM PUBLIC, erp_app;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM PUBLIC, erp_app;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON ROUTINES FROM PUBLIC, erp_app;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TYPES FROM PUBLIC, erp_app;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON TABLES TO erp_dev;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON SEQUENCES TO erp_dev;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON ROUTINES TO erp_dev;', r, s);
-            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON TYPES TO erp_dev;', r, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TABLES FROM PUBLIC, erp_app;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM PUBLIC, erp_app;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON ROUTINES FROM PUBLIC, erp_app;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TYPES FROM PUBLIC, erp_app;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON TABLES TO erp_dev;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON SEQUENCES TO erp_dev;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON ROUTINES TO erp_dev;', rol, s);
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL ON TYPES TO erp_dev;', rol, s);
         END LOOP;
     END LOOP;
 END $$;
@@ -220,14 +221,30 @@ END $$;
 REVOKE ALL ON erp_sales.sales_order, erp_sales.sales_order_line, 
               erp_sales.sales_invoice, erp_sales.sales_invoice_line, 
               erp_sales.outbox_event FROM erp_app;
-REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON erp_sales.customer FROM erp_app;
+REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON erp_sales.customer FROM erp_app;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON erp_inventory.warehouse FROM erp_app;
 
--- Explicitly enforce ZERO privileges for erp_app in authorization and audit schemas during Phase 4
+-- Explicitly enforce ZERO privileges for erp_app in authorization and audit schemas during Phase 5 / Rev23
 REVOKE ALL ON ALL TABLES IN SCHEMA "authorization", audit FROM erp_app;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA "authorization", audit FROM erp_app;
 REVOKE ALL ON ALL ROUTINES IN SCHEMA "authorization", audit FROM erp_app;
 REVOKE ALL ON SCHEMA "authorization", audit FROM erp_app;
+
+-- Explicitly revoke administrative routines in pg_catalog from PUBLIC and erp_app
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN 
+        SELECT p.proname, pg_get_function_identity_arguments(p.oid) AS args
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'pg_catalog'
+          AND p.proname IN ('pg_terminate_backend', 'pg_cancel_backend', 'pg_reload_conf', 'pg_rotate_logfile', 'pg_read_file', 'pg_read_binary_file', 'pg_write_file')
+    LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION pg_catalog.%I(%s) FROM PUBLIC, erp_app;', r.proname, r.args);
+    END LOOP;
+END $$;
 
 -- 6. Configure erp_app Least-Privilege Permissions (Authoritative 35-Table Matrix)
 GRANT USAGE ON SCHEMA sync, erp_inventory, erp_purchasing, erp_sales, finance, platform, identity, organization TO erp_app;
@@ -235,7 +252,8 @@ GRANT USAGE ON SCHEMA sync, erp_inventory, erp_purchasing, erp_sales, finance, p
 -- sync schema (7 tables + 1 sequence)
 GRANT SELECT, INSERT, UPDATE ON sync.operation_inbox, sync.operation_conflicts, sync.company_change_counters TO erp_app;
 GRANT SELECT, INSERT ON sync.change_log TO erp_app;
-GRANT SELECT ON sync.device_company_scopes, sync.device_location_scopes, sync.offline_grants TO erp_app;
+GRANT SELECT, INSERT, UPDATE ON sync.device_company_scopes, sync.offline_grants TO erp_app; -- Migration 010 L6-7
+GRANT SELECT ON sync.device_location_scopes TO erp_app;
 GRANT USAGE, SELECT ON SEQUENCE sync.change_log_change_sequence_seq TO erp_app;
 
 -- erp_inventory schema (11 tables)
@@ -249,15 +267,16 @@ GRANT SELECT ON erp_inventory.warehouse, erp_inventory.stock_bin, erp_inventory.
 GRANT SELECT, INSERT, UPDATE ON erp_purchasing.outbox_event TO erp_app;
 GRANT SELECT ON erp_purchasing.goods_received_note TO erp_app;
 
--- erp_sales schema (1 customer table read-only; 5 order/invoice tables STRICTLY DENIED)
-GRANT SELECT ON erp_sales.customer TO erp_app;
+-- erp_sales schema (Customer write is strictly disposable test-fixture adjustment; orders denied)
+GRANT SELECT, INSERT ON erp_sales.customer TO erp_app; -- Disposable test-fixture seed adjustment only (Migration 015 unapplied)
 
 -- finance schema (4 tables)
 GRANT SELECT ON finance.fiscal_periods, finance.accounts TO erp_app;
 GRANT SELECT, INSERT ON finance.journals, finance.journal_lines TO erp_app;
 
--- identity schema (1 table-level grant)
-GRANT SELECT ON identity.devices TO erp_app;
+-- identity schema (Table-level grants)
+GRANT SELECT, INSERT, UPDATE ON identity.devices TO erp_app; -- Migration 010 L6-7
+GRANT SELECT, INSERT, UPDATE ON identity.company_memberships TO erp_app; -- Migration 012 L80-84
 
 -- Column-Restricted Tables (4 tables)
 GRANT SELECT (id, status) ON platform.tenants TO erp_app;

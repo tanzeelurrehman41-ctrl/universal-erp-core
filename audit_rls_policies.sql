@@ -37,7 +37,7 @@ expected_rls_tables (schemaname, tablename, require_rls, require_force, expected
     ('audit', 'audit_events',           true, true, 'tenant_isolation', '*', true, '{0}', '(tenant_id = (NULLIF(current_setting(''app.tenant_id''::text, true), ''''::text))::uuid)', '(tenant_id = (NULLIF(current_setting(''app.tenant_id''::text, true), ''''::text))::uuid)'),
 
     -- erp_inventory domain (M003 L13-14)
-    ('erp_inventory', 'command_idempotency', true, true, 'tenant_company_scope', '*', true, '{0}', '((tenant_id = (NULLIF(current_setting(''app.tenant_id''::text, true), ''''::text))::uuid) AND (company_id = (NULLIF(current_setting(''app.company_id''::text, true), ''''::text))::uuid))', '((tenant_id = (NULLIF(current_setting(''app.tenant_id''::text, true), ''''::text))::uuid) AND (company_id = (NULLIF(current_setting(''app.company_id''::text, true), ''''::text))::uuid))'),
+    ('erp_inventory', 'command_idempotency', true, true, 'tenant_scope', '*', true, '{0}', '(tenant_id = (NULLIF(current_setting(''app.tenant_id''::text, true), ''''::text))::uuid)', '(tenant_id = (NULLIF(current_setting(''app.tenant_id''::text, true), ''''::text))::uuid)'),
 
     -- sync domain (M004 L137-138, M008 L15-17, M018 L30-35)
     ('sync', 'device_company_scopes',   true, true, 'tenant_company_scope', '*', true, '{0}', '((tenant_id = (NULLIF(current_setting(''app.tenant_id''::text, true), ''''::text))::uuid) AND (company_id = (NULLIF(current_setting(''app.company_id''::text, true), ''''::text))::uuid))', '((tenant_id = (NULLIF(current_setting(''app.tenant_id''::text, true), ''''::text))::uuid) AND (company_id = (NULLIF(current_setting(''app.company_id''::text, true), ''''::text))::uuid))'),

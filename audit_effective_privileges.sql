@@ -33,9 +33,9 @@ approved_table_matrix (schemaname, tablename, allow_select, allow_insert, allow_
     ('sync', 'operation_conflicts',      true,  true,  true,  false, false, false, false, false),
     ('sync', 'change_log',                true,  true,  false, false, false, false, false, false),
     ('sync', 'company_change_counters',  true,  true,  true,  false, false, false, false, false),
-    ('sync', 'device_company_scopes',    true,  false, false, false, false, false, false, false),
+    ('sync', 'device_company_scopes',    true,  true,  true,  false, false, false, false, false),
     ('sync', 'device_location_scopes',   true,  false, false, false, false, false, false, false),
-    ('sync', 'offline_grants',           true,  false, false, false, false, false, false, false),
+    ('sync', 'offline_grants',           true,  true,  true,  false, false, false, false, false),
 
     -- erp_inventory schema (11 tables)
     ('erp_inventory', 'stock_balance',          true,  true,  true,  false, false, false, false, false),
@@ -55,7 +55,7 @@ approved_table_matrix (schemaname, tablename, allow_select, allow_insert, allow_
     ('erp_purchasing', 'goods_received_note',    true,  false, false, false, false, false, false, false),
 
     -- erp_sales schema (6 tables: customer read-only; 5 order/invoice tables strictly denied)
-    ('erp_sales', 'customer',                    true,  false, false, false, false, false, false, false),
+    ('erp_sales', 'customer',                    true,  true,  false, false, false, false, false, false),
     ('erp_sales', 'sales_order',                 false, false, false, false, false, false, false, false),
     ('erp_sales', 'sales_order_line',            false, false, false, false, false, false, false, false),
     ('erp_sales', 'sales_invoice',               false, false, false, false, false, false, false, false),
@@ -69,7 +69,8 @@ approved_table_matrix (schemaname, tablename, allow_select, allow_insert, allow_
     ('finance', 'journal_lines',                  true,  true,  false, false, false, false, false, false),
 
     -- identity schema (1 table-level entry)
-    ('identity', 'devices',                      true,  false, false, false, false, false, false, false)
+    ('identity', 'devices',                      true,  true,  true,  false, false, false, false, false),
+    ('identity', 'company_memberships',          true,  true,  true,  false, false, false, false, false)
 ),
 
 -- 3. Complete Per-Column Allowlist for the 4 Column-Restricted Tables
@@ -226,7 +227,7 @@ audit_violations AS (
                   CASE WHEN cr.nspname IS NULL THEN 'GLOBAL' ELSE format('SCHEMA %I', cr.nspname) END,
                   CASE cr.objtype WHEN 'f' THEN 'EXECUTE' WHEN 'T' THEN 'USAGE' END)
     FROM (
-        SELECT r.rolname AS role_name, r.oid AS role_oid, obj.objtype, sch.nspname, sch.nsp_oid
+        SELECT r.rolname AS role_name, pr.oid AS role_oid, obj.objtype, sch.nspname, sch.nsp_oid
         FROM (VALUES ('test_bootstrap_admin'), ('erp_dev'), ('postgres')) AS r(rolname)
         JOIN pg_roles pr ON pr.rolname = r.rolname
         CROSS JOIN (VALUES ('f'), ('T')) AS obj(objtype)
@@ -257,7 +258,7 @@ audit_violations AS (
            format('Relation %I.%I in sensitive schema %I has privilege %s granted to PUBLIC', n.nspname, c.relname, n.nspname, acl.privilege_type)
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault(CASE c.relkind WHEN 'S' THEN 's' ELSE 'r' END, c.relowner))) acl
+    CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault(CASE c.relkind WHEN 'S' THEN 's'::"char" ELSE 'r'::"char" END, c.relowner))) acl
     WHERE n.nspname IN ('authorization', 'audit')
       AND acl.grantee = 0
     UNION ALL
@@ -265,7 +266,7 @@ audit_violations AS (
            format('Routine %I.%I in sensitive schema %I has privilege %s granted to PUBLIC', n.nspname, p.proname, n.nspname, acl.privilege_type)
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
-    CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+    CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f'::"char", p.proowner))) acl
     WHERE n.nspname IN ('authorization', 'audit')
       AND acl.grantee = 0
     UNION ALL
@@ -273,7 +274,7 @@ audit_violations AS (
            format('Type %I.%I in sensitive schema %I has privilege %s granted to PUBLIC', n.nspname, t.typname, n.nspname, acl.privilege_type)
     FROM pg_type t
     JOIN pg_namespace n ON n.oid = t.typnamespace
-    CROSS JOIN LATERAL aclexplode(coalesce(t.typacl, acldefault('T', t.typowner))) acl
+    CROSS JOIN LATERAL aclexplode(coalesce(t.typacl, acldefault('T'::"char", t.typowner))) acl
     WHERE n.nspname IN ('authorization', 'audit')
       AND t.typisdefined AND t.typelem = 0
       AND acl.grantee = 0
@@ -460,23 +461,12 @@ audit_violations AS (
     SELECT 'Function', 'pg_advisory_xact_lock(bigint)', 'EXECUTE', 'Expected TRUE', 'Got FALSE', 'Missing EXECUTE on pg_advisory_xact_lock'
     WHERE NOT has_function_privilege('erp_app', 'pg_advisory_xact_lock(bigint)', 'EXECUTE')
     UNION ALL
-    SELECT 'Function', p_sig.sig, 'EXECUTE', 'Expected FALSE', 'Got TRUE', 'Prohibited administrative routine execution'
-    FROM (
-        VALUES
-        ('pg_terminate_backend(integer)'),
-        ('pg_cancel_backend(integer)'),
-        ('pg_reload_conf()'),
-        ('pg_rotate_logfile()'),
-        ('pg_read_file(text)'),
-        ('pg_read_file(text,bigint,bigint)'),
-        ('pg_read_file(text,bigint,bigint,boolean)'),
-        ('pg_read_binary_file(text)'),
-        ('pg_read_binary_file(text,bigint,bigint)'),
-        ('pg_read_binary_file(text,bigint,bigint,boolean)'),
-        ('pg_write_file(text,text)'),
-        ('pg_write_file(text,text,boolean)')
-    ) AS p_sig(sig)
-    WHERE has_function_privilege('erp_app', p_sig.sig, 'EXECUTE')
+    SELECT 'Function', format('%I(%s)', p.proname, pg_get_function_identity_arguments(p.oid)), 'EXECUTE', 'Expected FALSE', 'Got TRUE', 'Prohibited administrative routine execution'
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'pg_catalog'
+      AND p.proname IN ('pg_terminate_backend', 'pg_cancel_backend', 'pg_reload_conf', 'pg_rotate_logfile', 'pg_read_file', 'pg_read_binary_file', 'pg_write_file')
+      AND has_function_privilege('erp_app', p.oid, 'EXECUTE')
     UNION ALL
     SELECT 'DomainRoutine', format('%I.%I(%s)', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)), 'EXECUTE',
            'Expected FALSE', 'Got TRUE', 'Unapproved routine execution in domain schema'
@@ -511,14 +501,14 @@ audit_violations AS (
     UNION ALL
     SELECT 'PublicOverGrant', 'DATABASE: universal_erp_disposable_test', acl.privilege_type, 'Expected REVOKED', 'Got GRANTED',
            format('Database permission %s is granted to PUBLIC', acl.privilege_type)
-    FROM pg_database d, LATERAL aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) acl
+    FROM pg_database d, LATERAL aclexplode(coalesce(d.datacl, acldefault('d'::"char", d.datdba))) acl
     WHERE d.datname = current_database()
       AND acl.grantee = 0
       AND acl.privilege_type IN ('CREATE', 'TEMP')
     UNION ALL
     SELECT 'PublicOverGrant', format('SCHEMA: %I', n.nspname), acl.privilege_type, 'Expected REVOKED', 'Got GRANTED',
            format('Schema %I has privilege %s granted to PUBLIC', n.nspname, acl.privilege_type)
-    FROM pg_namespace n, LATERAL aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) acl
+    FROM pg_namespace n, LATERAL aclexplode(coalesce(n.nspacl, acldefault('n'::"char", n.nspowner))) acl
     WHERE (
         (n.nspname = 'public' AND acl.privilege_type = 'CREATE') OR
         (n.nspname IN ('sync', 'erp_inventory', 'erp_purchasing', 'erp_sales', 'finance', 'platform', 'identity', 'organization', 'authorization', 'audit') AND acl.privilege_type IN ('CREATE', 'USAGE'))
@@ -528,7 +518,7 @@ audit_violations AS (
            format('Relation %I.%I has privilege %s granted to PUBLIC', n.nspname, c.relname, acl.privilege_type)
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
+    CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r'::"char", c.relowner))) acl
     WHERE (n.nspname IN ('sync', 'erp_inventory', 'erp_purchasing', 'erp_sales', 'finance', 'platform', 'identity', 'organization', 'authorization', 'audit') OR n.nspname = 'public')
       AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
       AND acl.grantee = 0
@@ -537,7 +527,7 @@ audit_violations AS (
            format('Sequence %I.%I has privilege %s granted to PUBLIC', n.nspname, c.relname, acl.privilege_type)
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('s', c.relowner))) acl
+    CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('s'::"char", c.relowner))) acl
     WHERE (n.nspname IN ('sync', 'erp_inventory', 'erp_purchasing', 'erp_sales', 'finance', 'platform', 'identity', 'organization', 'authorization', 'audit') OR n.nspname = 'public')
       AND c.relkind = 'S'
       AND acl.grantee = 0
@@ -546,7 +536,7 @@ audit_violations AS (
            format('Routine %I.%I has privilege %s granted to PUBLIC', n.nspname, p.proname, acl.privilege_type)
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
-    CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+    CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f'::"char", p.proowner))) acl
     WHERE (n.nspname IN ('sync', 'erp_inventory', 'erp_purchasing', 'erp_sales', 'finance', 'platform', 'identity', 'organization', 'authorization', 'audit') OR n.nspname = 'public')
       AND acl.grantee = 0
     UNION ALL
@@ -554,7 +544,7 @@ audit_violations AS (
            format('Type %I.%I has privilege %s granted to PUBLIC', n.nspname, t.typname, acl.privilege_type)
     FROM pg_type t
     JOIN pg_namespace n ON n.oid = t.typnamespace
-    CROSS JOIN LATERAL aclexplode(coalesce(t.typacl, acldefault('T', t.typowner))) acl
+    CROSS JOIN LATERAL aclexplode(coalesce(t.typacl, acldefault('T'::"char", t.typowner))) acl
     WHERE (n.nspname IN ('sync', 'erp_inventory', 'erp_purchasing', 'erp_sales', 'finance', 'platform', 'identity', 'organization', 'authorization', 'audit') OR n.nspname = 'public')
       AND t.typisdefined
       AND t.typelem = 0

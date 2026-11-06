@@ -21,6 +21,10 @@ local.properties
 !.env.example
 appsettings.*.Local.json
 
+# Test Results
+test-results/
+TestResults/
+
 # IDE
 .idea/
 .vscode/

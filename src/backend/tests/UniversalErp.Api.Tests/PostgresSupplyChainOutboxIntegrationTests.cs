@@ -47,10 +47,11 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
     {
         var builder = new NpgsqlConnectionStringBuilder(connectionString);
         bool isLoopback = builder.Host == "127.0.0.1" || builder.Host == "localhost";
-        if (!isLoopback || builder.Port != 5434 || builder.Database != "universal_erp_disposable_test" || builder.Username != expectedUser)
+        int expectedPort = int.TryParse(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), out var p) ? p : 5434;
+        if (!isLoopback || builder.Port != expectedPort || builder.Database != "universal_erp_disposable_test" || builder.Username != expectedUser)
         {
             throw new InvalidOperationException(
-                $"[FAIL-CLOSED] Connection string targets unapproved endpoint! Expected Host=127.0.0.1, Port=5434, Database=universal_erp_disposable_test, Username={expectedUser}. Got Host={builder.Host}, Port={builder.Port}, Database={builder.Database}, Username={builder.Username}. Accidental connections to production, staging, or development instances are strictly prevented.");
+                $"[FAIL-CLOSED] Connection string targets unapproved endpoint! Expected Host=127.0.0.1, Port={expectedPort}, Database=universal_erp_disposable_test, Username={expectedUser}. Got Host={builder.Host}, Port={builder.Port}, Database={builder.Database}, Username={builder.Username}. Accidental connections to production, staging, or development instances are strictly prevented.");
         }
     }
 
@@ -64,10 +65,11 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
             return env;
         }
 
+        int targetPort = int.TryParse(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), out var p) ? p : 5434;
         var pwd = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_APP");
         if (!string.IsNullOrWhiteSpace(pwd))
         {
-            var cs = $"Host=127.0.0.1;Port=5434;Database=universal_erp_disposable_test;Username=erp_app;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
+            var cs = $"Host=127.0.0.1;Port={targetPort};Database=universal_erp_disposable_test;Username=erp_app;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
             ValidateApprovedEndpoint(cs, expectedUser: "erp_app");
             return cs;
         }
@@ -85,10 +87,11 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
             return env;
         }
 
+        int targetPort = int.TryParse(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), out var p) ? p : 5434;
         var pwd = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_DEV");
         if (!string.IsNullOrWhiteSpace(pwd))
         {
-            var cs = $"Host=127.0.0.1;Port=5434;Database=universal_erp_disposable_test;Username=erp_dev;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
+            var cs = $"Host=127.0.0.1;Port={targetPort};Database=universal_erp_disposable_test;Username=erp_dev;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
             ValidateApprovedEndpoint(cs, expectedUser: "erp_dev");
             return cs;
         }
