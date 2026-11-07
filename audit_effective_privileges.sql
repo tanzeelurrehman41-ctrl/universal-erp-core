@@ -25,7 +25,7 @@ role_ancestry AS (
     JOIN role_ancestry ra ON m.member = ra.roleid
 ),
 
--- 2. Approved Table Privilege Allowlist (31 Core Application Tables)
+-- 2. Approved Table Privilege Allowlist (38 Reconciled Core Application Tables)
 approved_table_matrix (schemaname, tablename, allow_select, allow_insert, allow_update, allow_delete, allow_truncate, allow_references, allow_trigger, allow_maintain) AS (
     VALUES
     -- sync schema (7 tables)
@@ -50,25 +50,33 @@ approved_table_matrix (schemaname, tablename, allow_select, allow_insert, allow_
     ('erp_inventory', 'unit_of_measure',         true,  false, false, false, false, false, false, false),
     ('erp_inventory', 'stock_status',            true,  false, false, false, false, false, false, false),
 
-    -- erp_purchasing schema (2 tables)
+    -- erp_purchasing schema (6 tables)
     ('erp_purchasing', 'outbox_event',           true,  true,  true,  false, false, false, false, false),
-    ('erp_purchasing', 'goods_received_note',    true,  false, false, false, false, false, false, false),
+    ('erp_purchasing', 'goods_received_note',    true,  true,  false, false, false, false, false, false),
+    ('erp_purchasing', 'goods_received_note_line', true, true, false, false, false, false, false, false),
+    ('erp_purchasing', 'supplier',               true,  true,  false, false, false, false, false, false),
+    ('erp_purchasing', 'purchase_order',         true,  true,  true,  false, false, false, false, false),
+    ('erp_purchasing', 'purchase_order_line',    true,  true,  true,  false, false, false, false, false),
 
-    -- erp_sales schema (6 tables: customer read-only; 5 order/invoice tables strictly denied)
-    ('erp_sales', 'customer',                    true,  true,  false, false, false, false, false, false),
-    ('erp_sales', 'sales_order',                 false, false, false, false, false, false, false, false),
-    ('erp_sales', 'sales_order_line',            false, false, false, false, false, false, false, false),
-    ('erp_sales', 'sales_invoice',               false, false, false, false, false, false, false, false),
-    ('erp_sales', 'sales_invoice_line',          false, false, false, false, false, false, false, false),
-    ('erp_sales', 'outbox_event',                false, false, false, false, false, false, false, false),
+    -- erp_sales schema (6 tables)
+    ('erp_sales', 'customer',                    true,  true,  true,  false, false, false, false, false),
+    ('erp_sales', 'sales_order',                 true,  true,  true,  false, false, false, false, false),
+    ('erp_sales', 'sales_order_line',            true,  true,  false, false, false, false, false, false),
+    ('erp_sales', 'sales_invoice',               true,  true,  false, false, false, false, false, false),
+    ('erp_sales', 'sales_invoice_line',          true,  true,  false, false, false, false, false, false),
+    ('erp_sales', 'outbox_event',                true,  true,  false, false, false, false, false, false),
 
     -- finance schema (4 tables)
     ('finance', 'fiscal_periods',                true,  false, false, false, false, false, false, false),
     ('finance', 'accounts',                      true,  false, false, false, false, false, false, false),
     ('finance', 'journals',                      true,  true,  false, false, false, false, false, false),
-    ('finance', 'journal_lines',                  true,  true,  false, false, false, false, false, false),
+    ('finance', 'journal_lines',                 true,  true,  false, false, false, false, false, false),
 
-    -- identity schema (1 table-level entry)
+    -- platform schema (2 global read-only catalog tables)
+    ('platform', 'subscription_plans',           true,  false, false, false, false, false, false, false),
+    ('platform', 'plan_features',                true,  false, false, false, false, false, false, false),
+
+    -- identity schema (2 table-level entries)
     ('identity', 'devices',                      true,  true,  true,  false, false, false, false, false),
     ('identity', 'company_memberships',          true,  true,  true,  false, false, false, false, false)
 ),

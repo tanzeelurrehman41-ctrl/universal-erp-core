@@ -218,10 +218,9 @@ BEGIN
 END $$;
 
 -- 5. Revoke Over-Grants from Baseline Migrations & Enforce Zero-Privilege Baseline for Out-of-Scope Schemas
-REVOKE ALL ON erp_sales.sales_order, erp_sales.sales_order_line, 
-              erp_sales.sales_invoice, erp_sales.sales_invoice_line, 
-              erp_sales.outbox_event FROM erp_app;
-REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON erp_sales.customer FROM erp_app;
+REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA erp_sales FROM erp_app;
+REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA erp_purchasing FROM erp_app;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON platform.subscription_plans, platform.plan_features FROM erp_app;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON erp_inventory.warehouse FROM erp_app;
 
 -- Explicitly enforce ZERO privileges for erp_app in authorization and audit schemas during Phase 5 / Rev23
@@ -246,7 +245,7 @@ BEGIN
     END LOOP;
 END $$;
 
--- 6. Configure erp_app Least-Privilege Permissions (Authoritative 35-Table Matrix)
+-- 6. Configure erp_app Least-Privilege Permissions (Authoritative 38-Table Reconciled Matrix)
 GRANT USAGE ON SCHEMA sync, erp_inventory, erp_purchasing, erp_sales, finance, platform, identity, organization TO erp_app;
 
 -- sync schema (7 tables + 1 sequence)
@@ -263,16 +262,29 @@ GRANT INSERT ON erp_inventory.outbox_event TO erp_app;
 GRANT SELECT ON erp_inventory.warehouse, erp_inventory.stock_bin, erp_inventory.product, 
                 erp_inventory.product_variant, erp_inventory.unit_of_measure, erp_inventory.stock_status TO erp_app;
 
--- erp_purchasing schema (2 tables)
+-- erp_purchasing schema (6 tables)
+GRANT SELECT, INSERT ON erp_purchasing.supplier TO erp_app;
+GRANT SELECT, INSERT, UPDATE ON erp_purchasing.purchase_order TO erp_app;
+GRANT SELECT, INSERT, UPDATE ON erp_purchasing.purchase_order_line TO erp_app;
+GRANT SELECT, INSERT ON erp_purchasing.goods_received_note TO erp_app;
+GRANT SELECT, INSERT ON erp_purchasing.goods_received_note_line TO erp_app;
 GRANT SELECT, INSERT, UPDATE ON erp_purchasing.outbox_event TO erp_app;
-GRANT SELECT ON erp_purchasing.goods_received_note TO erp_app;
 
--- erp_sales schema (Customer write is strictly disposable test-fixture adjustment; orders denied)
-GRANT SELECT, INSERT ON erp_sales.customer TO erp_app; -- Disposable test-fixture seed adjustment only (Migration 015 unapplied)
+-- erp_sales schema (6 tables)
+GRANT SELECT, INSERT, UPDATE ON erp_sales.customer TO erp_app;
+GRANT SELECT, INSERT, UPDATE ON erp_sales.sales_order TO erp_app;
+GRANT SELECT, INSERT ON erp_sales.sales_order_line TO erp_app;
+GRANT SELECT, INSERT ON erp_sales.sales_invoice TO erp_app;
+GRANT SELECT, INSERT ON erp_sales.sales_invoice_line TO erp_app;
+GRANT SELECT, INSERT ON erp_sales.outbox_event TO erp_app;
 
 -- finance schema (4 tables)
 GRANT SELECT ON finance.fiscal_periods, finance.accounts TO erp_app;
 GRANT SELECT, INSERT ON finance.journals, finance.journal_lines TO erp_app;
+
+-- platform schema (2 global read-only catalog tables)
+GRANT SELECT ON platform.subscription_plans TO erp_app;
+GRANT SELECT ON platform.plan_features TO erp_app;
 
 -- identity schema (Table-level grants)
 GRANT SELECT, INSERT, UPDATE ON identity.devices TO erp_app; -- Migration 010 L6-7
