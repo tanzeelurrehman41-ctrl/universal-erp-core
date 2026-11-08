@@ -122,7 +122,6 @@ else
 
         if (FirebaseApp.DefaultInstance == null)
         {
-            AppOptions appOptions;
             GoogleCredential? cred = null;
 
             if (!string.IsNullOrWhiteSpace(credentialJson))
@@ -147,25 +146,35 @@ else
                 cred = GoogleCredential.FromStream(stream);
             }
 
+            if (cred == null)
+            {
+                try
+                {
+                    cred = GoogleCredential.GetApplicationDefault();
+                }
+                catch
+                {
+                    // No ADC configured
+                }
+            }
+
             if (cred != null)
             {
                 var startupLogger = LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Program>();
                 NetworkSynchronizedClock.Initialize(startupLogger);
                 NetworkSynchronizedClock.ApplyTo(cred, startupLogger);
-                appOptions = new AppOptions
+                var appOptions = new AppOptions
                 {
                     Credential = cred,
                     ProjectId = projectId,
                 };
+                FirebaseApp.Create(appOptions);
             }
             else
             {
-                appOptions = new AppOptions
-                {
-                    ProjectId = projectId,
-                };
+                var startupLogger = LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Program>();
+                startupLogger.LogWarning("Firebase credentials not configured at startup. Firebase Authentication requests will fail until valid credentials are provided.");
             }
-            FirebaseApp.Create(appOptions);
         }
 
         builder.Services

@@ -2,19 +2,20 @@
 # Optimized for Render Free Linux container deployment (< 512MB RAM)
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
-WORKDIR /src
+WORKDIR /app
 
-# Copy project definition files for layer caching
-COPY src/backend/src/UniversalErp.Domain/*.csproj src/UniversalErp.Domain/
-COPY src/backend/src/UniversalErp.Application/*.csproj src/UniversalErp.Application/
-COPY src/backend/src/UniversalErp.Infrastructure/*.csproj src/UniversalErp.Infrastructure/
-COPY src/backend/src/UniversalErp.Api/*.csproj src/UniversalErp.Api/
+# Copy shared MSBuild configuration and project definitions for layer caching
+COPY src/backend/Directory.Build.props src/backend/
+COPY src/backend/src/UniversalErp.Domain/*.csproj src/backend/src/UniversalErp.Domain/
+COPY src/backend/src/UniversalErp.Application/*.csproj src/backend/src/UniversalErp.Application/
+COPY src/backend/src/UniversalErp.Infrastructure/*.csproj src/backend/src/UniversalErp.Infrastructure/
+COPY src/backend/src/UniversalErp.Api/*.csproj src/backend/src/UniversalErp.Api/
 
-RUN dotnet restore src/UniversalErp.Api/UniversalErp.Api.csproj
+RUN dotnet restore src/backend/src/UniversalErp.Api/UniversalErp.Api.csproj
 
-# Copy source code and publish Release build
-COPY src/backend/src/ src/
-RUN dotnet publish src/UniversalErp.Api/UniversalErp.Api.csproj -c Release -o /app/publish /p:UseAppHost=false
+# Copy complete source tree and publish Release build
+COPY src/backend/src/ src/backend/src/
+RUN dotnet publish src/backend/src/UniversalErp.Api/UniversalErp.Api.csproj -c Release -o /app/publish /p:UseAppHost=false
 
 # Production runtime stage
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime

@@ -1,3 +1,5 @@
+using System;
+
 namespace UniversalErp.Domain.Common;
 
 public sealed record Result<T>(bool IsSuccess, T? Value, string? Error)

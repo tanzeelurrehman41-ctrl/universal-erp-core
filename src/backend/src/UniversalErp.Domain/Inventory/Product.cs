@@ -1,3 +1,5 @@
+using System;
+
 namespace UniversalErp.Domain.Inventory;
 
 public sealed record Product(

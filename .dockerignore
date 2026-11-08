@@ -1,0 +1,12 @@
+**/.git
+**/.github
+**/.vs
+**/.vscode
+**/bin/
+**/obj/
+**/node_modules/
+**/dist/
+**/*.dump
+**/*.log
+**/.env*
+!**/.env.example
