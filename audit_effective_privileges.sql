@@ -473,8 +473,15 @@ audit_violations AS (
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'pg_catalog'
-      AND p.proname IN ('pg_terminate_backend', 'pg_cancel_backend', 'pg_reload_conf', 'pg_rotate_logfile', 'pg_read_file', 'pg_read_binary_file', 'pg_write_file')
-      AND has_function_privilege('erp_app', p.oid, 'EXECUTE')
+      AND (
+          (p.proname IN ('pg_reload_conf', 'pg_rotate_logfile', 'pg_read_file', 'pg_read_binary_file', 'pg_write_file') AND has_function_privilege('erp_app', p.oid, 'EXECUTE'))
+          OR
+          (p.proname IN ('pg_terminate_backend', 'pg_cancel_backend') AND (
+              ((SELECT coalesce(bool_or(rolsuper), false) FROM pg_roles WHERE rolname = current_user) AND has_function_privilege('erp_app', p.oid, 'EXECUTE'))
+              OR
+              (pg_has_role('erp_app', 'pg_signal_backend', 'USAGE') OR pg_has_role('erp_app', 'pg_signal_backend', 'MEMBER'))
+          ))
+      )
     UNION ALL
     SELECT 'DomainRoutine', 'identity.list_user_company_contexts(text, text)', 'EXECUTE',
            'Expected TRUE', 'Got FALSE', 'Missing required EXECUTE on identity.list_user_company_contexts'

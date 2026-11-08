@@ -7,6 +7,9 @@ BEGIN
     EXECUTE format('GRANT CONNECT ON DATABASE %I TO erp_app;', current_database());
 END $$;
 
+-- Drop legacy unused pgcrypto extension to prevent public function pollution (PostgreSQL 13+ has native gen_random_uuid in pg_catalog)
+DROP EXTENSION IF EXISTS pgcrypto CASCADE;
+
 SET client_min_messages = error;
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
