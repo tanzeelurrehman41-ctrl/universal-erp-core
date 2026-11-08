@@ -58,10 +58,14 @@ if ([string]::IsNullOrWhiteSpace($rawConn)) {
     if (-not [string]::IsNullOrWhiteSpace($env:NEON_SECRETS_FILE)) { $candidateFiles += $env:NEON_SECRETS_FILE }
 
     $candidateFiles += @(
+        (Join-Path $RootDir "thesecreat\neaon.json"),
+        (Join-Path $RootDir "thesecreat\neon.json"),
         (Join-Path $RootDir "thesecret\neon.json"),
         (Join-Path $RootDir "thesecret\neaon.json"),
         (Join-Path $RootDir "secrets\neon.json"),
         "C:\secrets\neon.json",
+        (Join-Path (Split-Path -Parent $RootDir) "thesecreat\neaon.json"),
+        (Join-Path (Split-Path -Parent $RootDir) "thesecreat\neon.json"),
         (Join-Path (Split-Path -Parent $RootDir) "thesecret\neon.json"),
         (Join-Path (Split-Path -Parent $RootDir) "thesecret\neaon.json")
     )
