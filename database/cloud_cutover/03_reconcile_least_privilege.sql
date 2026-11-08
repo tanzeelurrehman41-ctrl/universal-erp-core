@@ -7,10 +7,12 @@ BEGIN
     EXECUTE format('GRANT CONNECT ON DATABASE %I TO erp_app;', current_database());
 END $$;
 
+SET client_min_messages = error;
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL ROUTINES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
+RESET client_min_messages;
 
 DO $$
 DECLARE 
@@ -90,7 +92,7 @@ BEGIN
     END LOOP;
 END $$;
 
--- Revoke administrative routines in pg_catalog from PUBLIC and erp_app
+-- Revoke administrative routines in pg_catalog from PUBLIC and erp_app (with cloud managed non-superuser safeguard)
 DO $$
 DECLARE
     r RECORD;
@@ -102,7 +104,12 @@ BEGIN
         WHERE n.nspname = 'pg_catalog'
           AND p.proname IN ('pg_terminate_backend', 'pg_cancel_backend', 'pg_reload_conf', 'pg_rotate_logfile', 'pg_read_file', 'pg_read_binary_file', 'pg_write_file')
     LOOP
-        EXECUTE format('REVOKE ALL ON FUNCTION pg_catalog.%I(%s) FROM PUBLIC, erp_app;', r.proname, r.args);
+        BEGIN
+            EXECUTE format('REVOKE ALL ON FUNCTION pg_catalog.%I(%s) FROM PUBLIC, erp_app;', r.proname, r.args);
+        EXCEPTION WHEN OTHERS THEN
+            -- Non-superusers cannot alter pg_catalog routines in managed cloud PostgreSQL (e.g. Neon, RDS)
+            NULL;
+        END;
     END LOOP;
 END $$;
 
@@ -159,8 +166,17 @@ GRANT SELECT (id, tenant_id, status) ON organization.companies TO erp_app;
 GRANT SELECT (id, tenant_id, company_id, status) ON organization.locations TO erp_app;
 
 -- Runtime Functions
-GRANT EXECUTE ON FUNCTION set_config(text, text, boolean) TO erp_app;
-GRANT EXECUTE ON FUNCTION pg_advisory_xact_lock(bigint) TO erp_app;
+DO $$
+BEGIN
+    BEGIN
+        GRANT EXECUTE ON FUNCTION set_config(text, text, boolean) TO erp_app;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+    BEGIN
+        GRANT EXECUTE ON FUNCTION pg_advisory_xact_lock(bigint) TO erp_app;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+END $$;
 GRANT EXECUTE ON FUNCTION identity.list_user_company_contexts(text, text) TO erp_app;
 GRANT EXECUTE ON FUNCTION identity.resolve_authenticated_user_context(uuid, uuid, text, text) TO erp_app;
 GRANT EXECUTE ON FUNCTION identity.user_has_permission(uuid, uuid, uuid, text) TO erp_app;
