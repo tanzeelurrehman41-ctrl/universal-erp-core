@@ -239,18 +239,32 @@ if (-not (Test-Path $MasterDdlPath)) {
     throw "Master DDL package missing at: $MasterDdlPath"
 }
 
-Get-Content $MasterDdlPath -Raw | & $psql "$migrationConn" -v ON_ERROR_STOP=1
-if ($LASTEXITCODE -ne 0) {
-    throw "CRITICAL: Schema migration deployment failed on Neon."
+$hasMigrationsTable = & $psql "$migrationConn" -w -t -A -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'schema_migrations';" 2>$null
+$existingMigCount = 0
+if ($hasMigrationsTable -and $hasMigrationsTable.Trim() -eq "1") {
+    $existingMigCountStr = & $psql "$migrationConn" -w -t -A -c "SELECT count(*) FROM public.schema_migrations;" 2>$null
+    if ($existingMigCountStr -match "^\d+$") {
+        $existingMigCount = [int]$existingMigCountStr.Trim()
+    }
 }
 
-# Verify schema_migrations count
-$migCountStr = & $psql "$migrationConn" -w -t -A -c "SELECT count(*) FROM public.schema_migrations;"
-$migCount = [int]$migCountStr.Trim()
-if ($migCount -lt 22) {
-    throw "CRITICAL: Expected at least 22 migration ledger entries, found $migCount."
+if ($existingMigCount -ge 22) {
+    Write-Host "[INFO] Migrations 001-022 already present in public.schema_migrations (ledger count: $existingMigCount). Skipping DDL re-application." -ForegroundColor Green
+    $migCount = $existingMigCount
+} else {
+    Get-Content $MasterDdlPath -Raw | & $psql "$migrationConn" -v ON_ERROR_STOP=1
+    if ($LASTEXITCODE -ne 0) {
+        throw "CRITICAL: Schema migration deployment failed on Neon."
+    }
+
+    # Verify schema_migrations count
+    $migCountStr = & $psql "$migrationConn" -w -t -A -c "SELECT count(*) FROM public.schema_migrations;"
+    $migCount = [int]$migCountStr.Trim()
+    if ($migCount -lt 22) {
+        throw "CRITICAL: Expected at least 22 migration ledger entries, found $migCount."
+    }
+    Write-Host "[PASS] All 22 migrations applied successfully. Migration ledger count: $migCount" -ForegroundColor Green
 }
-Write-Host "[PASS] All 22 migrations applied successfully. Migration ledger count: $migCount" -ForegroundColor Green
 
 # 6. Seed Synthetic Demonstration Tenant
 Write-Host "`n[STEP 3/6] Seeding isolated synthetic demonstration tenant (DEMO-CLOUD)..." -ForegroundColor Yellow
