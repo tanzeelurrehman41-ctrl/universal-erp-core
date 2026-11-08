@@ -1,4 +1,4 @@
-﻿-- ===========================================================================
+-- ===========================================================================
 -- Universal ERP Production Database Schema Deployment Package
 -- Generated: 2026-11-08 06:50:46 UTC
 -- Fully hardened: Forced RLS, least-privilege erp_app, zero development seeds
@@ -847,7 +847,10 @@ BEGIN
     END IF;
 END $role_block$;
 
-GRANT CONNECT ON DATABASE universal_erp TO erp_app;
+DO $grant_block$
+BEGIN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO erp_app', current_database());
+END $grant_block$;
 GRANT USAGE ON SCHEMA erp_inventory TO erp_app;
 GRANT SELECT, INSERT ON erp_inventory.product TO erp_app;
 GRANT SELECT, INSERT, UPDATE ON erp_inventory.command_idempotency TO erp_app;
