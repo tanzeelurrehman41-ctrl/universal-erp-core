@@ -2374,7 +2374,7 @@ AS $$
     LIMIT 1;
 $$;
 
-ALTER FUNCTION identity.resolve_authenticated_user_context(uuid, uuid, text, text) OWNER TO erp_dev;
+ALTER FUNCTION identity.resolve_authenticated_user_context(uuid, uuid, text, text) OWNER TO CURRENT_USER;
 
 GRANT EXECUTE ON FUNCTION identity.list_user_company_contexts(text, text) TO erp_app;
 GRANT EXECUTE ON FUNCTION identity.resolve_authenticated_user_context(uuid, uuid, text, text) TO erp_app;
@@ -2415,7 +2415,7 @@ AS $$
     );
 $$;
 
-ALTER FUNCTION identity.user_has_permission(uuid, uuid, uuid, text) OWNER TO erp_dev;
+ALTER FUNCTION identity.user_has_permission(uuid, uuid, uuid, text) OWNER TO CURRENT_USER;
 
 GRANT EXECUTE ON FUNCTION identity.user_has_permission(uuid, uuid, uuid, text) TO erp_app;
 
@@ -2477,7 +2477,7 @@ AS $$
     WHERE u.id = p_user_id;
 $$;
 
-ALTER FUNCTION identity.get_user_profile(uuid, uuid, uuid) OWNER TO erp_dev;
+ALTER FUNCTION identity.get_user_profile(uuid, uuid, uuid) OWNER TO CURRENT_USER;
 GRANT EXECUTE ON FUNCTION identity.get_user_profile(uuid, uuid, uuid) TO erp_app;
 
 -- 2. Company Settings Routine (Get and Update)
@@ -2508,7 +2508,7 @@ AS $$
     WHERE c.tenant_id = p_tenant_id AND c.id = p_company_id;
 $$;
 
-ALTER FUNCTION identity.get_company_settings(uuid, uuid) OWNER TO erp_dev;
+ALTER FUNCTION identity.get_company_settings(uuid, uuid) OWNER TO CURRENT_USER;
 GRANT EXECUTE ON FUNCTION identity.get_company_settings(uuid, uuid) TO erp_app;
 
 CREATE OR REPLACE FUNCTION identity.update_company_settings(
@@ -2540,7 +2540,7 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION identity.update_company_settings(uuid, uuid, text, text, text, text) OWNER TO erp_dev;
+ALTER FUNCTION identity.update_company_settings(uuid, uuid, text, text, text, text) OWNER TO CURRENT_USER;
 GRANT EXECUTE ON FUNCTION identity.update_company_settings(uuid, uuid, text, text, text, text) TO erp_app;
 
 -- 3. Company Users Listing Routine
@@ -2579,7 +2579,7 @@ AS $$
     ORDER BY u.display_name;
 $$;
 
-ALTER FUNCTION identity.list_company_users(uuid, uuid) OWNER TO erp_dev;
+ALTER FUNCTION identity.list_company_users(uuid, uuid) OWNER TO CURRENT_USER;
 GRANT EXECUTE ON FUNCTION identity.list_company_users(uuid, uuid) TO erp_app;
 
 -- 4. User Invitation / Assignment Routine
@@ -2646,7 +2646,7 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION identity.invite_or_assign_company_user(uuid, uuid, text, text, text) OWNER TO erp_dev;
+ALTER FUNCTION identity.invite_or_assign_company_user(uuid, uuid, text, text, text) OWNER TO CURRENT_USER;
 GRANT EXECUTE ON FUNCTION identity.invite_or_assign_company_user(uuid, uuid, text, text, text) TO erp_app;
 
 -- 5. List Roles and Permissions Routine
@@ -2680,7 +2680,7 @@ AS $$
     ORDER BY r.role_code;
 $$;
 
-ALTER FUNCTION identity.list_roles_and_permissions(uuid) OWNER TO erp_dev;
+ALTER FUNCTION identity.list_roles_and_permissions(uuid) OWNER TO CURRENT_USER;
 GRANT EXECUTE ON FUNCTION identity.list_roles_and_permissions(uuid) TO erp_app;
 
 -- 6. Audit Logging Routines
@@ -2713,7 +2713,7 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION identity.record_audit_event(uuid, uuid, uuid, text, text, uuid, jsonb) OWNER TO erp_dev;
+ALTER FUNCTION identity.record_audit_event(uuid, uuid, uuid, text, text, uuid, jsonb) OWNER TO CURRENT_USER;
 GRANT EXECUTE ON FUNCTION identity.record_audit_event(uuid, uuid, uuid, text, text, uuid, jsonb) TO erp_app;
 
 CREATE OR REPLACE FUNCTION identity.list_audit_events(
@@ -2751,7 +2751,7 @@ AS $$
     LIMIT LEAST(GREATEST(p_limit, 1), 200);
 $$;
 
-ALTER FUNCTION identity.list_audit_events(uuid, uuid, int) OWNER TO erp_dev;
+ALTER FUNCTION identity.list_audit_events(uuid, uuid, int) OWNER TO CURRENT_USER;
 GRANT EXECUTE ON FUNCTION identity.list_audit_events(uuid, uuid, int) TO erp_app;
 
 

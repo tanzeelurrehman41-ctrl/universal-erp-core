@@ -39,7 +39,7 @@ AS $$
     LIMIT 1;
 $$;
 
-ALTER FUNCTION identity.resolve_authenticated_user_context(uuid, uuid, text, text) OWNER TO erp_dev;
+ALTER FUNCTION identity.resolve_authenticated_user_context(uuid, uuid, text, text) OWNER TO CURRENT_USER;
 
 GRANT EXECUTE ON FUNCTION identity.list_user_company_contexts(text, text) TO erp_app;
 GRANT EXECUTE ON FUNCTION identity.resolve_authenticated_user_context(uuid, uuid, text, text) TO erp_app;
@@ -80,6 +80,6 @@ AS $$
     );
 $$;
 
-ALTER FUNCTION identity.user_has_permission(uuid, uuid, uuid, text) OWNER TO erp_dev;
+ALTER FUNCTION identity.user_has_permission(uuid, uuid, uuid, text) OWNER TO CURRENT_USER;
 
 GRANT EXECUTE ON FUNCTION identity.user_has_permission(uuid, uuid, uuid, text) TO erp_app;
