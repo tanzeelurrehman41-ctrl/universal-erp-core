@@ -65,6 +65,33 @@ public sealed class SalesService(
         }
     }
 
+    public async Task<Result<CustomerSummary>> UpdateCustomerAsync(
+        Guid customerId,
+        UpdateCustomerRequest request,
+        CancellationToken cancellationToken)
+    {
+        var name = request.Name?.Trim();
+        var type = request.CustomerType?.Trim().ToLowerInvariant() ?? "retail";
+
+        if (string.IsNullOrEmpty(name) || name.Length is < 2 or > 200)
+            return Result<CustomerSummary>.Failure("INVALID_CUSTOMER_NAME");
+        if (!ValidCustomerTypes.Contains(type))
+            return Result<CustomerSummary>.Failure("INVALID_CUSTOMER_TYPE");
+        if (request.CreditLimit < 0)
+            return Result<CustomerSummary>.Failure("INVALID_CREDIT_LIMIT");
+        if (request.PaymentTermsDays < 0)
+            return Result<CustomerSummary>.Failure("INVALID_PAYMENT_TERMS");
+
+        var normalized = request with { Name = name, CustomerType = type };
+        var ok = await repository.UpdateCustomerAsync(customerId, normalized, cancellationToken);
+        if (!ok) return Result<CustomerSummary>.Failure("CUSTOMER_NOT_FOUND");
+
+        var updated = await repository.GetCustomerAsync(customerId, cancellationToken);
+        return updated is not null
+            ? Result<CustomerSummary>.Success(updated)
+            : Result<CustomerSummary>.Failure("CUSTOMER_NOT_FOUND");
+    }
+
     // ── Sales Orders ───────────────────────────────────────────────────────
 
     public Task<IReadOnlyList<SalesOrderSummary>> ListOrdersAsync(CancellationToken cancellationToken) =>

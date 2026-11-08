@@ -80,7 +80,7 @@ export default function TenancyWorkspace() {
       setPlansLoading(true);
       setPlansError("");
       try {
-        const response = await apiFetch("/api/v1/plans");
+        const response = await apiFetch("/api/v1/plans", {}, undefined, false);
         if (!response.ok) {
           throw new Error(`Failed to load subscription plans: HTTP ${response.status}`);
         }
@@ -133,7 +133,7 @@ export default function TenancyWorkspace() {
           baseCurrencyCode: "PKR",
           timezone: "Asia/Karachi",
         }),
-      });
+      }, undefined, false);
 
       if (!response.ok) {
         const problem = await response.json().catch(() => ({}));

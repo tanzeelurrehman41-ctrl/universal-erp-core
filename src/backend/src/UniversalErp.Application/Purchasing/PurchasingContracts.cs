@@ -12,6 +12,15 @@ public sealed record CreateSupplierRequest(
     string CurrencyCode,
     int PaymentTermsDays);
 
+public sealed record UpdateSupplierRequest(
+    string Name,
+    string? ContactName = null,
+    string? Email = null,
+    string? Phone = null,
+    string? Address = null,
+    int PaymentTermsDays = 0,
+    bool IsActive = true);
+
 public sealed record CreatePurchaseOrderRequest(
     string PoNumber,
     Guid SupplierId,
@@ -116,6 +125,7 @@ public interface IPurchasingRepository
     // Suppliers
     Task<IReadOnlyList<SupplierSummary>> ListSuppliersAsync(CancellationToken cancellationToken);
     Task<Guid> CreateSupplierAsync(CreateSupplierRequest request, CancellationToken cancellationToken);
+    Task<bool> UpdateSupplierAsync(Guid supplierId, UpdateSupplierRequest request, CancellationToken cancellationToken);
 
     // Purchase orders
     Task<IReadOnlyList<PurchaseOrderSummary>> ListPurchaseOrdersAsync(CancellationToken cancellationToken);

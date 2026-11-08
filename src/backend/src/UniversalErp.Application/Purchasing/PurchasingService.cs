@@ -41,6 +41,26 @@ public sealed class PurchasingService(
         }
     }
 
+    public async Task<Result<SupplierSummary>> UpdateSupplierAsync(
+        Guid supplierId,
+        UpdateSupplierRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Name))
+            return Result<SupplierSummary>.Failure("INVALID_SUPPLIER_NAME");
+        if (request.PaymentTermsDays < 0)
+            return Result<SupplierSummary>.Failure("INVALID_PAYMENT_TERMS");
+
+        var ok = await repository.UpdateSupplierAsync(supplierId, request, cancellationToken);
+        if (!ok) return Result<SupplierSummary>.Failure("SUPPLIER_NOT_FOUND");
+
+        var suppliers = await repository.ListSuppliersAsync(cancellationToken);
+        var updated = suppliers.FirstOrDefault(s => s.SupplierId == supplierId);
+        return updated is not null
+            ? Result<SupplierSummary>.Success(updated)
+            : Result<SupplierSummary>.Failure("SUPPLIER_NOT_FOUND");
+    }
+
     // ── Purchase Orders ────────────────────────────────────────────────────
 
     public Task<IReadOnlyList<PurchaseOrderSummary>> ListPurchaseOrdersAsync(

@@ -11,6 +11,22 @@ public static class InventoryEndpointMappings
     {
         var inventory = endpoints.MapGroup("/api/v1/inventory");
 
+        var listCategories = inventory.MapGet("/categories", async (
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.ListCategoriesAsync(cancellationToken)));
+        var createCategory = inventory.MapPost("/categories", async (
+            CreateProductCategoryRequest request,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+            ToCreated(await service.CreateCategoryAsync(request, cancellationToken)));
+
+        var listMovements = inventory.MapGet("/movements", async (
+            int? limit,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.ListMovementsAsync(limit ?? 50, cancellationToken)));
+
         var listUnits = inventory.MapGet("/units-of-measure", async (
             InventoryWorkflowService service,
             CancellationToken cancellationToken) =>
@@ -108,6 +124,9 @@ public static class InventoryEndpointMappings
 
         if (!isDevelopment)
         {
+            listCategories.RequireAuthorization("inventory.product.view");
+            createCategory.RequireAuthorization("inventory.product.create");
+            listMovements.RequireAuthorization("inventory.availability.view");
             listUnits.RequireAuthorization("inventory.uom.view");
             createUnit.RequireAuthorization("inventory.uom.create");
             listVariants.RequireAuthorization("inventory.variant.view");

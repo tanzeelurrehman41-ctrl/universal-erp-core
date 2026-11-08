@@ -28,6 +28,16 @@ public static class PurchasingEndpointMappings
                 : ToProblem(result);
         });
 
+        var updateSupplier = purchasing.MapPut("/suppliers/{id:guid}", async (
+            Guid id,
+            UpdateSupplierRequest req,
+            PurchasingService svc,
+            CancellationToken ct) =>
+        {
+            var result = await svc.UpdateSupplierAsync(id, req, ct);
+            return result.IsSuccess ? Results.Ok(result.Value) : ToProblem(result);
+        });
+
         // ── Purchase Orders ─────────────────────────────────────────────────
         var listPurchaseOrders = purchasing.MapGet("/purchase-orders", async (
             PurchasingService svc,
@@ -115,6 +125,7 @@ public static class PurchasingEndpointMappings
         {
             listSuppliers.RequireAuthorization("purchasing.supplier.view");
             createSupplier.RequireAuthorization("purchasing.supplier.create");
+            updateSupplier.RequireAuthorization("purchasing.supplier.create");
             listPurchaseOrders.RequireAuthorization("purchasing.po.view");
             getPurchaseOrder.RequireAuthorization("purchasing.po.view");
             createPurchaseOrder.RequireAuthorization("purchasing.po.create");

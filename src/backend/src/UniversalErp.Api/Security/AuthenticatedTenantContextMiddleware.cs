@@ -52,29 +52,7 @@ public sealed class AuthenticatedTenantContextMiddleware(RequestDelegate next)
 
         Guid? userId;
         await using (var resolveUser = new NpgsqlCommand(
-            """
-            SELECT u.id
-            FROM identity.external_identities AS external_identity
-            JOIN identity.users AS u ON u.id = external_identity.user_id
-            JOIN identity.tenant_memberships AS tenant_membership
-              ON tenant_membership.tenant_id = @tenantId
-             AND tenant_membership.user_id = u.id
-            JOIN identity.company_memberships AS company_membership
-              ON company_membership.tenant_id = @tenantId
-             AND company_membership.company_id = @companyId
-             AND company_membership.user_id = u.id
-            JOIN platform.tenants AS tenant ON tenant.id = @tenantId
-            JOIN organization.companies AS company
-              ON company.tenant_id = @tenantId AND company.id = @companyId
-            WHERE external_identity.issuer = @issuer
-              AND external_identity.subject = @subject
-              AND u.status = 'active'
-              AND tenant_membership.status = 'active'
-              AND company_membership.status = 'active'
-              AND tenant.status = 'active'
-              AND company.status = 'active'
-            LIMIT 1
-            """,
+            "SELECT identity.resolve_authenticated_user_context(@tenantId, @companyId, @issuer, @subject)",
             connection,
             transaction))
         {

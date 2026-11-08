@@ -101,6 +101,36 @@ public sealed class PostgresPurchasingRepository(
         return id;
     }
 
+    public async Task<bool> UpdateSupplierAsync(Guid supplierId, UpdateSupplierRequest req, CancellationToken ct)
+    {
+        await using var conn = await OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        await SetRls(cmd, Ctx);
+
+        cmd.CommandText = """
+            UPDATE erp_purchasing.supplier
+            SET name = @name, contact_name = @contact, email = @email,
+                phone = @phone, address = @address, payment_terms_days = @terms,
+                is_active = @active, updated_at = now()
+            WHERE tenant_id = @tid AND company_id = @cid AND supplier_id = @id;
+            """;
+        cmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+        cmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+        cmd.Parameters.AddWithValue("id", supplierId);
+        cmd.Parameters.AddWithValue("name", req.Name.Trim());
+        cmd.Parameters.AddWithValue("contact", (object?)req.ContactName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("email", (object?)req.Email ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("phone", (object?)req.Phone ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("address", (object?)req.Address ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("terms", req.PaymentTermsDays);
+        cmd.Parameters.AddWithValue("active", req.IsActive);
+
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        await tx.CommitAsync(ct);
+        return rows > 0;
+    }
+
     // ── Purchase Orders ───────────────────────────────────────────────────
 
     public async Task<IReadOnlyList<PurchaseOrderSummary>> ListPurchaseOrdersAsync(CancellationToken ct)

@@ -107,10 +107,10 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
     setError("");
     try {
       const [accRes, perRes, jrnRes, tbRes] = await Promise.all([
-        apiFetch("/api/v1/finance/accounts"),
-        apiFetch("/api/v1/finance/periods"),
-        apiFetch("/api/v1/finance/journals"),
-        apiFetch("/api/v1/finance/trial-balance"),
+        apiFetch("/api/v1/finance/accounts", {}, workspace),
+        apiFetch("/api/v1/finance/periods", {}, workspace),
+        apiFetch("/api/v1/finance/journals", {}, workspace),
+        apiFetch("/api/v1/finance/trial-balance", {}, workspace),
       ]);
 
       if (accRes.ok) setAccounts((await accRes.json()) as Account[]);
@@ -153,7 +153,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
           isControlAccount: false,
           allowManualPosting: true,
         }),
-      });
+      }, workspace);
 
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
@@ -231,7 +231,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
           sourceId: idempotencyKey,
           lines: formattedLines,
         }),
-      });
+      }, workspace);
 
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));

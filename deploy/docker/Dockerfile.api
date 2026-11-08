@@ -1,0 +1,24 @@
+# Build stage
+FROM mcr.microsoft.com/dotnet/sdk:10.0-preview-alpine AS build
+WORKDIR /src
+
+COPY universal-erp-core/src/backend/src/UniversalErp.Domain/*.csproj src/UniversalErp.Domain/
+COPY universal-erp-core/src/backend/src/UniversalErp.Application/*.csproj src/UniversalErp.Application/
+COPY universal-erp-core/src/backend/src/UniversalErp.Infrastructure/*.csproj src/UniversalErp.Infrastructure/
+COPY universal-erp-core/src/backend/src/UniversalErp.Api/*.csproj src/UniversalErp.Api/
+
+RUN dotnet restore src/UniversalErp.Api/UniversalErp.Api.csproj
+
+COPY universal-erp-core/src/backend/src/ src/
+RUN dotnet publish src/UniversalErp.Api/UniversalErp.Api.csproj -c Release -o /app/publish /p:UseAppHost=false
+
+# Runtime stage
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview-alpine AS runtime
+WORKDIR /app
+COPY --from=build /app/publish .
+
+RUN apk add --no-cache curl
+EXPOSE 5000
+ENV ASPNETCORE_URLS=http://0.0.0.0:5000
+
+ENTRYPOINT ["dotnet", "UniversalErp.Api.dll"]

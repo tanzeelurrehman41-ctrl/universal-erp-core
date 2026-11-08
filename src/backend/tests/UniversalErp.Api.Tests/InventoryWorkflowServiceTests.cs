@@ -50,6 +50,15 @@ public sealed class InventoryWorkflowServiceTests
 
         public Task<Result<InventoryAdjustmentSummary>> PostAdjustmentAsync(TenantContext context, Guid transactionId, string requestHash, PostInventoryAdjustmentRequest request, CancellationToken cancellationToken) =>
             Task.FromResult(Result<InventoryAdjustmentSummary>.Success(new InventoryAdjustmentSummary(transactionId, Guid.NewGuid(), request.VariantId, request.WarehouseId, request.BinId, request.QuantityDelta, request.UnitOfMeasureId, request.ReasonCode, DateTimeOffset.UtcNow)));
+
+        public Task<IReadOnlyList<ProductCategorySummary>> ListCategoriesAsync(Guid tenantId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<ProductCategorySummary>>([]);
+
+        public Task<Result<ProductCategorySummary>> CreateCategoryAsync(Guid tenantId, CreateProductCategoryRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(Result<ProductCategorySummary>.Success(new ProductCategorySummary(Guid.NewGuid(), request.Code!, request.Name!, request.ParentCategoryId)));
+
+        public Task<IReadOnlyList<InventoryMovementSummary>> ListMovementsAsync(Guid tenantId, Guid companyId, int limit, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<InventoryMovementSummary>>([]);
     }
 
     private static readonly TenantContext TestContext = new(

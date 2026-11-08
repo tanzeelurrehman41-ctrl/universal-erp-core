@@ -205,6 +205,16 @@ Write-Host "[PASS] Gate 5: Loopback-only port binding (${ExpectedHost}:${Expecte
 
 # Gate 6: Parse Connection Strings & Target Database Identity
 Write-Host "Gate 6: Verifying endpoint targets..." -ForegroundColor Cyan
+
+# Preload AspNetCore shared framework dependencies if present for Npgsql
+$aspNetSharedDir = Resolve-Path "C:\Program Files\dotnet\shared\Microsoft.AspNetCore.App\*" -ErrorAction SilentlyContinue | Select-Object -Last 1 -ExpandProperty Path
+if ($aspNetSharedDir) {
+    $loggingDll = Join-Path $aspNetSharedDir "Microsoft.Extensions.Logging.Abstractions.dll"
+    if (Test-Path $loggingDll) {
+        [System.Reflection.Assembly]::LoadFrom($loggingDll) | Out-Null
+    }
+}
+
 $npgsqlDllPath = Join-Path $repoRoot "src\backend\tests\UniversalErp.Api.Tests\bin\Release\net10.0\Npgsql.dll"
 if (-not (Test-Path $npgsqlDllPath)) { Write-Host "[FAIL-CLOSED] Gate 6: Npgsql.dll not found at '$npgsqlDllPath'!" -ForegroundColor Red; exit 1 }
 Add-Type -Path $npgsqlDllPath

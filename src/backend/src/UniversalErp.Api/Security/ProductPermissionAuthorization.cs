@@ -34,26 +34,7 @@ public sealed class DatabasePermissionAuthorizationHandler(
         }
 
         await using var command = new NpgsqlCommand(
-            """
-            SELECT EXISTS (
-              SELECT 1
-              FROM identity.company_memberships AS membership
-              JOIN "authorization".membership_role_assignments AS assignment
-                ON assignment.tenant_id = membership.tenant_id
-               AND assignment.membership_id = membership.id
-              JOIN "authorization".role_permissions AS permission
-                ON permission.tenant_id = assignment.tenant_id
-               AND permission.role_id = assignment.role_id
-              WHERE membership.tenant_id = @tenantId
-                AND membership.company_id = @companyId
-                AND membership.user_id = @userId
-                AND membership.status = 'active'
-                AND assignment.effective_from <= now()
-                AND (assignment.effective_until IS NULL OR assignment.effective_until > now())
-                AND permission.permission_code = @permissionCode
-                AND permission.scope_type IN ('tenant','company')
-            )
-            """,
+            "SELECT identity.user_has_permission(@tenantId, @companyId, @userId, @permissionCode)",
             connection,
             transaction);
         command.Parameters.AddWithValue("tenantId", tenantContext.TenantId);

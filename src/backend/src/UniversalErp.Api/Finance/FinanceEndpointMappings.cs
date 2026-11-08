@@ -124,7 +124,7 @@ public static class FinanceEndpointMappings
             return Results.Created($"/api/v1/finance/journals/{journal.JournalId}", journal);
         });
 
-        // ── Trial Balance ────────────────────────────────────────────────────
+        // ── Trial Balance & Statements ───────────────────────────────────────
 
         group.MapGet("/trial-balance", async (
             FinanceService service,
@@ -132,6 +132,14 @@ public static class FinanceEndpointMappings
         {
             var rows = await service.GetTrialBalanceAsync(cancellationToken);
             return Results.Ok(rows);
+        });
+
+        group.MapGet("/financial-statements", async (
+            FinanceService service,
+            CancellationToken cancellationToken) =>
+        {
+            var statements = await service.GetFinancialStatementsAsync(cancellationToken);
+            return Results.Ok(statements);
         });
 
         return endpoints;

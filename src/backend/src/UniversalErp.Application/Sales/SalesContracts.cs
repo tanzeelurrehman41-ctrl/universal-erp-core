@@ -16,6 +16,19 @@ public sealed record CreateCustomerRequest(
     int PaymentTermsDays = 0,
     string CurrencyCode = "PKR");
 
+public sealed record UpdateCustomerRequest(
+    string Name,
+    string CustomerType = "retail",
+    string? ContactName = null,
+    string? Email = null,
+    string? Phone = null,
+    string? Address = null,
+    string? NtnNumber = null,
+    string? StrnNumber = null,
+    decimal CreditLimit = 0,
+    int PaymentTermsDays = 0,
+    bool IsActive = true);
+
 public sealed record CustomerSummary(
     Guid CustomerId,
     string CustomerCode,
@@ -154,6 +167,7 @@ public interface ISalesRepository
     Task<IReadOnlyList<CustomerSummary>> ListCustomersAsync(CancellationToken cancellationToken);
     Task<CustomerSummary?> GetCustomerAsync(Guid customerId, CancellationToken cancellationToken);
     Task<Guid> CreateCustomerAsync(CreateCustomerRequest request, CancellationToken cancellationToken);
+    Task<bool> UpdateCustomerAsync(Guid customerId, UpdateCustomerRequest request, CancellationToken cancellationToken);
 
     // Sales Orders
     Task<IReadOnlyList<SalesOrderSummary>> ListOrdersAsync(CancellationToken cancellationToken);

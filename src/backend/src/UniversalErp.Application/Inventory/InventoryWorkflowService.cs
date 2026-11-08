@@ -28,6 +28,39 @@ public sealed record ProductVariantSummary(
     string CostingMethod,
     bool IsActive);
 
+public sealed record ProductCategorySummary(
+    Guid CategoryId,
+    string Code,
+    string Name,
+    Guid? ParentCategoryId);
+
+public sealed record CreateProductCategoryRequest(
+    string? Code,
+    string? Name,
+    Guid? ParentCategoryId = null);
+
+public sealed record InventoryMovementLegSummary(
+    int LegNumber,
+    Guid VariantId,
+    string Sku,
+    Guid WarehouseId,
+    string WarehouseCode,
+    Guid BinId,
+    string BinCode,
+    string StatusCode,
+    decimal QuantityDelta,
+    Guid BaseUomId,
+    string BaseUomCode);
+
+public sealed record InventoryMovementSummary(
+    Guid MovementId,
+    string MovementType,
+    string? SourceDocumentType,
+    Guid? SourceDocumentId,
+    DateTimeOffset OccurredAt,
+    string? Note,
+    IReadOnlyList<InventoryMovementLegSummary> Legs);
+
 public sealed record WarehouseSummary(
     Guid WarehouseId,
     string Code,
@@ -133,6 +166,9 @@ public sealed record InventoryAdjustmentSummary(
 
 public interface IInventoryWorkflowRepository
 {
+    Task<IReadOnlyList<ProductCategorySummary>> ListCategoriesAsync(Guid tenantId, CancellationToken cancellationToken);
+    Task<Result<ProductCategorySummary>> CreateCategoryAsync(Guid tenantId, CreateProductCategoryRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<InventoryMovementSummary>> ListMovementsAsync(Guid tenantId, Guid companyId, int limit, CancellationToken cancellationToken);
     Task<IReadOnlyList<UnitOfMeasureSummary>> ListUnitsAsync(Guid tenantId, CancellationToken cancellationToken);
     Task<Result<UnitOfMeasureSummary>> CreateUnitAsync(Guid tenantId, CreateUnitOfMeasureRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProductVariantSummary>> ListVariantsAsync(Guid tenantId, CancellationToken cancellationToken);
@@ -170,6 +206,33 @@ public sealed class InventoryWorkflowService(
     {
         "storage", "receiving", "dispatch", "production", "transit", "virtual",
     };
+
+    public Task<IReadOnlyList<ProductCategorySummary>> ListCategoriesAsync(CancellationToken ct) =>
+        repository.ListCategoriesAsync(tenantContextAccessor.Current.TenantId, ct);
+
+    public async Task<Result<ProductCategorySummary>> CreateCategoryAsync(
+        CreateProductCategoryRequest request,
+        CancellationToken ct)
+    {
+        var code = NormalizeCode(request.Code);
+        var name = request.Name?.Trim();
+        if (code is null || name is null || name.Length is < 1 or > 100)
+        {
+            return Result<ProductCategorySummary>.Failure("INVALID_CATEGORY");
+        }
+
+        return await repository.CreateCategoryAsync(
+            tenantContextAccessor.Current.TenantId,
+            new CreateProductCategoryRequest(code, name, request.ParentCategoryId),
+            ct);
+    }
+
+    public Task<IReadOnlyList<InventoryMovementSummary>> ListMovementsAsync(int limit, CancellationToken ct) =>
+        repository.ListMovementsAsync(
+            tenantContextAccessor.Current.TenantId,
+            tenantContextAccessor.Current.CompanyId,
+            Math.Clamp(limit, 1, 200),
+            ct);
 
     public Task<IReadOnlyList<UnitOfMeasureSummary>> ListUnitsAsync(CancellationToken ct) =>
         repository.ListUnitsAsync(tenantContextAccessor.Current.TenantId, ct);

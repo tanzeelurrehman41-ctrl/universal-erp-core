@@ -41,6 +41,28 @@ public sealed class SalesServiceTests
             return Task.FromResult(id);
         }
 
+        public Task<bool> UpdateCustomerAsync(Guid customerId, UpdateCustomerRequest request, CancellationToken cancellationToken)
+        {
+            var idx = Customers.FindIndex(c => c.CustomerId == customerId);
+            if (idx < 0) return Task.FromResult(false);
+            var c = Customers[idx];
+            Customers[idx] = c with
+            {
+                Name = request.Name,
+                CustomerType = request.CustomerType,
+                ContactName = request.ContactName,
+                Email = request.Email,
+                Phone = request.Phone,
+                Address = request.Address,
+                NtnNumber = request.NtnNumber,
+                StrnNumber = request.StrnNumber,
+                CreditLimit = request.CreditLimit,
+                PaymentTermsDays = request.PaymentTermsDays,
+                IsActive = request.IsActive
+            };
+            return Task.FromResult(true);
+        }
+
         public Task<IReadOnlyList<SalesOrderSummary>> ListOrdersAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<SalesOrderSummary>>(Orders);
 

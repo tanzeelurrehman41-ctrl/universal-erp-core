@@ -237,11 +237,65 @@ public sealed class FinanceService(
         }
     }
 
-    // ── Trial Balance ────────────────────────────────────────────────────────
+    // ── Trial Balance & Financial Statements ─────────────────────────────────
 
     public Task<IReadOnlyList<TrialBalanceRow>> GetTrialBalanceAsync(CancellationToken cancellationToken) =>
         repository.GetTrialBalanceAsync(
             tenantContext.Current.TenantId,
             tenantContext.Current.CompanyId,
             cancellationToken);
+
+    public async Task<FinancialStatementsSummary> GetFinancialStatementsAsync(CancellationToken cancellationToken)
+    {
+        var trialBalance = await GetTrialBalanceAsync(cancellationToken);
+
+        var balanceSheetLines = new List<FinancialStatementLine>();
+        var incomeStatementLines = new List<FinancialStatementLine>();
+
+        decimal totalAssets = 0;
+        decimal totalLiabilities = 0;
+        decimal totalEquity = 0;
+        decimal totalRevenue = 0;
+        decimal totalExpenses = 0;
+
+        foreach (var row in trialBalance)
+        {
+            var line = new FinancialStatementLine(row.AccountCode, row.AccountName, row.AccountType, row.NetBalance);
+            switch (row.AccountType.ToLowerInvariant())
+            {
+                case "asset":
+                    totalAssets += row.NetBalance;
+                    balanceSheetLines.Add(line);
+                    break;
+                case "liability":
+                    totalLiabilities += row.NetBalance;
+                    balanceSheetLines.Add(line);
+                    break;
+                case "equity":
+                    totalEquity += row.NetBalance;
+                    balanceSheetLines.Add(line);
+                    break;
+                case "revenue":
+                    totalRevenue += row.NetBalance;
+                    incomeStatementLines.Add(line);
+                    break;
+                case "expense":
+                    totalExpenses += row.NetBalance;
+                    incomeStatementLines.Add(line);
+                    break;
+            }
+        }
+
+        var netIncome = totalRevenue - totalExpenses;
+
+        return new FinancialStatementsSummary(
+            totalAssets,
+            totalLiabilities,
+            totalEquity,
+            totalRevenue,
+            totalExpenses,
+            netIncome,
+            balanceSheetLines,
+            incomeStatementLines);
+    }
 }

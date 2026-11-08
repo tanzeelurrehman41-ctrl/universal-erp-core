@@ -1,17 +1,20 @@
 import { useEffect, useState, type FormEvent } from "react";
-import type { User } from "oidc-client-ts";
 import InventoryWorkspace from "./InventoryWorkspace";
 import PurchasingWorkspace from "./PurchasingWorkspace";
 import SalesWorkspace from "./SalesWorkspace";
 import TenancyWorkspace from "./TenancyWorkspace";
 import FinanceWorkspace from "./FinanceWorkspace";
+import FoundationWorkspace from "./FoundationWorkspace";
 import {
   apiFetch,
-  beginSignIn,
   beginSignOut,
   getAccessToken,
-  initializeOidc,
+  signInWithGoogle,
+  signInWithEmail,
+  signUpWithEmail,
+  subscribeAuthState,
   oidcConfigured,
+  type ErpAuthUser,
   type TenantCompanyContext,
 } from "./auth";
 import {
@@ -37,10 +40,10 @@ function workspaceKey(workspace: TenantCompanyContext): string {
   return `${workspace.tenantId}:${workspace.companyId}`;
 }
 
-function ownerKeyForUser(user: User | null): string | undefined {
-  const subject = user?.profile.sub;
+function ownerKeyForUser(user: ErpAuthUser | null): string | undefined {
+  const subject = user?.profile?.sub;
   if (!user || typeof subject !== "string" || subject.length === 0) return undefined;
-  const issuer = user.profile.iss;
+  const issuer = user.profile?.iss;
   return `${typeof issuer === "string" ? issuer : ""}::${subject}`;
 }
 
@@ -77,9 +80,13 @@ export default function App() {
   const [isSavingProduct, setIsSavingProduct] = useState(false);
   const [offlineOperations, setOfflineOperations] = useState<OfflineProductOperation[]>([]);
   const [persistentStorageGranted, setPersistentStorageGranted] = useState<boolean | null>(null);
-  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authUser, setAuthUser] = useState<ErpAuthUser | null>(null);
   const [authReady, setAuthReady] = useState(!oidcConfigured);
   const [authMessage, setAuthMessage] = useState("");
+  const [showEmailAuth, setShowEmailAuth] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
   const [workspaces, setWorkspaces] = useState<TenantCompanyContext[]>(() =>
     oidcConfigured ? readSavedWorkspaces() : [],
   );
@@ -92,33 +99,47 @@ export default function App() {
   });
   const activeWorkspace = workspaces.find((workspace) => workspaceKey(workspace) === activeWorkspaceKey) ?? null;
   const queueOwnerKey = ownerKeyForUser(authUser);
+  const [activeNavTab, setActiveNavTab] = useState<"inventory" | "purchasing" | "sales" | "finance" | "foundation" | "saas" | "all">("inventory");
 
   useEffect(() => {
     if (!oidcConfigured) return;
     let isMounted = true;
 
-    const restoreIdentity = async () => {
-      try {
-        const user = await initializeOidc();
-        if (!isMounted) return;
-        setAuthUser(user);
-        setAuthReady(true);
-        if (!user || user.expired) return;
+    const unsubscribe = subscribeAuthState(async (user) => {
+      if (!isMounted) return;
+      setAuthUser(user);
+      setAuthReady(true);
+      if (!user) {
+        setWorkspaces([]);
+        setActiveWorkspaceKey("");
+        try {
+          sessionStorage.removeItem("universal-erp-workspaces");
+          sessionStorage.removeItem("universal-erp-active-workspace");
+        } catch {
+          // ignore
+        }
+        return;
+      }
 
+      try {
         const response = await apiFetch("/api/v1/contexts", {}, undefined, false);
-        if (!response.ok) throw new Error(`Workspace lookup returned ${response.status}.`);
+        if (!response.ok) throw new Error(`Workspace lookup returned HTTP ${response.status}.`);
         const available = (await response.json()) as TenantCompanyContext[];
         if (!isMounted) return;
         setWorkspaces(available);
-        sessionStorage.setItem("universal-erp-workspaces", JSON.stringify(available));
-        const savedKey = sessionStorage.getItem("universal-erp-active-workspace") ?? "";
-        const nextKey = available.some((workspace) => workspaceKey(workspace) === savedKey)
-          ? savedKey
-          : available[0]
-            ? workspaceKey(available[0])
-            : "";
-        setActiveWorkspaceKey(nextKey);
-        sessionStorage.setItem("universal-erp-active-workspace", nextKey);
+        try {
+          sessionStorage.setItem("universal-erp-workspaces", JSON.stringify(available));
+          const savedKey = sessionStorage.getItem("universal-erp-active-workspace") ?? "";
+          const nextKey = available.some((workspace) => workspaceKey(workspace) === savedKey)
+            ? savedKey
+            : available[0]
+              ? workspaceKey(available[0])
+              : "";
+          setActiveWorkspaceKey(nextKey);
+          sessionStorage.setItem("universal-erp-active-workspace", nextKey);
+        } catch {
+          // ignore
+        }
         setAuthMessage(available.length === 0
           ? "Your sign-in is active, but no ERP company is linked to this account yet."
           : "");
@@ -127,11 +148,11 @@ export default function App() {
         setAuthReady(true);
         setAuthMessage(error instanceof Error ? error.message : "Sign-in could not be restored.");
       }
-    };
+    });
 
-    void restoreIdentity();
     return () => {
       isMounted = false;
+      unsubscribe();
     };
   }, []);
 
@@ -377,10 +398,49 @@ export default function App() {
     online: "API online",
     offline: "API offline",
   }[apiStatus];
-  const handleSignIn = () => {
-    void beginSignIn().catch((error: unknown) => {
-      setAuthMessage(error instanceof Error ? error.message : "Sign-in could not start.");
-    });
+  const handleGoogleSignIn = async () => {
+    try {
+      setIsAuthSubmitting(true);
+      setAuthMessage("");
+      await signInWithGoogle();
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "Google sign-in could not start.");
+    } finally {
+      setIsAuthSubmitting(false);
+    }
+  };
+  const handleEmailSignIn = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) {
+      setAuthMessage("Enter an email and password to sign in.");
+      return;
+    }
+    try {
+      setIsAuthSubmitting(true);
+      setAuthMessage("");
+      await signInWithEmail(authEmail, authPassword);
+      setShowEmailAuth(false);
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "Email sign-in failed.");
+    } finally {
+      setIsAuthSubmitting(false);
+    }
+  };
+  const handleEmailSignUp = async () => {
+    if (!authEmail || !authPassword) {
+      setAuthMessage("Enter an email and password to create an account.");
+      return;
+    }
+    try {
+      setIsAuthSubmitting(true);
+      setAuthMessage("");
+      await signUpWithEmail(authEmail, authPassword);
+      setShowEmailAuth(false);
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "Account creation failed.");
+    } finally {
+      setIsAuthSubmitting(false);
+    }
   };
   const handleSignOut = () => {
     void beginSignOut().catch((error: unknown) => {
@@ -424,16 +484,97 @@ export default function App() {
           {apiStatusLabel}
         </span>
         {oidcConfigured && (
-          <button
-            className="auth-button"
-            disabled={!authReady}
-            onClick={authUser && !authUser.expired ? handleSignOut : handleSignIn}
-            type="button"
-          >
-            {authUser && !authUser.expired ? "Sign out" : authUser ? "Sign in again" : "Sign in"}
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            {authUser ? (
+              <>
+                <span style={{ fontSize: "12px", color: "#59677f", fontWeight: 600 }}>
+                  {authUser.displayName || authUser.email || "Authenticated User"}
+                </span>
+                <span style={{ fontSize: "11px", color: "#475569", background: "#f1f5f9", padding: "2px 6px", borderRadius: "4px", fontFamily: "monospace" }} title="Firebase UID">
+                  UID: {authUser.uid}
+                </span>
+                <button
+                  className="auth-button"
+                  disabled={!authReady || isAuthSubmitting}
+                  onClick={handleSignOut}
+                  type="button"
+                >
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className="auth-button"
+                  disabled={!authReady || isAuthSubmitting}
+                  onClick={handleGoogleSignIn}
+                  type="button"
+                >
+                  Sign in with Google
+                </button>
+                <button
+                  className="auth-button"
+                  disabled={!authReady || isAuthSubmitting}
+                  onClick={() => setShowEmailAuth(!showEmailAuth)}
+                  type="button"
+                >
+                  {showEmailAuth ? "Cancel" : "Email & Password"}
+                </button>
+              </>
+            )}
+          </div>
         )}
       </header>
+
+      {oidcConfigured && !authUser && showEmailAuth && (
+        <form
+          onSubmit={handleEmailSignIn}
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "8px",
+            alignItems: "center",
+            padding: "12px 16px",
+            background: "#f4f6fa",
+            borderRadius: "9px",
+            margin: "12px 8px",
+            border: "1px solid #d8deea",
+          }}
+        >
+          <input
+            type="email"
+            placeholder="Email address"
+            value={authEmail}
+            onChange={(event) => setAuthEmail(event.target.value)}
+            required
+            style={{ padding: "6px 10px", borderRadius: "6px", border: "1px solid #d8deea", font: "inherit", fontSize: "13px" }}
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={authPassword}
+            onChange={(event) => setAuthPassword(event.target.value)}
+            required
+            style={{ padding: "6px 10px", borderRadius: "6px", border: "1px solid #d8deea", font: "inherit", fontSize: "13px" }}
+          />
+          <button
+            type="submit"
+            className="auth-button"
+            disabled={isAuthSubmitting}
+            style={{ background: "#2563eb", color: "white", borderColor: "#2563eb" }}
+          >
+            Sign in
+          </button>
+          <button
+            type="button"
+            className="auth-button"
+            disabled={isAuthSubmitting}
+            onClick={handleEmailSignUp}
+          >
+            Create account
+          </button>
+        </form>
+      )}
 
       <section className="welcome">
         <p className="eyebrow">MULTI-COMPANY BUSINESS PLATFORM</p>
@@ -468,147 +609,302 @@ export default function App() {
         <p className="auth-message" role="status">Shared sign-in is not configured for this deployment.</p>
       )}
 
-      <section className="catalog" aria-labelledby="catalog-title">
-        <div className="catalog-heading">
-          <div>
-            <p className="eyebrow">{oidcConfigured ? "INVENTORY · COMPANY WORKSPACE" : "INVENTORY · DEVELOPMENT WORKSPACE"}</p>
-            <h2 id="catalog-title">Product catalog</h2>
-          </div>
-          <span className="tag tag-progress">{activeWorkspace?.companyName ?? (oidcConfigured ? "Select a company" : "Local tenant")}</span>
-        </div>
-        <p className="catalog-note">
-          {oidcConfigured
-            ? "Each entry is saved in this browser for the selected company, then sent to the shared server when online. Pending work stays here until confirmed. This queue is not encrypted."
-            : "Each entry is saved in this browser first, then synced to the local development tenant. Pending work stays here until confirmed. This development queue is not encrypted."}
-        </p>
-        {persistentStorageGranted === false && (
-          <p className="catalog-storage-note" role="status">
-            This browser did not grant persistent storage. Keep this device available until pending work syncs.
-          </p>
-        )}
-        <form className="catalog-form" onSubmit={createProduct}>
-          <label>
-            Product code
-            <input
-              id="product-code"
-              autoComplete="off"
-              maxLength={64}
-              onChange={(event) => setProductCode(event.target.value)}
-              placeholder="e.g. ITEM-001"
-              required
-              value={productCode}
-            />
-          </label>
-          <label>
-            Product name
-            <input
-              maxLength={200}
-              onChange={(event) => setProductName(event.target.value)}
-              placeholder="Product name"
-              required
-              value={productName}
-            />
-          </label>
-          <label>
-            Type
-            <select onChange={(event) => setProductType(event.target.value)} value={productType}>
-              <option value="stock">Stock item</option>
-              <option value="service">Service</option>
-              <option value="non_stock">Non-stock item</option>
-            </select>
-          </label>
-          <label className="description-field">
-            Description
-            <input
-              maxLength={2000}
-              onChange={(event) => setProductDescription(event.target.value)}
-              placeholder="Optional"
-              value={productDescription}
-            />
-          </label>
-          <button disabled={isSavingProduct || (oidcConfigured && (!authUser || !activeWorkspace))} type="submit">
-            {isSavingProduct ? "Saving on device…" : "Save product"}
-          </button>
-        </form>
-        {catalogMessage && <p className="catalog-message" role="status">{catalogMessage}</p>}
-        {unresolvedOperations.length > 0 && (
-          <section className="offline-queue" aria-label="Saved work waiting to sync">
-            <h3>Saved work · {unresolvedOperations.length}</h3>
-            {unresolvedOperations.map((operation) => (
-              <article className={`queue-row queue-${operation.status}`} key={operation.operationId}>
-                <div>
-                  <strong>{operation.payload.name}</strong>
-                  <span className="product-code">{operation.payload.productCode}</span>
-                  {oidcConfigured && operation.companyName && <span className="queue-company"> · {operation.companyName}</span>}
-                  {operation.message && <p>{operation.message}</p>}
-                </div>
-                <span className="queue-status">
-                  {operation.status === "queued" && "Waiting to sync"}
-                  {operation.status === "syncing" && "Syncing"}
-                  {operation.status === "conflict" && "Needs review"}
-                  {operation.status === "rejected" && "Needs correction"}
-                </span>
-                {(operation.status === "conflict" || operation.status === "rejected") && (
-                  <button
-                    className="queue-edit-button"
-                    onClick={() => editOperationCopy(operation)}
-                    type="button"
-                  >
-                    Edit a copy
-                  </button>
-                )}
-              </article>
-            ))}
+      <nav
+        aria-label="ERP Modules"
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "8px",
+          marginTop: "16px",
+          marginBottom: "16px",
+          padding: "8px 12px",
+          background: "#ffffff",
+          borderRadius: "8px",
+          border: "1px solid #d8deea",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setActiveNavTab("inventory")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "inventory" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "inventory" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "inventory" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          📦 Catalog & Inventory
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveNavTab("purchasing")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "purchasing" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "purchasing" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "purchasing" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          🛒 Purchasing & GRN
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveNavTab("sales")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "sales" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "sales" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "sales" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          💳 Sales & POS
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveNavTab("finance")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "finance" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "finance" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "finance" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          💰 Finance & Ledger
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveNavTab("foundation")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "foundation" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "foundation" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "foundation" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          🏢 Foundation & Admin
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveNavTab("saas")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "saas" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "saas" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "saas" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          🌐 SaaS & Tenants
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveNavTab("all")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "all" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "all" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "all" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          📑 View All
+        </button>
+      </nav>
+
+      {(activeNavTab === "inventory" || activeNavTab === "all") && (
+        <>
+          <section className="catalog" aria-labelledby="catalog-title">
+            <div className="catalog-heading">
+              <div>
+                <p className="eyebrow">{oidcConfigured ? "INVENTORY · COMPANY WORKSPACE" : "INVENTORY · DEVELOPMENT WORKSPACE"}</p>
+                <h2 id="catalog-title">Product catalog</h2>
+              </div>
+              <span className="tag tag-progress">{activeWorkspace?.companyName ?? (oidcConfigured ? "Select a company" : "Local tenant")}</span>
+            </div>
+            <p className="catalog-note">
+              {oidcConfigured
+                ? "Each entry is saved in this browser for the selected company, then sent to the shared server when online. Pending work stays here until confirmed. This queue is not encrypted."
+                : "Each entry is saved in this browser first, then synced to the local development tenant. Pending work stays here until confirmed. This development queue is not encrypted."}
+            </p>
+            {persistentStorageGranted === false && (
+              <p className="catalog-storage-note" role="status">
+                This browser did not grant persistent storage. Keep this device available until pending work syncs.
+              </p>
+            )}
+            <form className="catalog-form" onSubmit={createProduct}>
+              <label>
+                Product code
+                <input
+                  id="product-code"
+                  autoComplete="off"
+                  maxLength={64}
+                  onChange={(event) => setProductCode(event.target.value)}
+                  placeholder="e.g. ITEM-001"
+                  required
+                  value={productCode}
+                />
+              </label>
+              <label>
+                Product name
+                <input
+                  maxLength={200}
+                  onChange={(event) => setProductName(event.target.value)}
+                  placeholder="Product name"
+                  required
+                  value={productName}
+                />
+              </label>
+              <label>
+                Type
+                <select onChange={(event) => setProductType(event.target.value)} value={productType}>
+                  <option value="stock">Stock item</option>
+                  <option value="service">Service</option>
+                  <option value="non_stock">Non-stock item</option>
+                </select>
+              </label>
+              <label className="description-field">
+                Description
+                <input
+                  maxLength={2000}
+                  onChange={(event) => setProductDescription(event.target.value)}
+                  placeholder="Optional"
+                  value={productDescription}
+                />
+              </label>
+              <button disabled={isSavingProduct || (oidcConfigured && (!authUser || !activeWorkspace))} type="submit">
+                {isSavingProduct ? "Saving on device…" : "Save product"}
+              </button>
+            </form>
+            {catalogMessage && <p className="catalog-message" role="status">{catalogMessage}</p>}
+            {unresolvedOperations.length > 0 && (
+              <section className="offline-queue" aria-label="Saved work waiting to sync">
+                <h3>Saved work · {unresolvedOperations.length}</h3>
+                {unresolvedOperations.map((operation) => (
+                  <article className={`queue-row queue-${operation.status}`} key={operation.operationId}>
+                    <div>
+                      <strong>{operation.payload.name}</strong>
+                      <span className="product-code">{operation.payload.productCode}</span>
+                      {oidcConfigured && operation.companyName && <span className="queue-company"> · {operation.companyName}</span>}
+                      {operation.message && <p>{operation.message}</p>}
+                    </div>
+                    <span className="queue-status">
+                      {operation.status === "queued" && "Waiting to sync"}
+                      {operation.status === "syncing" && "Syncing"}
+                      {operation.status === "conflict" && "Needs review"}
+                      {operation.status === "rejected" && "Needs correction"}
+                    </span>
+                    {(operation.status === "conflict" || operation.status === "rejected") && (
+                      <button
+                        className="queue-edit-button"
+                        onClick={() => editOperationCopy(operation)}
+                        type="button"
+                      >
+                        Edit a copy
+                      </button>
+                    )}
+                  </article>
+                ))}
+              </section>
+            )}
+            <div className="product-list" aria-live="polite">
+              {visibleProducts.size === 0 ? (
+                <p className="catalog-empty">No products yet. Add the first item above.</p>
+              ) : (
+                [...visibleProducts.values()].map((product) => (
+                  <article className="product-row" key={product.productId}>
+                    <div>
+                      <strong>{product.name}</strong>
+                      {product.description && <p>{product.description}</p>}
+                    </div>
+                    <span className="product-code">{product.productCode}</span>
+                    <span className="tag">{product.productType.replace("_", " ")}</span>
+                  </article>
+                ))
+              )}
+            </div>
           </section>
-        )}
-        <div className="product-list" aria-live="polite">
-          {visibleProducts.size === 0 ? (
-            <p className="catalog-empty">No products yet. Add the first item above.</p>
-          ) : (
-            [...visibleProducts.values()].map((product) => (
-              <article className="product-row" key={product.productId}>
-                <div>
-                  <strong>{product.name}</strong>
-                  {product.description && <p>{product.description}</p>}
-                </div>
-                <span className="product-code">{product.productCode}</span>
-                <span className="tag">{product.productType.replace("_", " ")}</span>
-              </article>
-            ))
-          )}
-        </div>
-      </section>
 
-      <TenancyWorkspace />
+          <InventoryWorkspace
+            enabled={inventoryEnabled}
+            canQueue={!oidcConfigured || Boolean(queueOwnerKey && activeWorkspace)}
+            persistentStorageGranted={persistentStorageGranted}
+            queueScope={oidcConfigured && queueOwnerKey && activeWorkspace ? {
+              tenantId: activeWorkspace.tenantId,
+              companyId: activeWorkspace.companyId,
+              companyName: activeWorkspace.companyName,
+              ownerKey: queueOwnerKey,
+            } : undefined}
+            storageScope={inventoryStorageScope}
+            workspace={activeWorkspace}
+          />
+        </>
+      )}
 
-      <FinanceWorkspace
-        enabled={inventoryEnabled}
-        workspace={activeWorkspace}
-      />
+      {(activeNavTab === "purchasing" || activeNavTab === "all") && (
+        <PurchasingWorkspace
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
+      )}
 
-      <InventoryWorkspace
-        enabled={inventoryEnabled}
-        canQueue={!oidcConfigured || Boolean(queueOwnerKey && activeWorkspace)}
-        persistentStorageGranted={persistentStorageGranted}
-        queueScope={oidcConfigured && queueOwnerKey && activeWorkspace ? {
-          tenantId: activeWorkspace.tenantId,
-          companyId: activeWorkspace.companyId,
-          companyName: activeWorkspace.companyName,
-          ownerKey: queueOwnerKey,
-        } : undefined}
-        storageScope={inventoryStorageScope}
-        workspace={activeWorkspace}
-      />
+      {(activeNavTab === "sales" || activeNavTab === "all") && (
+        <SalesWorkspace
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
+      )}
 
-      <PurchasingWorkspace
-        enabled={inventoryEnabled}
-        workspace={activeWorkspace}
-      />
+      {(activeNavTab === "finance" || activeNavTab === "all") && (
+        <FinanceWorkspace
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
+      )}
 
-      <SalesWorkspace
-        enabled={inventoryEnabled}
-        workspace={activeWorkspace}
-      />
+      {(activeNavTab === "foundation" || activeNavTab === "all") && (
+        <FoundationWorkspace
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
+      )}
+
+      {(activeNavTab === "saas" || activeNavTab === "all") && (
+        <TenancyWorkspace />
+      )}
 
       {apiStatus === "offline" && (
         <p className="module-empty">Showing the local package plan; live catalog data loads when the API is online.</p>

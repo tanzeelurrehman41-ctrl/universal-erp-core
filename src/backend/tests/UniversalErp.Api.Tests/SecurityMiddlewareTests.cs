@@ -84,4 +84,39 @@ public sealed class SecurityMiddlewareTests
         Assert.False(wasCalled);
         Assert.Equal(StatusCodes.Status401Unauthorized, httpContext.Response.StatusCode);
     }
+
+    [Fact]
+    public async Task Middleware_Allows_Contexts_Endpoint_To_Bypass_Tenant_And_Company_Headers_For_Firebase_User()
+    {
+        var wasCalled = false;
+        RequestDelegate next = (ctx) =>
+        {
+            wasCalled = true;
+            return Task.CompletedTask;
+        };
+
+        var middleware = new AuthenticatedTenantContextMiddleware(next);
+        var httpContext = new DefaultHttpContext();
+        httpContext.Request.Path = "/api/v1/contexts";
+
+        var claims = new[]
+        {
+            new Claim("erp:issuer", "https://securetoken.google.com/universal-erp-staging"),
+            new Claim("sub", "firebase-uid-staging-12345"),
+            new Claim("email", "admin@universal-erp.invalid")
+        };
+        var identity = new ClaimsIdentity(claims, "Firebase");
+        httpContext.User = new ClaimsPrincipal(identity);
+
+        await middleware.InvokeAsync(httpContext, null!, null!);
+
+        Assert.True(wasCalled);
+        Assert.Equal(StatusCodes.Status200OK, httpContext.Response.StatusCode);
+    }
+
+    [Fact]
+    public void FirebaseAuthenticationHandler_SchemeName_Is_Firebase()
+    {
+        Assert.Equal("Firebase", FirebaseAuthenticationHandler.SchemeName);
+    }
 }

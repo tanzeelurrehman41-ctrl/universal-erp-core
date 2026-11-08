@@ -218,7 +218,7 @@ public sealed class PostgresFinanceRepository(NpgsqlDataSource dataSource) : IFi
             WHERE j.tenant_id = @tenantId AND j.company_id = @companyId
             GROUP BY j.id, j.journal_no, j.journal_date, j.fiscal_period_id, j.description,
                      j.functional_currency, j.source_module, j.source_type, j.source_id,
-                     j.status, j.posted_at
+                     j.status, j.posted_at, j.created_at
             ORDER BY j.journal_date DESC, j.created_at DESC;
             """;
 

@@ -1,4 +1,7 @@
 using System.Security.Claims;
+using FirebaseAdmin;
+using Google.Apis.Auth.OAuth2;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -15,17 +18,20 @@ using UniversalErp.Api.Sync;
 using UniversalErp.Api.Tenancy;
 using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Finance;
+using UniversalErp.Application.Foundation;
 using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Purchasing;
 using UniversalErp.Application.Sales;
 using UniversalErp.Application.Sync;
 using UniversalErp.Application.Tenancy;
 using UniversalErp.Infrastructure.Finance;
+using UniversalErp.Infrastructure.Foundation;
 using UniversalErp.Infrastructure.Inventory;
 using UniversalErp.Infrastructure.Purchasing;
 using UniversalErp.Infrastructure.Sales;
 using UniversalErp.Infrastructure.Sync;
 using UniversalErp.Infrastructure.Tenancy;
+using UniversalErp.Api.Foundation;
 
 var builder = WebApplication.CreateBuilder(args);
 var isDevelopment = builder.Environment.IsDevelopment();
@@ -41,6 +47,15 @@ builder.Services.AddSingleton(new PostgresHealthCheck(databaseConnectionString))
 builder.Services.AddHealthChecks()
     .AddCheck<PostgresHealthCheck>("postgresql");
 builder.Services.AddProblemDetails();
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
 builder.Services.AddScoped<IProductRepository, PostgresProductRepository>();
 builder.Services.AddScoped<ProductCatalogService>();
 builder.Services.AddScoped<IInventoryWorkflowRepository, PostgresInventoryWorkflowRepository>();
@@ -57,63 +72,113 @@ builder.Services.AddScoped<ISupplyChainOutboxRepository, PostgresSupplyChainOutb
 builder.Services.AddScoped<SupplyChainOutboxService>();
 builder.Services.AddScoped<ISalesRepository, PostgresSalesRepository>();
 builder.Services.AddScoped<SalesService>();
+builder.Services.AddScoped<IFoundationRepository, PostgresFoundationRepository>();
+builder.Services.AddScoped<FoundationService>();
 
-if (isDevelopment)
+var authProvider = builder.Configuration["Authentication:Provider"]?.Trim();
+var isAuthExplicitlyConfigured = !string.IsNullOrWhiteSpace(authProvider);
+
+if (isDevelopment && !isAuthExplicitlyConfigured)
 {
     builder.Services.AddSingleton<ITenantContextAccessor, DevelopmentTenantContextAccessor>();
 }
 else
 {
-    var authority = builder.Configuration["Authentication:Authority"];
-    var audience = builder.Configuration["Authentication:Audience"];
-    if (!Uri.TryCreate(authority, UriKind.Absolute, out var authorityUri) ||
-        authorityUri.Scheme != Uri.UriSchemeHttps ||
-        string.IsNullOrWhiteSpace(audience))
+    var effectiveProvider = string.IsNullOrWhiteSpace(authProvider) ? "OIDC" : authProvider;
+
+    if (effectiveProvider.Equals("Firebase", StringComparison.OrdinalIgnoreCase))
     {
-        throw new InvalidOperationException(
-            "Production requires an HTTPS Authentication:Authority and an Authentication:Audience.");
-    }
+        var projectId = builder.Configuration["Firebase:ProjectId"] ?? "universal-erp-staging";
+        var credentialPath = builder.Configuration["Firebase:CredentialPath"]
+            ?? Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS")
+            ?? @"C:\secrets\universal-erp-staging-firebase-adminsdk-fbsvc-286fd8c22d.json";
 
-    builder.Services
-        .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-        .AddJwtBearer(options =>
+        if (FirebaseApp.DefaultInstance == null)
         {
-            options.Authority = authority;
-            options.Audience = audience;
-            options.RequireHttpsMetadata = true;
-            options.MapInboundClaims = false;
-            options.TokenValidationParameters = new TokenValidationParameters
+            AppOptions appOptions;
+            if (File.Exists(credentialPath))
             {
-                ValidateIssuer = true,
-                ValidateAudience = true,
-                ValidateIssuerSigningKey = true,
-                ValidateLifetime = true,
-                ClockSkew = TimeSpan.FromMinutes(1),
-            };
-            options.Events = new JwtBearerEvents
-            {
-                OnTokenValidated = tokenContext =>
+#pragma warning disable CS0618 // Type or member is obsolete
+                using var stream = File.OpenRead(credentialPath);
+                var cred = GoogleCredential.FromStream(stream);
+                var startupLogger = LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Program>();
+                NetworkSynchronizedClock.Initialize(startupLogger);
+                NetworkSynchronizedClock.ApplyTo(cred, startupLogger);
+                appOptions = new AppOptions
                 {
-                    var issuer = tokenContext.SecurityToken.Issuer;
-                    var identity = tokenContext.Principal?.Identities
-                        .FirstOrDefault(candidate => candidate.IsAuthenticated);
-                    var subject = tokenContext.Principal?.FindFirst("sub")?.Value;
-                    if (string.IsNullOrWhiteSpace(issuer) || identity is null ||
-                        string.IsNullOrWhiteSpace(subject))
-                    {
-                        tokenContext.Fail("The validated token must contain an issuer and subject.");
-                        return Task.CompletedTask;
-                    }
+                    Credential = cred,
+                    ProjectId = projectId,
+                };
+#pragma warning restore CS0618
+            }
+            else
+            {
+                appOptions = new AppOptions
+                {
+                    ProjectId = projectId,
+                };
+            }
+            FirebaseApp.Create(appOptions);
+        }
 
-                    foreach (var existingIssuer in identity.FindAll("erp:issuer").ToArray())
+        builder.Services
+            .AddAuthentication(FirebaseAuthenticationHandler.SchemeName)
+            .AddScheme<AuthenticationSchemeOptions, FirebaseAuthenticationHandler>(
+                FirebaseAuthenticationHandler.SchemeName, null);
+    }
+    else
+    {
+        var authority = builder.Configuration["Authentication:Authority"];
+        var audience = builder.Configuration["Authentication:Audience"];
+        if (!Uri.TryCreate(authority, UriKind.Absolute, out var authorityUri) ||
+            authorityUri.Scheme != Uri.UriSchemeHttps ||
+            string.IsNullOrWhiteSpace(audience))
+        {
+            throw new InvalidOperationException(
+                "OIDC Authentication requires an HTTPS Authentication:Authority and an Authentication:Audience.");
+        }
+
+        builder.Services
+            .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            .AddJwtBearer(options =>
+            {
+                options.Authority = authority;
+                options.Audience = audience;
+                options.RequireHttpsMetadata = true;
+                options.MapInboundClaims = false;
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidateAudience = true,
+                    ValidateIssuerSigningKey = true,
+                    ValidateLifetime = true,
+                    ClockSkew = TimeSpan.FromMinutes(1),
+                };
+                options.Events = new JwtBearerEvents
+                {
+                    OnTokenValidated = tokenContext =>
                     {
-                        identity.RemoveClaim(existingIssuer);
-                    }
-                    identity.AddClaim(new Claim("erp:issuer", issuer));
-                    return Task.CompletedTask;
-                },
-            };
-        });
+                        var issuer = tokenContext.SecurityToken.Issuer;
+                        var identity = tokenContext.Principal?.Identities
+                            .FirstOrDefault(candidate => candidate.IsAuthenticated);
+                        var subject = tokenContext.Principal?.FindFirst("sub")?.Value;
+                        if (string.IsNullOrWhiteSpace(issuer) || identity is null ||
+                            string.IsNullOrWhiteSpace(subject))
+                        {
+                            tokenContext.Fail("The validated token must contain an issuer and subject.");
+                            return Task.CompletedTask;
+                        }
+
+                        foreach (var existingIssuer in identity.FindAll("erp:issuer").ToArray())
+                        {
+                            identity.RemoveClaim(existingIssuer);
+                        }
+                        identity.AddClaim(new Claim("erp:issuer", issuer));
+                        return Task.CompletedTask;
+                    },
+                };
+            });
+    }
 
     builder.Services.AddAuthorization(options =>
     {
@@ -147,8 +212,9 @@ else
 }
 
 var app = builder.Build();
+app.UseCors();
 
-if (!isDevelopment)
+if (!isDevelopment || isAuthExplicitlyConfigured)
 {
     app.UseAuthentication();
     app.UseMiddleware<AuthenticatedTenantContextMiddleware>();
@@ -309,6 +375,7 @@ app.MapPurchasingEndpoints(isDevelopment);
 app.MapSalesEndpoints(isDevelopment);
 app.MapTenantEndpoints(isDevelopment);
 app.MapFinanceEndpoints(isDevelopment);
+productApi.MapFoundationEndpoints();
 
 app.MapGet("/", () => Results.Ok(new
 {

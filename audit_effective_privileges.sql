@@ -45,7 +45,7 @@ approved_table_matrix (schemaname, tablename, allow_select, allow_insert, allow_
     ('erp_inventory', 'outbox_event',            false, true,  false, false, false, false, false, false),
     ('erp_inventory', 'warehouse',               true,  false, false, false, false, false, false, false),
     ('erp_inventory', 'stock_bin',               true,  false, false, false, false, false, false, false),
-    ('erp_inventory', 'product',                 true,  false, false, false, false, false, false, false),
+    ('erp_inventory', 'product',                 true,  true,  false, false, false, false, false, false),
     ('erp_inventory', 'product_variant',         true,  false, false, false, false, false, false, false),
     ('erp_inventory', 'unit_of_measure',         true,  false, false, false, false, false, false, false),
     ('erp_inventory', 'stock_status',            true,  false, false, false, false, false, false, false),
@@ -476,12 +476,30 @@ audit_violations AS (
       AND p.proname IN ('pg_terminate_backend', 'pg_cancel_backend', 'pg_reload_conf', 'pg_rotate_logfile', 'pg_read_file', 'pg_read_binary_file', 'pg_write_file')
       AND has_function_privilege('erp_app', p.oid, 'EXECUTE')
     UNION ALL
+    SELECT 'DomainRoutine', 'identity.list_user_company_contexts(text, text)', 'EXECUTE',
+           'Expected TRUE', 'Got FALSE', 'Missing required EXECUTE on identity.list_user_company_contexts'
+    WHERE NOT has_function_privilege('erp_app', 'identity.list_user_company_contexts(text, text)', 'EXECUTE')
+    UNION ALL
+    SELECT 'DomainRoutine', 'identity.resolve_authenticated_user_context(uuid, uuid, text, text)', 'EXECUTE',
+           'Expected TRUE', 'Got FALSE', 'Missing required EXECUTE on identity.resolve_authenticated_user_context'
+    WHERE NOT has_function_privilege('erp_app', 'identity.resolve_authenticated_user_context(uuid, uuid, text, text)', 'EXECUTE')
+    UNION ALL
+    SELECT 'DomainRoutine', 'identity.user_has_permission(uuid, uuid, uuid, text)', 'EXECUTE',
+           'Expected TRUE', 'Got FALSE', 'Missing required EXECUTE on identity.user_has_permission'
+    WHERE NOT has_function_privilege('erp_app', 'identity.user_has_permission(uuid, uuid, uuid, text)', 'EXECUTE')
+    UNION ALL
     SELECT 'DomainRoutine', format('%I.%I(%s)', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)), 'EXECUTE',
            'Expected FALSE', 'Got TRUE', 'Unapproved routine execution in domain schema'
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname IN ('sync', 'erp_inventory', 'erp_purchasing', 'erp_sales', 'finance', 'platform', 'identity', 'organization')
       AND has_function_privilege('erp_app', p.oid, 'EXECUTE')
+      AND NOT (n.nspname = 'identity' AND p.proname IN (
+          'list_user_company_contexts', 'resolve_authenticated_user_context', 'user_has_permission',
+          'get_user_profile', 'get_company_settings', 'update_company_settings',
+          'list_company_users', 'invite_or_assign_company_user', 'list_roles_and_permissions',
+          'record_audit_event', 'list_audit_events'
+      ))
 
     -- CATEGORY 7: PostgreSQL 17 Cluster-Wide Dynamic Role Membership & SET ROLE Audit
     UNION ALL

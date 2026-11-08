@@ -37,6 +37,16 @@ public static class SalesEndpointMappings
                 : ToProblem(result);
         });
 
+        var updateCustomer = sales.MapPut("/customers/{id:guid}", async (
+            Guid id,
+            UpdateCustomerRequest req,
+            SalesService svc,
+            CancellationToken ct) =>
+        {
+            var result = await svc.UpdateCustomerAsync(id, req, ct);
+            return result.IsSuccess ? Results.Ok(result.Value) : ToProblem(result);
+        });
+
         // ── Sales Orders ──────────────────────────────────────────────────────
         var listOrders = sales.MapGet("/orders", async (
             SalesService svc,
@@ -110,6 +120,7 @@ public static class SalesEndpointMappings
             listCustomers.RequireAuthorization("sales.customer.view");
             getCustomer.RequireAuthorization("sales.customer.view");
             createCustomer.RequireAuthorization("sales.customer.create");
+            updateCustomer.RequireAuthorization("sales.customer.create");
             listOrders.RequireAuthorization("sales.order.view");
             getOrder.RequireAuthorization("sales.order.view");
             createOrder.RequireAuthorization("sales.order.create");

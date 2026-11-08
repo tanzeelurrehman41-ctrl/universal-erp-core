@@ -11,6 +11,174 @@ namespace UniversalErp.Infrastructure.Inventory;
 public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSource)
     : IInventoryWorkflowRepository
 {
+    public async Task<IReadOnlyList<ProductCategorySummary>> ListCategoriesAsync(
+        Guid tenantId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, null, cancellationToken);
+        await using var command = new NpgsqlCommand(
+            "SELECT category_id, code, name, parent_category_id FROM erp_inventory.product_category WHERE tenant_id = @tenantId ORDER BY code",
+            db.Connection,
+            db.Transaction);
+        command.Parameters.AddWithValue("tenantId", tenantId);
+        var items = new List<ProductCategorySummary>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new ProductCategorySummary(
+                reader.GetGuid(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetGuid(3)));
+        }
+        await reader.CloseAsync();
+        await db.Transaction.CommitAsync(cancellationToken);
+        return items;
+    }
+
+    public async Task<Result<ProductCategorySummary>> CreateCategoryAsync(
+        Guid tenantId,
+        CreateProductCategoryRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, null, cancellationToken);
+        try
+        {
+            var id = Guid.NewGuid();
+            await using var command = new NpgsqlCommand(
+                """
+                INSERT INTO erp_inventory.product_category
+                    (tenant_id, category_id, code, name, parent_category_id)
+                VALUES
+                    (@tenantId, @id, @code, @name, @parent)
+                RETURNING category_id, code, name, parent_category_id
+                """,
+                db.Connection,
+                db.Transaction);
+            command.Parameters.AddWithValue("tenantId", tenantId);
+            command.Parameters.AddWithValue("id", id);
+            command.Parameters.AddWithValue("code", request.Code!);
+            command.Parameters.AddWithValue("name", request.Name!);
+            command.Parameters.AddWithValue("parent", request.ParentCategoryId.HasValue ? (object)request.ParentCategoryId.Value : DBNull.Value);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await reader.ReadAsync(cancellationToken);
+            var category = new ProductCategorySummary(
+                reader.GetGuid(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetGuid(3));
+            await reader.CloseAsync();
+            await db.Transaction.CommitAsync(cancellationToken);
+            return Result<ProductCategorySummary>.Success(category);
+        }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            return await RollbackWithFailureAsync<ProductCategorySummary>(db, "DUPLICATE_CATEGORY_CODE", cancellationToken);
+        }
+    }
+
+    public async Task<IReadOnlyList<InventoryMovementSummary>> ListMovementsAsync(
+        Guid tenantId,
+        Guid companyId,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, companyId, cancellationToken);
+        const string movSql = """
+            SELECT m.movement_id, m.movement_type, m.source_document_type, m.source_document_id,
+                   m.occurred_at, m.note
+            FROM erp_inventory.inventory_movement m
+            WHERE m.tenant_id = @tenantId AND m.company_id = @companyId
+            ORDER BY m.occurred_at DESC
+            LIMIT @limit;
+            """;
+
+        var movements = new List<InventoryMovementSummary>();
+        var movementIds = new List<Guid>();
+
+        await using (var cmd = new NpgsqlCommand(movSql, db.Connection, db.Transaction))
+        {
+            cmd.Parameters.AddWithValue("tenantId", tenantId);
+            cmd.Parameters.AddWithValue("companyId", companyId);
+            cmd.Parameters.AddWithValue("limit", limit);
+
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var mId = reader.GetGuid(0);
+                movementIds.Add(mId);
+                movements.Add(new InventoryMovementSummary(
+                    mId,
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetGuid(3),
+                    reader.GetFieldValue<DateTimeOffset>(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    []));
+            }
+            await reader.CloseAsync();
+        }
+
+        if (movementIds.Count == 0)
+        {
+            await db.Transaction.CommitAsync(cancellationToken);
+            return [];
+        }
+
+        const string legsSql = """
+            SELECT l.movement_id, l.leg_number, l.variant_id, v.sku,
+                   l.warehouse_id, w.code, l.bin_id, b.code,
+                   l.status_code, l.quantity_delta, l.base_uom_id, u.code
+            FROM erp_inventory.inventory_movement_leg l
+            JOIN erp_inventory.product_variant v ON v.tenant_id = l.tenant_id AND v.variant_id = l.variant_id
+            JOIN erp_inventory.warehouse w ON w.tenant_id = l.tenant_id AND w.company_id = l.company_id AND w.warehouse_id = l.warehouse_id
+            JOIN erp_inventory.stock_bin b ON b.tenant_id = l.tenant_id AND b.company_id = l.company_id AND b.bin_id = l.bin_id
+            JOIN erp_inventory.unit_of_measure u ON u.tenant_id = l.tenant_id AND u.uom_id = l.base_uom_id
+            WHERE l.tenant_id = @tenantId AND l.company_id = @companyId AND l.movement_id = ANY(@mIds)
+            ORDER BY l.movement_id, l.leg_number;
+            """;
+
+        var legsMap = new Dictionary<Guid, List<InventoryMovementLegSummary>>();
+        await using (var legCmd = new NpgsqlCommand(legsSql, db.Connection, db.Transaction))
+        {
+            legCmd.Parameters.AddWithValue("tenantId", tenantId);
+            legCmd.Parameters.AddWithValue("companyId", companyId);
+            legCmd.Parameters.AddWithValue("mIds", movementIds.ToArray());
+
+            await using var legReader = await legCmd.ExecuteReaderAsync(cancellationToken);
+            while (await legReader.ReadAsync(cancellationToken))
+            {
+                var mId = legReader.GetGuid(0);
+                if (!legsMap.TryGetValue(mId, out var list))
+                {
+                    list = [];
+                    legsMap[mId] = list;
+                }
+                list.Add(new InventoryMovementLegSummary(
+                    legReader.GetInt32(1),
+                    legReader.GetGuid(2),
+                    legReader.GetString(3),
+                    legReader.GetGuid(4),
+                    legReader.GetString(5),
+                    legReader.GetGuid(6),
+                    legReader.GetString(7),
+                    legReader.GetString(8),
+                    legReader.GetDecimal(9),
+                    legReader.GetGuid(10),
+                    legReader.GetString(11)));
+            }
+            await legReader.CloseAsync();
+        }
+
+        await db.Transaction.CommitAsync(cancellationToken);
+
+        return movements.Select(m => m with
+        {
+            Legs = legsMap.TryGetValue(m.MovementId, out var l) ? l : []
+        }).ToList();
+    }
+
     public async Task<IReadOnlyList<UnitOfMeasureSummary>> ListUnitsAsync(
         Guid tenantId,
         CancellationToken cancellationToken)

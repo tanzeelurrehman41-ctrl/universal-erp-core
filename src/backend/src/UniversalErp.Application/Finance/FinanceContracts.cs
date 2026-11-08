@@ -97,3 +97,19 @@ public sealed record TrialBalanceRow(
     decimal TotalDebit,
     decimal TotalCredit,
     decimal NetBalance);
+
+public sealed record FinancialStatementLine(
+    string AccountCode,
+    string AccountName,
+    string AccountType,
+    decimal Balance);
+
+public sealed record FinancialStatementsSummary(
+    decimal TotalAssets,
+    decimal TotalLiabilities,
+    decimal TotalEquity,
+    decimal TotalRevenue,
+    decimal TotalExpenses,
+    decimal NetIncome,
+    IReadOnlyList<FinancialStatementLine> BalanceSheetLines,
+    IReadOnlyList<FinancialStatementLine> IncomeStatementLines);

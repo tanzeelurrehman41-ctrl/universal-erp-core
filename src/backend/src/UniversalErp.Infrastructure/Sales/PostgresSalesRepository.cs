@@ -118,6 +118,42 @@ public sealed class PostgresSalesRepository(
         return id;
     }
 
+    public async Task<bool> UpdateCustomerAsync(Guid customerId, UpdateCustomerRequest req, CancellationToken ct)
+    {
+        await using var conn = await OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        await SetRls(cmd, Ctx);
+
+        cmd.CommandText = """
+            UPDATE erp_sales.customer
+            SET name = @name, customer_type = @type, contact_name = @contact,
+                email = @email, phone = @phone, address = @addr,
+                ntn_number = @ntn, strn_number = @strn, credit_limit = @credit,
+                payment_terms_days = @terms, is_active = @active, updated_at = now()
+            WHERE tenant_id = @tid AND company_id = @cid AND customer_id = @id;
+            """;
+        cmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+        cmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+        cmd.Parameters.AddWithValue("id", customerId);
+        cmd.Parameters.AddWithValue("name", req.Name.Trim());
+        cmd.Parameters.AddWithValue("type", req.CustomerType);
+        cmd.Parameters.AddWithValue("contact", (object?)req.ContactName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("email", (object?)req.Email ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("phone", (object?)req.Phone ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("addr", (object?)req.Address ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("ntn", (object?)req.NtnNumber ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("strn", (object?)req.StrnNumber ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("credit", req.CreditLimit);
+        cmd.Parameters.AddWithValue("terms", req.PaymentTermsDays);
+        cmd.Parameters.AddWithValue("active", req.IsActive);
+
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        await tx.CommitAsync(ct);
+        return rows > 0;
+    }
+
     // ── Sales Orders ──────────────────────────────────────────────────────────
 
     public async Task<IReadOnlyList<SalesOrderSummary>> ListOrdersAsync(CancellationToken ct)

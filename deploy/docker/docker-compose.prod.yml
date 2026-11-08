@@ -1,0 +1,86 @@
+version: "3.8"
+
+services:
+  postgres-prod:
+    image: postgres:17-alpine
+    container_name: universal-erp-postgres-prod
+    restart: always
+    environment:
+      POSTGRES_DB: universal_erp_prod
+      POSTGRES_USER: erp_dev
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password
+    secrets:
+      - db_admin_password
+    volumes:
+      - prod_postgres_data:/var/lib/postgresql/data
+      - ./prod_backups:/backups
+    command: >
+      postgres
+        -c max_connections=100
+        -c shared_buffers=512MB
+        -c effective_cache_size=1536MB
+        -c work_mem=16MB
+        -c maintenance_work_mem=128MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=16MB
+        -c default_statistics_target=100
+        -c random_page_cost=1.1
+        -c effective_io_concurrency=200
+        -c ssl=off
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erp_dev -d universal_erp_prod"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ../../
+      dockerfile: deploy/docker/Dockerfile.api
+    container_name: universal-erp-api-prod
+    restart: always
+    depends_on:
+      postgres-prod:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://0.0.0.0:5000
+      ConnectionStrings__UniversalErp: "Host=postgres-prod;Port=5432;Database=universal_erp_prod;Username=erp_app;Password_FILE=/run/secrets/db_app_password;Pooling=true;Minimum Pool Size=5;Maximum Pool Size=50"
+      Authentication__Provider: "Firebase"
+      Firebase__ProjectId: "universal-erp-prod"
+      Firebase__CredentialPath: "/run/secrets/firebase_adminsdk_json"
+    secrets:
+      - db_app_password
+      - firebase_adminsdk_json
+    ports:
+      - "127.0.0.1:5000:5000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: ../../src/web
+      dockerfile: Dockerfile
+    container_name: universal-erp-web-prod
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+
+secrets:
+  db_admin_password:
+    file: ./prod_secrets/db_admin_password.txt
+  db_app_password:
+    file: ./prod_secrets/db_app_password.txt
+  firebase_adminsdk_json:
+    file: ./prod_secrets/firebase_adminsdk.json
+
+volumes:
+  prod_postgres_data:
