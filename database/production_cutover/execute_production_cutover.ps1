@@ -2,33 +2,32 @@
 param(
     [string]$TargetHost = "127.0.0.1",
     [int]$TargetPort = 5432,
-    [string]$TargetDatabase = "universal_erp_prod",
-    [string]$AdminUser = "erp_dev",
+    [string]$TargetDatabase = "universal_erp",
+    [string]$AdminUser = "postgres",
     [string]$AdminPassword = "",
-    [string]$AppUser = "erp_app",
-    [string]$AppPassword = "",
     [switch]$ConfirmExecution = $false
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$MasterDdlPath = Join-Path $ScriptDir "01_production_schema_ddl.sql"
+$IncrementalCutoverPath = Join-Path $ScriptDir "03_cutover_universal_erp_m021_m022.sql"
+$FreshMasterDdlPath = Join-Path $ScriptDir "01_production_schema_ddl.sql"
 $AuditRlsPath = Join-Path (Split-Path -Parent (Split-Path -Parent $ScriptDir)) "audit_rls_policies.sql"
+$BackupsDir = "C:\backups"
+
+$psql = "C:\Program Files\PostgreSQL\18\bin\psql.exe"
+$pg_dump = "C:\Program Files\PostgreSQL\18\bin\pg_dump.exe"
+if (-not (Test-Path $psql)) { $psql = "psql" }
+if (-not (Test-Path $pg_dump)) { $pg_dump = "pg_dump" }
 
 Write-Host "=========================================================================="
 Write-Host "=== Universal ERP Production Cutover & Schema Deployment Execution ==="
 Write-Host "=========================================================================="
 
-if (-not (Test-Path $MasterDdlPath)) {
-    throw "CRITICAL: Master production DDL package not found at $MasterDdlPath"
-}
-
-$masterDdlHash = (Get-FileHash -Path $MasterDdlPath -Algorithm SHA256).Hash
 Write-Host "Target Host:        $TargetHost"
 Write-Host "Target Port:        $TargetPort"
 Write-Host "Target Database:    $TargetDatabase"
 Write-Host "Target Admin User:  $AdminUser"
-Write-Host "Master DDL SHA256:  $masterDdlHash"
 Write-Host ""
 
 if (-not $ConfirmExecution) {
@@ -42,51 +41,65 @@ if (-not $ConfirmExecution) {
 
 Write-Host "[CONFIRMED] Stakeholder authorization received. Initiating cutover..." -ForegroundColor Green
 
-# 1. Verify Connectivity
-Write-Host "`n[1/5] Verifying PostgreSQL connection to ${TargetHost}:${TargetPort}/${TargetDatabase}..."
-$env:PGPASSWORD = $AdminPassword
-psql -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -c "SELECT version();"
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to connect to target production database."
-}
+if ($AdminPassword) { $env:PGPASSWORD = $AdminPassword }
 
-# 2. Apply Master DDL within Transaction
-Write-Host "`n[2/5] Applying Master DDL Package (001-022)..."
-Get-Content $MasterDdlPath -Raw | psql -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -v ON_ERROR_STOP=1
-if ($LASTEXITCODE -ne 0) {
-    throw "Master DDL execution failed. Transaction rolled back automatically."
-}
-Write-Host "[PASS] Master DDL package successfully applied." -ForegroundColor Green
+# 1. Verify Connectivity and State
+Write-Host "`n[1/6] Verifying connection to ${TargetHost}:${TargetPort}/${TargetDatabase}..."
+$ver = & $psql -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -w -t -A -c "SELECT current_database(), version();"
+if ($LASTEXITCODE -ne 0) { throw "Failed to connect to target production database." }
+Write-Host "Connected: $ver" -ForegroundColor Green
 
-# 3. Verify Migration Ledger
-Write-Host "`n[3/5] Verifying production migration ledger..."
-$ledgerCountRaw = psql -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -t -c "SELECT count(*) FROM public.schema_migrations;"
-$ledgerCount = ($ledgerCountRaw | Out-String).Trim()
-Write-Host "Migrations recorded: $ledgerCount / 22"
-if ([int]$ledgerCount -ne 22) {
-    throw "Migration count mismatch in production ledger: expected 22, got $ledgerCount"
-}
+# 2. Check Existing Migration Count
+$ledgerCountRaw = & $psql -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -w -t -A -c "SELECT count(*) FROM public.schema_migrations;"
+$initialLedgerCount = if ($LASTEXITCODE -eq 0 -and $ledgerCountRaw) { [int]$ledgerCountRaw.Trim() } else { 0 }
+Write-Host "Initial recorded migrations: $initialLedgerCount"
 
-# 4. Execute Gate 11 RLS Policy Audit
-Write-Host "`n[4/5] Running Gate 11 Row-Level Security Audit on production database..."
-$rlsViolations = Get-Content $AuditRlsPath -Raw | psql -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -t -A -v ON_ERROR_STOP=1
+# 3. Capture Pre-Deployment Snapshot
+Write-Host "`n[2/6] Capturing Pre-Cutover Backup of $TargetDatabase..."
+$ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+$preDumpPath = Join-Path $BackupsDir "production_${TargetDatabase}_pre_cutover_${ts}.dump"
+& $pg_dump -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -Fc -f $preDumpPath
+if ($LASTEXITCODE -ne 0) { throw "Pre-deployment pg_dump failed!" }
+$preHash = (Get-FileHash -Path $preDumpPath -Algorithm SHA256).Hash
+$preSize = (Get-Item $preDumpPath).Length
+Write-Host "[PASS] Pre-cutover backup created: $preDumpPath ($preSize bytes, SHA256: $preHash)" -ForegroundColor Green
+
+# 4. Apply Deployment Package
+if ($initialLedgerCount -ge 20) {
+    Write-Host "`n[3/6] Applying Incremental Cutover (Migrations 021 & 022) under advisory lock 714209..."
+    & $psql -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -w -v ON_ERROR_STOP=1 -f $IncrementalCutoverPath
+    if ($LASTEXITCODE -ne 0) { throw "Incremental cutover failed. Transaction rolled back." }
+} else {
+    Write-Host "`n[3/6] Applying Full Fresh Master DDL Package (Migrations 001-022)..."
+    Get-Content $FreshMasterDdlPath -Raw | & $psql -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -w -v ON_ERROR_STOP=1
+    if ($LASTEXITCODE -ne 0) { throw "Master DDL failed. Transaction rolled back." }
+}
+Write-Host "[PASS] Database migration committed successfully." -ForegroundColor Green
+
+# 5. Verify Ledger and Forced RLS
+Write-Host "`n[4/6] Verifying schema migrations ledger..."
+$finalLedgerCountRaw = & $psql -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -w -t -A -c "SELECT count(*) FROM public.schema_migrations;"
+$finalLedgerCount = [int]$finalLedgerCountRaw.Trim()
+Write-Host "Final migrations recorded: $finalLedgerCount / 22"
+if ($finalLedgerCount -ne 22) { throw "Expected 22 migrations, got $finalLedgerCount" }
+
+Write-Host "`n[5/6] Executing Gate 11 RLS Policy Audit on production database..."
+$rlsViolations = Get-Content $AuditRlsPath -Raw | & $psql -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -w -t -A -v ON_ERROR_STOP=1
 $rlsViolationsClean = ($rlsViolations | Out-String).Trim()
 if (-not [string]::IsNullOrWhiteSpace($rlsViolationsClean)) {
-    throw "CRITICAL: Gate 11 RLS Policy Audit failed on production: $rlsViolationsClean"
+    throw "CRITICAL: Gate 11 RLS Audit failed with violations: $rlsViolationsClean"
 }
-Write-Host "[PASS] Gate 11 RLS Audit Verified: 0 policy violations in production." -ForegroundColor Green
+Write-Host "[PASS] Gate 11 RLS Audit Verified: 0 policy violations." -ForegroundColor Green
 
-# 5. Create Baseline Cryptographic Backup of Production DB
-Write-Host "`n[5/5] Generating baseline production backup (pg_dump -Fc)..."
-$prodBackupFile = Join-Path $ScriptDir "universal_erp_prod_live_baseline_$(Get-Date -Format 'yyyyMMdd_HHmmss').dump"
-pg_dump -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -Fc -f $prodBackupFile
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to create baseline dump of production database."
-}
-$prodBackupHash = (Get-FileHash -Path $prodBackupFile -Algorithm SHA256).Hash
-Write-Host "[PASS] Live production baseline backup created: $prodBackupFile" -ForegroundColor Green
-Write-Host "       SHA256: $prodBackupHash" -ForegroundColor Green
+# 6. Post-Deployment Snapshot
+Write-Host "`n[6/6] Generating Post-Cutover Baseline Snapshot..."
+$postDumpPath = Join-Path $BackupsDir "production_${TargetDatabase}_post_cutover_${ts}.dump"
+& $pg_dump -h $TargetHost -p $TargetPort -U $AdminUser -d $TargetDatabase -Fc -f $postDumpPath
+if ($LASTEXITCODE -ne 0) { throw "Post-cutover pg_dump failed!" }
+$postHash = (Get-FileHash -Path $postDumpPath -Algorithm SHA256).Hash
+$postSize = (Get-Item $postDumpPath).Length
+Write-Host "[PASS] Post-cutover baseline snapshot created: $postDumpPath ($postSize bytes, SHA256: $postHash)" -ForegroundColor Green
 
 Write-Host "`n=========================================================================="
-Write-Host "=== PRODUCTION DATABASE CUTOVER SUCCESSFULLY COMPLETED ==="
+Write-Host "=== PRODUCTION DATABASE CUTOVER COMPLETED SUCCESSFULLY ==="
 Write-Host "=========================================================================="
