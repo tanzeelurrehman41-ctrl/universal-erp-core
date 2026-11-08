@@ -7,6 +7,7 @@ import FinanceWorkspace from "./FinanceWorkspace";
 import FoundationWorkspace from "./FoundationWorkspace";
 import {
   apiFetch,
+  apiUrl,
   beginSignOut,
   getAccessToken,
   signInWithGoogle,
@@ -178,7 +179,7 @@ export default function App() {
 
     const checkApi = async () => {
       try {
-        const response = await fetch("/health");
+        const response = await fetch(apiUrl("/health"));
         if (!response.ok) {
           throw new Error("API health check failed");
         }
@@ -373,7 +374,7 @@ export default function App() {
 
     const loadModules = async () => {
       try {
-        const response = await fetch("/api/modules");
+        const response = await fetch(apiUrl("/api/modules"));
         if (!response.ok) {
           throw new Error("Module catalog request failed");
         }

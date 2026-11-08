@@ -1,4 +1,5 @@
 import { decryptOfflineValue, encryptOfflineValue } from "./offlineReceiptQueue";
+import { apiUrl } from "./auth";
 
 export type ProductCreatePayload = {
   productCode: string;
@@ -318,7 +319,7 @@ async function syncWithAuthenticatedServer(
   for (const operation of eligible) {
     await updateOperation(operation.operationId, { status: "syncing", message: undefined });
     try {
-      const response = await fetch("/api/v1/products", {
+      const response = await fetch(apiUrl("/api/v1/products"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

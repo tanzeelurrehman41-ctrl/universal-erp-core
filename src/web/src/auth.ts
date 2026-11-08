@@ -46,6 +46,14 @@ const messagingSenderId = import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID?.tri
 export const oidcConfigured = Boolean(apiKey && projectId);
 export const authConfigured = oidcConfigured;
 
+const apiBase = (import.meta.env.VITE_API_BASE_URL || "").trim().replace(/\/+$/, "");
+
+export function apiUrl(path: string): string {
+  if (!apiBase) return path;
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  return `${apiBase}${cleanPath}`;
+}
+
 let app: FirebaseApp | null = null;
 let auth: Auth | null = null;
 const googleProvider = new GoogleAuthProvider();
@@ -166,7 +174,11 @@ export async function apiFetch(
   workspace?: ApiWorkspaceScope | null,
   workspaceRequired = true,
 ): Promise<Response> {
-  if (!authConfigured) return fetch(input, init);
+  const resolvedInput = typeof input === "string" && input.startsWith("/")
+    ? apiUrl(input)
+    : input;
+
+  if (!authConfigured) return fetch(resolvedInput, init);
 
   const token = await getAccessToken();
   if (!token) throw new Error("Sign in again to connect to the shared ERP server.");
@@ -181,7 +193,7 @@ export async function apiFetch(
     headers.set("X-Company-Id", workspace.companyId);
   }
 
-  return fetch(input, {
+  return fetch(resolvedInput, {
     ...init,
     headers,
   });
