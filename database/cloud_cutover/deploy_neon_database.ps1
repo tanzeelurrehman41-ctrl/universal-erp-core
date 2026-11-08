@@ -25,6 +25,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RootDir = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 $MasterDdlPath = Join-Path (Join-Path (Split-Path -Parent $ScriptDir) "production_cutover") "01_production_schema_ddl.sql"
 $DemoSeedPath = Join-Path $ScriptDir "02_demo_tenant_seed.sql"
+$ReconcilePrivsPath = Join-Path $ScriptDir "03_reconcile_least_privilege.sql"
 $AuditRlsPath = Join-Path $RootDir "audit_rls_policies.sql"
 $AuditPrivsPath = Join-Path $RootDir "audit_effective_privileges.sql"
 
@@ -262,6 +263,18 @@ if ($LASTEXITCODE -ne 0) {
     throw "CRITICAL: Synthetic demo tenant seed failed on Neon."
 }
 Write-Host "[PASS] Synthetic cloud demonstration tenant initialized cleanly." -ForegroundColor Green
+
+# 6b. Reconcile Least-Privilege Permissions & Neutralize Default ACLs
+Write-Host "`n[STEP 3b/6] Reconciling least-privilege role matrix and neutralizing default ACLs..." -ForegroundColor Yellow
+if (-not (Test-Path $ReconcilePrivsPath)) {
+    throw "Least-privilege reconciliation SQL missing at: $ReconcilePrivsPath"
+}
+
+Get-Content $ReconcilePrivsPath -Raw | & $psql "$migrationConn" -v ON_ERROR_STOP=1
+if ($LASTEXITCODE -ne 0) {
+    throw "CRITICAL: Least-privilege role reconciliation failed on Neon."
+}
+Write-Host "[PASS] Least-privilege permissions reconciled and default ACLs neutralized successfully." -ForegroundColor Green
 
 # 7. Execute Gate 11 Audit (Forced Row-Level Security)
 Write-Host "`n[STEP 4/6] Executing Gate 11: Forced Row-Level Security Audit..." -ForegroundColor Yellow
