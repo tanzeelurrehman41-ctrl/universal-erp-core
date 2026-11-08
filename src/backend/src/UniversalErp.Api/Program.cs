@@ -51,9 +51,32 @@ builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
-        policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
-              .AllowAnyHeader()
-              .AllowAnyMethod();
+        policy.SetIsOriginAllowed(origin =>
+        {
+            if (string.IsNullOrWhiteSpace(origin)) return false;
+            if (origin.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase) ||
+                origin.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            if (Uri.TryCreate(origin, UriKind.Absolute, out var uri))
+            {
+                if (uri.Host.EndsWith(".pages.dev", StringComparison.OrdinalIgnoreCase) ||
+                    uri.Host.EndsWith(".onrender.com", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            var customAllowed = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
+            if (customAllowed != null && customAllowed.Contains(origin, StringComparer.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            return false;
+        })
+        .AllowAnyHeader()
+        .AllowAnyMethod()
+        .AllowCredentials();
     });
 });
 builder.Services.AddScoped<IProductRepository, PostgresProductRepository>();
@@ -89,6 +112,10 @@ else
     if (effectiveProvider.Equals("Firebase", StringComparison.OrdinalIgnoreCase))
     {
         var projectId = builder.Configuration["Firebase:ProjectId"] ?? "universal-erp-staging";
+        var credentialJson = builder.Configuration["Firebase:CredentialJson"]
+            ?? Environment.GetEnvironmentVariable("FIREBASE_CREDENTIAL_JSON");
+        var credentialBase64 = builder.Configuration["Firebase:CredentialBase64"]
+            ?? Environment.GetEnvironmentVariable("FIREBASE_CREDENTIAL_BASE64");
         var credentialPath = builder.Configuration["Firebase:CredentialPath"]
             ?? Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS")
             ?? @"C:\secrets\universal-erp-staging-firebase-adminsdk-fbsvc-286fd8c22d.json";
@@ -96,11 +123,32 @@ else
         if (FirebaseApp.DefaultInstance == null)
         {
             AppOptions appOptions;
-            if (File.Exists(credentialPath))
+            GoogleCredential? cred = null;
+
+            if (!string.IsNullOrWhiteSpace(credentialJson))
             {
-#pragma warning disable CS0618 // Type or member is obsolete
+                cred = GoogleCredential.FromJson(credentialJson);
+            }
+            else if (!string.IsNullOrWhiteSpace(credentialBase64))
+            {
+                try
+                {
+                    var decodedJson = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(credentialBase64));
+                    cred = GoogleCredential.FromJson(decodedJson);
+                }
+                catch
+                {
+                    // Fall back to path or unauthenticated
+                }
+            }
+            else if (File.Exists(credentialPath))
+            {
                 using var stream = File.OpenRead(credentialPath);
-                var cred = GoogleCredential.FromStream(stream);
+                cred = GoogleCredential.FromStream(stream);
+            }
+
+            if (cred != null)
+            {
                 var startupLogger = LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Program>();
                 NetworkSynchronizedClock.Initialize(startupLogger);
                 NetworkSynchronizedClock.ApplyTo(cred, startupLogger);
@@ -109,7 +157,6 @@ else
                     Credential = cred,
                     ProjectId = projectId,
                 };
-#pragma warning restore CS0618
             }
             else
             {

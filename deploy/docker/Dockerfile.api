@@ -1,24 +1,32 @@
-# Build stage
-FROM mcr.microsoft.com/dotnet/sdk:10.0-preview-alpine AS build
+# Multi-stage Docker build for Universal ERP API (ASP.NET Core .NET 10)
+# Optimized for Render Free Linux container deployment (< 512MB RAM)
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-COPY universal-erp-core/src/backend/src/UniversalErp.Domain/*.csproj src/UniversalErp.Domain/
-COPY universal-erp-core/src/backend/src/UniversalErp.Application/*.csproj src/UniversalErp.Application/
-COPY universal-erp-core/src/backend/src/UniversalErp.Infrastructure/*.csproj src/UniversalErp.Infrastructure/
-COPY universal-erp-core/src/backend/src/UniversalErp.Api/*.csproj src/UniversalErp.Api/
+# Copy project definition files for layer caching
+COPY src/backend/src/UniversalErp.Domain/*.csproj src/UniversalErp.Domain/
+COPY src/backend/src/UniversalErp.Application/*.csproj src/UniversalErp.Application/
+COPY src/backend/src/UniversalErp.Infrastructure/*.csproj src/UniversalErp.Infrastructure/
+COPY src/backend/src/UniversalErp.Api/*.csproj src/UniversalErp.Api/
 
 RUN dotnet restore src/UniversalErp.Api/UniversalErp.Api.csproj
 
-COPY universal-erp-core/src/backend/src/ src/
+# Copy source code and publish Release build
+COPY src/backend/src/ src/
 RUN dotnet publish src/UniversalErp.Api/UniversalErp.Api.csproj -c Release -o /app/publish /p:UseAppHost=false
 
-# Runtime stage
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview-alpine AS runtime
+# Production runtime stage
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
+
+# Enable low-overhead server GC optimized for container resource limits
+ENV DOTNET_EnableDiagnostics=0 \
+    DOTNET_GCHeapHardLimit=0x18000000 \
+    ASPNETCORE_URLS=http://0.0.0.0:10000 \
+    PORT=10000
+
 COPY --from=build /app/publish .
 
-RUN apk add --no-cache curl
-EXPOSE 5000
-ENV ASPNETCORE_URLS=http://0.0.0.0:5000
-
+EXPOSE 10000
 ENTRYPOINT ["dotnet", "UniversalErp.Api.dll"]

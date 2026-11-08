@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: universal-erp-api
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./deploy/docker/Dockerfile.api
+    dockerContext: .
+    healthCheckPath: /health/live
+    autoDeploy: true
+    envVars:
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+      - key: Authentication__Provider
+        value: Firebase
+      - key: Firebase__ProjectId
+        value: universal-erp-staging
+      - key: ConnectionStrings__UniversalErp
+        sync: false
+      - key: FIREBASE_CREDENTIAL_BASE64
+        sync: false
+      - key: Cors__AllowedOrigins__0
+        value: https://universal-erp.pages.dev
