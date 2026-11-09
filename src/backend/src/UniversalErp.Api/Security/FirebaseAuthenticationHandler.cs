@@ -2,6 +2,8 @@ using System.Security.Claims;
 using System.Text.Encodings.Web;
 using FirebaseAdmin.Auth;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace UniversalErp.Api.Security;
@@ -87,5 +89,20 @@ public sealed class FirebaseAuthenticationHandler(
             Logger.LogError(ex, "Unexpected error verifying Firebase ID token.");
             return AuthenticateResult.Fail($"Token verification error: {ex.Message}");
         }
+    }
+
+    protected override async Task HandleChallengeAsync(AuthenticationProperties properties)
+    {
+        Response.StatusCode = StatusCodes.Status401Unauthorized;
+
+        var authResult = await HandleAuthenticateOnceSafeAsync();
+        var failure = authResult.Failure;
+        var errorDescription = failure switch
+        {
+            null => "Authentication token is missing or required.",
+            _ => failure.Message.Replace("\"", "'")
+        };
+
+        Response.Headers.Append("WWW-Authenticate", $"Bearer error=\"invalid_token\", error_description=\"{errorDescription}\"");
     }
 }

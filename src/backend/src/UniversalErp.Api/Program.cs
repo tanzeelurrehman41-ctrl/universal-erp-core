@@ -1,10 +1,12 @@
 using System.Security.Claims;
+using System.Text.Json;
 using FirebaseAdmin;
 using Google.Apis.Auth.OAuth2;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
 using UniversalErp.Api.Development;
@@ -44,7 +46,7 @@ if (string.IsNullOrWhiteSpace(databaseConnectionString))
 
 builder.Services.AddSingleton(NpgsqlDataSource.Create(databaseConnectionString));
 builder.Services.AddSingleton(new PostgresHealthCheck(databaseConnectionString));
-builder.Services.AddHealthChecks()
+var healthChecksBuilder = builder.Services.AddHealthChecks()
     .AddCheck<PostgresHealthCheck>("postgresql");
 builder.Services.AddProblemDetails();
 builder.Services.AddCors(options =>
@@ -111,7 +113,7 @@ else
 
     if (effectiveProvider.Equals("Firebase", StringComparison.OrdinalIgnoreCase))
     {
-        var projectId = builder.Configuration["Firebase:ProjectId"] ?? "universal-erp-staging";
+        var configuredProjectId = builder.Configuration["Firebase:ProjectId"];
         var credentialJson = builder.Configuration["Firebase:CredentialJson"]
             ?? Environment.GetEnvironmentVariable("FIREBASE_CREDENTIAL_JSON");
         var credentialBase64 = builder.Configuration["Firebase:CredentialBase64"]
@@ -122,28 +124,80 @@ else
 
         if (FirebaseApp.DefaultInstance == null)
         {
+            var startupLogger = LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Program>();
             GoogleCredential? cred = null;
+            string? discoveredProjectId = null;
+            string credentialSource = "None";
 
             if (!string.IsNullOrWhiteSpace(credentialJson))
             {
-                cred = GoogleCredential.FromJson(credentialJson);
+                try
+                {
+                    var trimmed = credentialJson.Trim();
+                    using var doc = JsonDocument.Parse(trimmed);
+                    if (doc.RootElement.TryGetProperty("project_id", out var pidProp))
+                    {
+                        discoveredProjectId = pidProp.GetString();
+                    }
+                    cred = GoogleCredential.FromJson(trimmed);
+                    credentialSource = "Firebase:CredentialJson / FIREBASE_CREDENTIAL_JSON";
+                }
+                catch (Exception ex)
+                {
+                    startupLogger.LogWarning(ex, "Failed to parse Firebase credentials from JSON environment variable.");
+                }
             }
             else if (!string.IsNullOrWhiteSpace(credentialBase64))
             {
                 try
                 {
-                    var decodedJson = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(credentialBase64));
-                    cred = GoogleCredential.FromJson(decodedJson);
+                    var raw = credentialBase64.Trim();
+                    if (raw.StartsWith('\"') && raw.EndsWith('\"') && raw.Length >= 2)
+                    {
+                        raw = raw[1..^1].Trim();
+                    }
+
+                    string resolvedJson;
+                    if (raw.StartsWith('{'))
+                    {
+                        resolvedJson = raw;
+                    }
+                    else
+                    {
+                        var decodedBytes = Convert.FromBase64String(raw);
+                        resolvedJson = System.Text.Encoding.UTF8.GetString(decodedBytes);
+                    }
+
+                    using var doc = JsonDocument.Parse(resolvedJson);
+                    if (doc.RootElement.TryGetProperty("project_id", out var pidProp))
+                    {
+                        discoveredProjectId = pidProp.GetString();
+                    }
+                    cred = GoogleCredential.FromJson(resolvedJson);
+                    credentialSource = "Firebase:CredentialBase64 / FIREBASE_CREDENTIAL_BASE64";
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Fall back to path or unauthenticated
+                    startupLogger.LogWarning(ex, "Failed to decode/parse Firebase credentials from Base64 environment variable.");
                 }
             }
             else if (File.Exists(credentialPath))
             {
-                using var stream = File.OpenRead(credentialPath);
-                cred = GoogleCredential.FromStream(stream);
+                try
+                {
+                    var fileContent = File.ReadAllText(credentialPath);
+                    using var doc = JsonDocument.Parse(fileContent);
+                    if (doc.RootElement.TryGetProperty("project_id", out var pidProp))
+                    {
+                        discoveredProjectId = pidProp.GetString();
+                    }
+                    cred = GoogleCredential.FromJson(fileContent);
+                    credentialSource = $"File: {credentialPath}";
+                }
+                catch (Exception ex)
+                {
+                    startupLogger.LogWarning(ex, "Failed to parse Firebase credentials from file {Path}.", credentialPath);
+                }
             }
 
             if (cred == null)
@@ -151,6 +205,7 @@ else
                 try
                 {
                     cred = GoogleCredential.GetApplicationDefault();
+                    credentialSource = "ApplicationDefaultCredentials";
                 }
                 catch
                 {
@@ -158,24 +213,37 @@ else
                 }
             }
 
+            var finalProjectId = discoveredProjectId
+                ?? (!string.IsNullOrWhiteSpace(configuredProjectId) ? configuredProjectId : "universal-erp-staging");
+
             if (cred != null)
             {
-                var startupLogger = LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Program>();
                 NetworkSynchronizedClock.Initialize(startupLogger);
                 NetworkSynchronizedClock.ApplyTo(cred, startupLogger);
                 var appOptions = new AppOptions
                 {
                     Credential = cred,
-                    ProjectId = projectId,
+                    ProjectId = finalProjectId,
                 };
                 FirebaseApp.Create(appOptions);
+                startupLogger.LogInformation("FirebaseApp initialized successfully. ProjectId: {ProjectId}, CredentialSource: {Source}",
+                    finalProjectId, credentialSource);
             }
             else
             {
-                var startupLogger = LoggerFactory.Create(b => b.AddConsole()).CreateLogger<Program>();
                 startupLogger.LogWarning("Firebase credentials not configured at startup. Firebase Authentication requests will fail until valid credentials are provided.");
             }
         }
+
+        healthChecksBuilder.AddCheck("firebase", () =>
+        {
+            if (FirebaseApp.DefaultInstance == null)
+            {
+                return HealthCheckResult.Unhealthy("FirebaseApp has not been initialized. Check credentials.");
+            }
+            var pid = FirebaseApp.DefaultInstance.Options.ProjectId ?? "unspecified";
+            return HealthCheckResult.Healthy($"FirebaseApp initialized for project '{pid}'");
+        });
 
         builder.Services
             .AddAuthentication(FirebaseAuthenticationHandler.SchemeName)
@@ -295,7 +363,25 @@ app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = _ => false,
 });
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+        var payload = new
+        {
+            status = report.Status.ToString(),
+            entries = report.Entries.ToDictionary(
+                kvp => kvp.Key,
+                kvp => new
+                {
+                    status = kvp.Value.Status.ToString(),
+                    description = kvp.Value.Description
+                })
+        };
+        await context.Response.WriteAsJsonAsync(payload);
+    }
+});
 app.MapGet("/api/modules", () => Results.Ok(moduleCatalog));
 app.MapSyncChangeEndpoints(isDevelopment);
 app.MapOfflineReceiptSyncEndpoints(isDevelopment);
