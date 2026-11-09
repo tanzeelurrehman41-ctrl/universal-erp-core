@@ -165,24 +165,30 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] Staging demo user accounts provisioned successfully." -ForegroundColor Green
 
-# 7. Verification of list_user_company_contexts for each account
-Write-Host "`n[STEP 4/4] Verifying workspace context listing across provisioned accounts..." -ForegroundColor Yellow
+# 7. Verification of list_user_company_contexts for zeelman49@gmail.com
+Write-Host "`n[STEP 4/4] Verifying workspace context listing for zeelman49@gmail.com..." -ForegroundColor Yellow
 $verifyContextSql = @"
 SELECT 
     ext.subject AS uid,
     u.email_normalized AS email,
     ctx.tenant_code,
     ctx.company_name,
-    ctx.base_currency_code
+    ctx.base_currency_code,
+    ctx.timezone
 FROM identity.external_identities ext
 JOIN identity.users u ON u.id = ext.user_id
 CROSS JOIN LATERAL identity.list_user_company_contexts(ext.issuer, ext.subject) ctx
 WHERE ext.issuer = 'https://securetoken.google.com/universal-erp-staging'
-ORDER BY u.email_normalized;
+  AND ext.subject = 'g5UVBoX1RFODIQ3suHZtN1DUiam2';
 "@
 
 $verifyOutput = & $psql "$rawConn" -w -c "$verifyContextSql"
 Write-Host $verifyOutput -ForegroundColor Cyan
+
+if ($verifyOutput -notmatch "CLOUD-LOGISTICS" -and $verifyOutput -notmatch "Cloud Global Logistics Ltd") {
+    throw "VERIFICATION FAILED: Workspace context lookup for zeelman49@gmail.com did not return the expected company!"
+}
+Write-Host "[PASS] Workspace lookup successfully verified for zeelman49@gmail.com." -ForegroundColor Green
 
 Write-Host "`n==========================================================================" -ForegroundColor Green
 Write-Host "=== DEMO ACCOUNT PROVISIONING COMPLETED SUCCESSFULLY ===" -ForegroundColor Green
