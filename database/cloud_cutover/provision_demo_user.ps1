@@ -2,8 +2,8 @@
 .SYNOPSIS
     Universal ERP -- Provision Staging Demo User Accounts on Neon Cloud Database
 .DESCRIPTION
-    Safely and idempotently links staging Firebase authenticated accounts to
-    the synthetic DEMO-CLOUD tenant and CLOUD-LOGISTICS company in Neon PostgreSQL.
+    Safely and idempotently links the staging Firebase authenticated account (zeelman49@gmail.com)
+    to the synthetic DEMO-CLOUD tenant and CLOUD-LOGISTICS company in Neon PostgreSQL.
 #>
 
 [CmdletBinding()]
@@ -20,6 +20,55 @@ $ErrorActionPreference = "Stop"
 # Setup Paths
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $SqlPath = Join-Path $ScriptDir "04_provision_demo_user.sql"
+
+function Mask-ConnectionString {
+    param([string]$conn)
+    if ([string]::IsNullOrWhiteSpace($conn)) { return "" }
+    $masked = [regex]::Replace($conn, '(?i)(postgres(?:ql)?://[^:]+:)([^@]+)(@)', '${1}********${3}')
+    $masked = [regex]::Replace($masked, '(?i)(Password\s*=\s*)([^;]+)', '${1}********')
+    return $masked
+}
+
+function Convert-ToPostgreSqlUri {
+    param([string]$connStr)
+    $connStr = $connStr.Trim()
+    if ($connStr -match "^postgres(?:ql)?://") {
+        return $connStr
+    }
+
+    # Parse semicolon-delimited key=value pairs (ADO.NET / Npgsql format)
+    $kv = @{}
+    foreach ($part in ($connStr -split ';')) {
+        $p = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        $eqIdx = $p.IndexOf('=')
+        if ($eqIdx -gt 0) {
+            $key = $p.Substring(0, $eqIdx).Trim().ToLowerInvariant() -replace '[\s_]', ''
+            $val = $p.Substring($eqIdx + 1).Trim()
+            $kv[$key] = $val
+        }
+    }
+
+    $h = $kv['host']
+    if ([string]::IsNullOrWhiteSpace($h)) {
+        return $connStr
+    }
+
+    $port = if ($kv['port']) { $kv['port'] } else { '5432' }
+    $user = if ($kv['username']) { $kv['username'] } elseif ($kv['user']) { $kv['user'] } elseif ($kv['userid']) { $kv['userid'] } else { '' }
+    $pwd = if ($kv['password']) { $kv['password'] } elseif ($kv['pwd']) { $kv['pwd'] } else { '' }
+    $db = if ($kv['database']) { $kv['database'] } elseif ($kv['dbname']) { $kv['dbname'] } else { 'neondb' }
+    $ssl = if ($kv['sslmode']) { $kv['sslmode'].ToLowerInvariant() } else { 'require' }
+
+    $auth = ''
+    if ($user -and $pwd) {
+        $auth = [System.Uri]::EscapeDataString($user) + ":" + [System.Uri]::EscapeDataString($pwd) + "@"
+    } elseif ($user) {
+        $auth = [System.Uri]::EscapeDataString($user) + "@"
+    }
+
+    return "postgresql://${auth}${h}:${port}/${db}?sslmode=${ssl}"
+}
 
 Write-Host "==========================================================================" -ForegroundColor Cyan
 Write-Host "=== Universal ERP -- Staging Demo Account Provisioning on Neon ===" -ForegroundColor Cyan
@@ -94,17 +143,28 @@ if ($rawConn -match "127\.0\.0\.1:5432" -or $rawConn -match "localhost:5432" -or
     throw "SECURITY ABORT: Attempted execution against local production database (port 5432 or universal_erp). Provisioning is strictly permitted against remote Neon cloud database only!"
 }
 
+# Convert ADO.NET / Npgsql format to standard PostgreSQL URI for psql
+$psqlConn = Convert-ToPostgreSqlUri $rawConn
+
 # Verify Hostname Belongs to Neon (*.neon.tech)
 $targetHost = ""
-if ($rawConn -match "@([^:/]+)") {
+if ($psqlConn -match "@([^:/]+)") {
     $targetHost = $Matches[1]
-} elseif ($rawConn -match "(?i)Host\s*=\s*([^;]+)") {
-    $targetHost = $Matches[1].Trim()
 }
 
 if ($targetHost -notmatch "\.neon\.tech$" -and $targetHost -ne "169.254.254.254") {
     throw "SECURITY ABORT: Host '$targetHost' does not belong to Neon cloud infrastructure (*.neon.tech). Target must be a Neon Free PostgreSQL instance."
 }
+
+# Ensure unpooled direct endpoint for provisioning
+if ($targetHost -match "-pooler\.") {
+    $directHost = $targetHost -replace "-pooler\.", "."
+    $psqlConn = $psqlConn -replace [regex]::Escape($targetHost), $directHost
+    Write-Host "[ROUTING] Detected pooler endpoint. Using direct unpooled endpoint: $directHost" -ForegroundColor Green
+}
+
+Write-Host "Target Host : $targetHost" -ForegroundColor Cyan
+Write-Host "Connection  : $(Mask-ConnectionString $psqlConn)" -ForegroundColor Cyan
 
 # 3. Locate PSQL
 $psql = "C:\Program Files\PostgreSQL\18\bin\psql.exe"
@@ -116,7 +176,7 @@ if (-not (Test-Path $psql)) {
 # 4. Verify Remote Database Identity
 Write-Host "`n[STEP 1/4] Verifying remote Neon database..." -ForegroundColor Yellow
 $probeSql = "SELECT current_database() || '|' || current_user || '|' || version();"
-$probeOutput = & $psql "$rawConn" -w -t -A -c "$probeSql" 2>&1
+$probeOutput = & $psql "$psqlConn" -w -t -A -c "$probeSql" 2>&1
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to connect to Neon PostgreSQL. Error: $probeOutput"
 }
@@ -147,23 +207,23 @@ WHERE t.id = '22222222-2222-4222-8222-222222222222'::uuid
   AND c.status = 'active';
 "@
 
-$orgCount = & $psql "$rawConn" -w -t -A -c "$verifyOrgSql"
+$orgCount = & $psql "$psqlConn" -w -t -A -c "$verifyOrgSql"
 if ([int]$orgCount.Trim() -ne 1) {
     throw "VERIFICATION FAILED: DEMO-CLOUD tenant or CLOUD-LOGISTICS company not found with expected IDs!"
 }
 Write-Host "[PASS] DEMO-CLOUD tenant and CLOUD-LOGISTICS company verified active with exact IDs." -ForegroundColor Green
 
 # 6. Execute Provisioning Transaction
-Write-Host "`n[STEP 3/4] Executing transactional demo user provisioning..." -ForegroundColor Yellow
+Write-Host "`n[STEP 3/4] Executing transactional demo user provisioning for zeelman49@gmail.com..." -ForegroundColor Yellow
 if (-not (Test-Path $SqlPath)) {
     throw "Provisioning SQL file missing at $SqlPath"
 }
 
-Get-Content $SqlPath -Raw | & $psql "$rawConn" -v ON_ERROR_STOP=1
+Get-Content $SqlPath -Raw | & $psql "$psqlConn" -v ON_ERROR_STOP=1
 if ($LASTEXITCODE -ne 0) {
     throw "CRITICAL: Provisioning transaction failed."
 }
-Write-Host "[PASS] Staging demo user accounts provisioned successfully." -ForegroundColor Green
+Write-Host "[PASS] Demo user account (zeelman49@gmail.com) provisioned successfully." -ForegroundColor Green
 
 # 7. Verification of list_user_company_contexts for zeelman49@gmail.com
 Write-Host "`n[STEP 4/4] Verifying workspace context listing for zeelman49@gmail.com..." -ForegroundColor Yellow
@@ -182,7 +242,7 @@ WHERE ext.issuer = 'https://securetoken.google.com/universal-erp-staging'
   AND ext.subject = 'g5UVBoX1RFODIQ3suHZtN1DUiam2';
 "@
 
-$verifyOutput = & $psql "$rawConn" -w -c "$verifyContextSql"
+$verifyOutput = & $psql "$psqlConn" -w -c "$verifyContextSql"
 Write-Host $verifyOutput -ForegroundColor Cyan
 
 if ($verifyOutput -notmatch "CLOUD-LOGISTICS" -and $verifyOutput -notmatch "Cloud Global Logistics Ltd") {
