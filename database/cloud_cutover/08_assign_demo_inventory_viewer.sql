@@ -170,8 +170,7 @@ BEGIN
             membership_id,
             role_id,
             assigned_by_user_id,
-            effective_from,
-            created_at
+            effective_from
         )
         VALUES (
             gen_random_uuid(),
@@ -179,7 +178,6 @@ BEGIN
             v_membership_id,
             v_role_id,
             v_user_id,
-            now(),
             now()
         );
         RAISE NOTICE '[ASSIGNED] Assigned % to tenant membership % (User: %)', v_role_code, v_membership_id, v_email;
