@@ -232,6 +232,7 @@ SELECT
     ext.subject AS uid,
     u.email_normalized AS email,
     ctx.tenant_code,
+    ctx.company_code,
     ctx.company_name,
     ctx.base_currency_code,
     ctx.timezone
@@ -245,10 +246,12 @@ WHERE ext.issuer = 'https://securetoken.google.com/universal-erp-staging'
 $verifyOutput = & $psql "$psqlConn" -w -c "$verifyContextSql"
 Write-Host $verifyOutput -ForegroundColor Cyan
 
-if ($verifyOutput -notmatch "CLOUD-LOGISTICS" -and $verifyOutput -notmatch "Cloud Global Logistics Ltd") {
+$verifyOutputStr = ($verifyOutput | Out-String)
+if ($verifyOutputStr -match "Cloud Global Logistics Ltd" -and $verifyOutputStr -match "DEMO-CLOUD") {
+    Write-Host "[PASS] Workspace lookup successfully verified for zeelman49@gmail.com." -ForegroundColor Green
+} else {
     throw "VERIFICATION FAILED: Workspace context lookup for zeelman49@gmail.com did not return the expected company!"
 }
-Write-Host "[PASS] Workspace lookup successfully verified for zeelman49@gmail.com." -ForegroundColor Green
 
 Write-Host "`n==========================================================================" -ForegroundColor Green
 Write-Host "=== DEMO ACCOUNT PROVISIONING COMPLETED SUCCESSFULLY ===" -ForegroundColor Green
