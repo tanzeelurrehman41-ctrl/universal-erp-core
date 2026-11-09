@@ -758,12 +758,12 @@ export default function App() {
             </div>
             <p className="catalog-note">
               {oidcConfigured
-                ? "Each entry is saved in this browser for the selected company, then sent to the shared server when online. Pending work stays here until confirmed. This queue is not encrypted."
-                : "Each entry is saved in this browser first, then synced to the local development tenant. Pending work stays here until confirmed. This development queue is not encrypted."}
+                ? "Each entry is saved in this browser for the selected company, encrypted locally using AES-GCM, then sent to the shared server when online. Pending work stays here until confirmed."
+                : "Each entry is saved in this browser first, encrypted locally using AES-GCM, then synced to the local development tenant. Pending work stays here until confirmed."}
             </p>
             {persistentStorageGranted === false && (
               <p className="catalog-storage-note" role="status">
-                This browser did not grant persistent storage. Keep this device available until pending work syncs.
+                This browser did not grant persistent storage permission; pending records remain available in IndexedDB but may be evicted by the browser under device storage pressure. Keep this device available until pending work syncs.
               </p>
             )}
             <form className="catalog-form" onSubmit={createProduct}>
