@@ -92,3 +92,25 @@ SELECT status_code, description, is_reservable, is_pickable
 FROM erp_inventory.stock_status
 WHERE tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
 ORDER BY status_code;
+
+\echo '=========================================================================='
+\echo '7. User Identity Reconciliation & External Mappings'
+\echo '=========================================================================='
+SELECT 
+    u.id AS user_id,
+    u.email_normalized,
+    u.display_name,
+    ext.subject AS firebase_uid,
+    tm.id AS tenant_membership_id,
+    cm.id AS company_membership_id,
+    r.role_code,
+    mra.id AS role_assignment_id
+FROM identity.users u
+LEFT JOIN identity.external_identities ext ON ext.user_id = u.id
+LEFT JOIN identity.tenant_memberships tm ON tm.user_id = u.id AND tm.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
+LEFT JOIN identity.company_memberships cm ON cm.user_id = u.id AND cm.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid AND cm.company_id = '22222222-2222-4222-8222-222222222223'::uuid
+LEFT JOIN "authorization".membership_role_assignments mra ON mra.membership_id = tm.id AND mra.tenant_id = tm.tenant_id
+LEFT JOIN "authorization".roles r ON r.id = mra.role_id AND r.tenant_id = mra.tenant_id
+WHERE u.email_normalized IN ('tanzeelurrehman41@gmail.com', 'zeelman49@gmail.com')
+ORDER BY u.email_normalized;
+

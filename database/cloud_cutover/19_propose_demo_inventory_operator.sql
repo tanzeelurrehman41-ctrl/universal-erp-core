@@ -85,6 +85,16 @@ BEGIN
         RAISE EXCEPTION 'ABORT: Active user % not found in identity.users.', v_email;
     END IF;
 
+    -- Assert Firebase UID mapping strictly matches target user ID
+    IF NOT EXISTS (
+        SELECT 1 FROM identity.external_identities
+        WHERE issuer = 'https://securetoken.google.com/universal-erp-staging'
+          AND subject = 'nnnmCg7nT0cehV14o5APFFtY2s53'
+          AND user_id = v_user_id
+    ) THEN
+        RAISE EXCEPTION 'SAFETY ABORT: Firebase UID nnnmCg7nT0cehV14o5APFFtY2s53 is not linked to target user ID % (%)!', v_user_id, v_email;
+    END IF;
+
     SELECT id INTO v_membership_id
     FROM identity.tenant_memberships
     WHERE tenant_id = v_tenant_id AND user_id = v_user_id AND status = 'active';
