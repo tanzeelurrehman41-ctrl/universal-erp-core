@@ -177,7 +177,7 @@ Write-Host "[PSQL CLIENT] $psql" -ForegroundColor Gray
 
 # 4. Verify Remote Neon DB Connection
 Write-Host "`n[STEP 1/3] Verifying remote Neon database..." -ForegroundColor Yellow
-$verifySql = "SELECT current_database(), current_user, version();"
+$verifySql = "SELECT current_database(), current_user, inet_server_addr(), version();"
 $verifyOutput = & $psql "$psqlConn" -w -t -A -F "|" -c $verifySql 2>&1
 
 if ($LASTEXITCODE -ne 0) {
@@ -188,11 +188,11 @@ $dbName = ""
 $dbUser = ""
 $pgVer = ""
 foreach ($line in ($verifyOutput -split "`n")) {
-    $trimmed = $line.Trim()
-    if ($trimmed -match '^neondb\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*(.+)$') {
+    $parts = $line.Trim().Split('|')
+    if ($parts.Count -ge 3 -and $parts[0].Trim() -eq "neondb") {
         $dbName = "neondb"
-        $dbUser = $Matches[1].Trim()
-        $pgVer = $Matches[3].Trim()
+        $dbUser = $parts[1].Trim()
+        $pgVer = $parts[-1].Trim()
         break
     }
 }
