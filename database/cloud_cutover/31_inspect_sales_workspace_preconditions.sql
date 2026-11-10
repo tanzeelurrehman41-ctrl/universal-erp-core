@@ -114,11 +114,11 @@ WITH tanzeel_user AS (
 )
 SELECT 
     perm.permission_code,
-    "authorization".user_has_permission(
-        (SELECT id FROM tanzeel_user),
+    identity.user_has_permission(
         '22222222-2222-4222-8222-222222222222'::uuid,
-        perm.permission_code,
-        '22222222-2222-4222-8222-222222222223'::uuid
+        '22222222-2222-4222-8222-222222222223'::uuid,
+        (SELECT id FROM tanzeel_user),
+        perm.permission_code
     ) AS is_granted
 FROM (
     VALUES 
