@@ -148,7 +148,7 @@ export default function PurchasingWorkspace({ enabled, workspace }: Props) {
   const selectedPo = purchaseOrders.find((po) => po.purchaseOrderId === grnPoId) ?? null;
   const grnWarehouseId = selectedPo?.warehouseId ?? "";
   const binsForGrnWarehouse = bins.filter(
-    (b) => b.warehouseId === grnWarehouseId && b.isActive && ["storage", "receiving"].includes(b.binType)
+    (b) => b.warehouseId === grnWarehouseId && b.isActive !== false && (!b.binType || ["storage", "receiving"].includes(b.binType.toLowerCase()))
   );
 
   // Load data
@@ -157,18 +157,24 @@ export default function PurchasingWorkspace({ enabled, workspace }: Props) {
     let mounted = true;
     const load = async () => {
       try {
-        const [s, po, g] = await Promise.all([
+        const [s, po, g, vars, whs, b] = await Promise.all([
           apiGet<Supplier[]>("/api/v1/purchasing/suppliers", workspace),
           apiGet<PurchaseOrder[]>("/api/v1/purchasing/purchase-orders", workspace),
           apiGet<Grn[]>("/api/v1/purchasing/grns", workspace),
+          apiGet<Variant[]>("/api/v1/inventory/variants", workspace).catch(() => []),
+          apiGet<Warehouse[]>("/api/v1/inventory/warehouses", workspace).catch(() => []),
+          apiGet<Bin[]>("/api/v1/inventory/bins", workspace).catch(() => []),
         ]);
         if (!mounted) return;
         setSuppliers(s);
         setPurchaseOrders(po);
         setGrns(g);
+        setVariants(vars);
+        setWarehouses(whs);
+        setBins(b);
         if (!poSupplierId && s.length > 0) setPoSupplierId(s[0].supplierId);
         if (!poWarehouseId) {
-          const first = warehouses.find((w) => w.isActive);
+          const first = whs.find((w) => w.isActive !== false);
           if (first) setPoWarehouseId(first.warehouseId);
         }
         if (!grnPoId && po.length > 0) {
@@ -187,6 +193,30 @@ export default function PurchasingWorkspace({ enabled, workspace }: Props) {
     setMessage("");
     setReloadVersion((v) => v + 1);
   };
+
+  // Auto-populate default bin and line when a confirmed PO is selected for receiving
+  useEffect(() => {
+    if (!selectedPo) return;
+    const unreceived = (selectedPo.lines ?? []).filter((l) => l.lineStatus !== "received" && l.lineStatus !== "cancelled");
+    const defaultBin = binsForGrnWarehouse.find((b) => b.binType?.toLowerCase() === "receiving") ?? binsForGrnWarehouse[0];
+
+    setGrnLines((prev) => {
+      if (prev.length === 1 && (!prev[0].poLineNumber || prev[0].poLineNumber === "") && unreceived.length > 0) {
+        const firstLine = unreceived[0];
+        const remQty = firstLine.orderedQty - firstLine.receivedQty;
+        return [{
+          poLineNumber: String(firstLine.lineNumber),
+          binId: defaultBin?.binId ?? "",
+          qty: remQty > 0 ? String(remQty) : String(firstLine.orderedQty),
+          price: String(firstLine.unitPrice ?? 0),
+        }];
+      }
+      return prev.map((l) => ({
+        ...l,
+        binId: l.binId || (defaultBin?.binId ?? ""),
+      }));
+    });
+  }, [grnPoId, selectedPo?.purchaseOrderId, binsForGrnWarehouse.length]);
 
   // ── Submit handlers ────────────────────────────────────────────────────────
 
@@ -409,7 +439,7 @@ export default function PurchasingWorkspace({ enabled, workspace }: Props) {
               <label>Receiving warehouse
                 <select required value={poWarehouseId} onChange={(e) => setPoWarehouseId(e.target.value)}>
                   <option value="">Select warehouse</option>
-                  {warehouses.filter((w) => w.isActive).map((w) => (
+                  {warehouses.filter((w) => w.isActive !== false).map((w) => (
                     <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>
                   ))}
                 </select>
@@ -425,7 +455,7 @@ export default function PurchasingWorkspace({ enabled, workspace }: Props) {
                     style={{ flex: "2" }}
                   >
                     <option value="">Choose variant</option>
-                    {variants.filter((v) => v.isActive).map((v) => (
+                    {variants.filter((v) => v.isActive !== false).map((v) => (
                       <option key={v.variantId} value={v.variantId}>{v.sku} · {v.productName}</option>
                     ))}
                   </select>

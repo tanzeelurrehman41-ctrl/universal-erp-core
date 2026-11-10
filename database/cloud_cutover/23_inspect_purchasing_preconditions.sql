@@ -4,7 +4,7 @@
 SELECT current_database() AS connected_database, current_user AS connected_user, version() AS pg_version;
 
 -- 1. Check purchasing catalog permissions in authorization.permissions
-SELECT permission_code, module_code, description, created_at
+SELECT permission_code, module_code, description
 FROM "authorization".permissions
 WHERE permission_code LIKE 'purchasing%'
 ORDER BY permission_code;
@@ -38,7 +38,7 @@ SELECT
     r.role_code,
     rp.permission_code,
     rp.scope_type,
-    rp.created_at
+    r.created_at AS role_created_at
 FROM "authorization".role_permissions rp
 JOIN "authorization".roles r ON r.id = rp.role_id AND r.tenant_id = rp.tenant_id
 WHERE r.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
