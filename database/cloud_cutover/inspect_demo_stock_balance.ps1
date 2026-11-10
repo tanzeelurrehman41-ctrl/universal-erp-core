@@ -187,11 +187,13 @@ $pgVer = $parts[2]
 
 Write-Host "Connected Database : $dbName" -ForegroundColor Green
 Write-Host "Database User      : $dbUser" -ForegroundColor Green
-Write-Host "Cluster Version    : $pgVer" -ForegroundColor Green
-
-if ($dbName -ne "neondb") {
-    throw "Target database name must be 'neondb'. Detected: $dbName"
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
 }
+
+Write-Host "Connected Database : $dbName" -ForegroundColor Green
+Write-Host "Database User      : $dbUser" -ForegroundColor Green
+Write-Host "Cluster Version    : $pgVer" -ForegroundColor Green
 
 # 5. Step 2: Execute Stock Balance Inspection
 Write-Host "`n[STEP 2/2] Inspecting Confirmed Stock Balances & Movements..." -ForegroundColor Yellow
@@ -199,8 +201,13 @@ if (-not (Test-Path $InspectSqlPath)) {
     throw "Inspection SQL file missing at $InspectSqlPath"
 }
 
-$inspectOutput = Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w 2>&1
-Write-Host ($inspectOutput | Out-String) -ForegroundColor Cyan
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w
+} finally {
+    $ErrorActionPreference = $prevEAP
+}
 
 Write-Host "`n==========================================================================" -ForegroundColor Green
 Write-Host "=== STOCK BALANCE INSPECTION COMPLETE                                 ===" -ForegroundColor Green

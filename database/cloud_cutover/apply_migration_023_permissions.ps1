@@ -195,21 +195,35 @@ if ($dbName -ne "neondb") {
     Write-Error "Remote database assertion failed! Connected to: '$verifyOutput'"
 }
 
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
 Write-Host "Connected Database : $dbName" -ForegroundColor Green
 Write-Host "Database User      : $dbUser" -ForegroundColor Green
 Write-Host "Cluster Version    : $pgVer" -ForegroundColor Green
 
 Write-Host "`n[STEP 2/3] Executing Migration 023 (Register Permissions)..." -ForegroundColor Yellow
-$migOutput = Get-Content $MigrationSqlPath -Raw | & $psql "$psqlConn" -w -v ON_ERROR_STOP=1 2>&1
-Write-Host $migOutput
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    Get-Content $MigrationSqlPath -Raw | & $psql "$psqlConn" -w -v ON_ERROR_STOP=1
+} finally {
+    $ErrorActionPreference = $prevEAP
+}
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Migration 023 failed! Transaction was aborted and rolled back."
 }
 
 Write-Host "`n[STEP 3/3] Running Post-Migration Verification Inspection..." -ForegroundColor Yellow
-$inspectOutput = Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w 2>&1
-Write-Host $inspectOutput
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w
+} finally {
+    $ErrorActionPreference = $prevEAP
+}
 
 Write-Host "`n==========================================================================" -ForegroundColor Green
 Write-Host "=== SUCCESS: Migration 023 Applied & Verified on Neon                  ===" -ForegroundColor Green

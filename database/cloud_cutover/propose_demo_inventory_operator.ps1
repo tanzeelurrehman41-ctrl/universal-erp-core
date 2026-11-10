@@ -199,30 +199,48 @@ if ($dbName -ne "neondb") {
     Write-Error "Remote database assertion failed! Connected to: '$verifyOutput'"
 }
 
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
 Write-Host "Connected Database : $dbName" -ForegroundColor Green
 Write-Host "Database User      : $dbUser" -ForegroundColor Green
 Write-Host "Cluster Version    : $pgVer" -ForegroundColor Green
 
 if ($InspectOnly) {
     Write-Host "`n[STEP 2/2] Running Read-Only Inspection..." -ForegroundColor Yellow
-    $inspectOutput = Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w 2>&1
-    Write-Host $inspectOutput
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
     Write-Host "`n[INSPECT FINISHED] Preconditions inspected safely." -ForegroundColor Green
     return
 }
 
 Write-Host "`n[STEP 2/3] Executing DEMO_INVENTORY_OPERATOR Grant Script..." -ForegroundColor Yellow
-$grantOutput = Get-Content $GrantSqlPath -Raw | & $psql "$psqlConn" -w -v ON_ERROR_STOP=1 2>&1
-
-Write-Host $grantOutput
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    Get-Content $GrantSqlPath -Raw | & $psql "$psqlConn" -w -v ON_ERROR_STOP=1
+} finally {
+    $ErrorActionPreference = $prevEAP
+}
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Role grant failed! Transaction was aborted and rolled back by PostgreSQL."
 }
 
 Write-Host "`n[STEP 3/3] Running Post-Grant Verification Inspection..." -ForegroundColor Yellow
-$inspectOutput = Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w 2>&1
-Write-Host $inspectOutput
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w
+} finally {
+    $ErrorActionPreference = $prevEAP
+}
 
 Write-Host "`n==========================================================================" -ForegroundColor Green
 Write-Host "=== SUCCESS: DEMO_INVENTORY_OPERATOR Granted & Validated on Neon       ===" -ForegroundColor Green
