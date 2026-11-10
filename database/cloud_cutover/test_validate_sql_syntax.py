@@ -12,6 +12,8 @@ def validate_all():
         "database/cloud_cutover/31_inspect_sales_workspace_preconditions.sql",
         "database/cloud_cutover/32_apply_migration_025_sales_permissions.sql",
         "database/cloud_cutover/33_propose_demo_sales_operator.sql",
+        "database/cloud_cutover/34_apply_and_verify_sales_authorization.sql",
+        "database/cloud_cutover/35_verify_sales_and_pos_execution.sql",
         "database/migrations/025_register_sales_permissions.sql",
         "database/migrations/025_register_sales_permissions.down.sql"
     ]
