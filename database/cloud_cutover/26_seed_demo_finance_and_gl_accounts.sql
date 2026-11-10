@@ -79,7 +79,45 @@ BEGIN
         (v_tenant_id, v_company_id, gen_random_uuid(), '6020', 'Salaries & Staff Welfare', 'expense', 'debit', false, true)
     ON CONFLICT (tenant_id, company_id, account_code) DO NOTHING;
 
-    RAISE NOTICE '[FINANCE SEEDED] Fiscal year, open periods, and Chart of Accounts seeded for CLOUD-LOGISTICS.';
+    -- 5. Post-Seed Verification Assertions (Guarantees existing or inserted rows meet all requirements)
+    -- 5.1 Assert open fiscal period covering 2026-11-10 exists
+    IF NOT EXISTS (
+        SELECT 1 FROM finance.fiscal_periods
+        WHERE tenant_id = v_tenant_id 
+          AND company_id = v_company_id 
+          AND status = 'open'
+          AND '2026-11-10'::date BETWEEN starts_on AND ends_on
+    ) THEN
+        RAISE EXCEPTION 'POST-SEED ASSERTION FAILED: Open fiscal period covering 2026-11-10 does not exist or is not open for CLOUD-LOGISTICS.';
+    END IF;
+
+    -- 5.2 Assert account 1200 is active, type 'asset', normal_balance 'debit'
+    IF NOT EXISTS (
+        SELECT 1 FROM finance.accounts
+        WHERE tenant_id = v_tenant_id 
+          AND company_id = v_company_id 
+          AND account_code = '1200' 
+          AND is_active = true 
+          AND account_type = 'asset' 
+          AND normal_balance = 'debit'
+    ) THEN
+        RAISE EXCEPTION 'POST-SEED ASSERTION FAILED: Account 1200 is missing, inactive, or has incorrect account_type/normal_balance.';
+    END IF;
+
+    -- 5.3 Assert account 2010 is active, type 'liability', normal_balance 'credit'
+    IF NOT EXISTS (
+        SELECT 1 FROM finance.accounts
+        WHERE tenant_id = v_tenant_id 
+          AND company_id = v_company_id 
+          AND account_code = '2010' 
+          AND is_active = true 
+          AND account_type = 'liability' 
+          AND normal_balance = 'credit'
+    ) THEN
+        RAISE EXCEPTION 'POST-SEED ASSERTION FAILED: Account 2010 is missing, inactive, or has incorrect account_type/normal_balance.';
+    END IF;
+
+    RAISE NOTICE '[FINANCE VERIFIED] Post-seed assertions passed: Open November 2026 fiscal period and valid GL accounts (1200 Asset/Debit, 2010 Liability/Credit) verified.';
 END $$;
 
 COMMIT;
