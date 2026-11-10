@@ -207,9 +207,13 @@ Write-Host "`n[STEP 2/2] Running Read-Only Purchasing Outbox Inspection..." -For
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w
+    Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w -v ON_ERROR_STOP=1
 } finally {
     $ErrorActionPreference = $prevEAP
+}
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Inspection query execution failed! Review SQL error output above."
 }
 
 Write-Host "`n==========================================================================" -ForegroundColor Green

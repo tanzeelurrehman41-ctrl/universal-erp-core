@@ -16,8 +16,6 @@ SELECT
     b.code AS bin_code,
     sb.status_code,
     sb.on_hand_qty,
-    sb.allocated_qty,
-    sb.available_qty,
     sb.updated_at
 FROM erp_inventory.stock_balance sb
 JOIN erp_inventory.product_variant pv ON pv.variant_id = sb.variant_id AND pv.tenant_id = sb.tenant_id
@@ -57,7 +55,7 @@ SELECT
     s.name AS supplier_name,
     w.code AS warehouse_code,
     po.order_status,
-    po.total_amount,
+    (SELECT COALESCE(sum(pol2.ordered_qty * pol2.unit_price), 0) FROM erp_purchasing.purchase_order_line pol2 WHERE pol2.purchase_order_id = po.purchase_order_id) AS total_order_amount,
     po.created_at
 FROM erp_purchasing.purchase_order po
 JOIN erp_purchasing.supplier s ON s.supplier_id = po.supplier_id AND s.tenant_id = po.tenant_id
@@ -103,7 +101,7 @@ SELECT
     pv.sku,
     b.code AS bin_code,
     grnl.received_qty,
-    grnl.unit_cost
+    grnl.unit_price
 FROM erp_purchasing.goods_received_note_line grnl
 JOIN erp_inventory.product_variant pv ON pv.variant_id = grnl.variant_id AND pv.tenant_id = grnl.tenant_id
 JOIN erp_inventory.stock_bin b ON b.bin_id = grnl.bin_id AND b.tenant_id = grnl.tenant_id

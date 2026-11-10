@@ -13,7 +13,6 @@ DECLARE
     v_company_id uuid := '22222222-2222-4222-8222-222222222223'::uuid;
     v_fiscal_year_id uuid := '22222222-2222-4222-8222-222222222225'::uuid;
     v_current_db text;
-    v_redrive_count integer;
 BEGIN
     -- 0. Database Safety Check: Strictly Neon neondb only
     SELECT current_database() INTO v_current_db;
@@ -81,19 +80,6 @@ BEGIN
     ON CONFLICT (tenant_id, company_id, account_code) DO NOTHING;
 
     RAISE NOTICE '[FINANCE SEEDED] Fiscal year, open periods, and Chart of Accounts seeded for CLOUD-LOGISTICS.';
-
-    -- 5. Redrive any dead-letter or backoff-delayed outbox events to pending for immediate processing
-    UPDATE erp_purchasing.outbox_event
-    SET status = 'pending',
-        attempt_count = 0,
-        last_error = NULL,
-        next_retry_at = NULL
-    WHERE tenant_id = v_tenant_id AND company_id = v_company_id
-      AND status IN ('pending', 'dead_letter')
-      AND published_at IS NULL;
-
-    GET DIAGNOSTICS v_redrive_count = ROW_COUNT;
-    RAISE NOTICE '[OUTBOX RESET] % outbox event(s) prepared for immediate processing.', v_redrive_count;
 END $$;
 
 COMMIT;

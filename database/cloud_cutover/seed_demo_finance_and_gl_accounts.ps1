@@ -215,9 +215,13 @@ Write-Host "`n[STEP 3/3] Running Post-Seed Outbox State Inspection..." -Foregrou
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w
+    Get-Content $InspectSqlPath -Raw | & $psql "$psqlConn" -w -v ON_ERROR_STOP=1
 } finally {
     $ErrorActionPreference = $prevEAP
+}
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Post-seed inspection queries failed! Review SQL error output above."
 }
 
 Write-Host "`n==========================================================================" -ForegroundColor Green
