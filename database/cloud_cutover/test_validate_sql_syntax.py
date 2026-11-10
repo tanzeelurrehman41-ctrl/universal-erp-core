@@ -6,7 +6,9 @@ def validate_all():
     files = [
         "database/cloud_cutover/26_seed_demo_finance_and_gl_accounts.sql",
         "database/cloud_cutover/27_requeue_dead_letter_outbox_events.sql",
-        "database/cloud_cutover/28_verify_purchasing_outbox_processing.sql"
+        "database/cloud_cutover/28_verify_purchasing_outbox_processing.sql",
+        "database/cloud_cutover/29_inspect_finance_workspace_verification.sql",
+        "database/cloud_cutover/30_inspect_inventory_valuation_reconciliation.sql"
     ]
 
     all_passed = True
