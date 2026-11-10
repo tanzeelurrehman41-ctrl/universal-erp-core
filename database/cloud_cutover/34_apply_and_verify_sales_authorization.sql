@@ -3,6 +3,7 @@
 -- Target Company: CLOUD-LOGISTICS (22222222-2222-4222-8222-222222222223)
 -- Target User: tanzeelurrehman41@gmail.com (Firebase UID: nnnmCg7nT0cehV14o5APFFtY2s53)
 -- Role Code: DEMO_SALES_OPERATOR
+-- Schema Alignment: Matches actual authorization.roles (id, tenant_id, role_code, name, is_system_role, created_at)
 -- Safety Invariants:
 --   1. Strict Neon DB assertion (neondb only).
 --   2. Registers exactly the 7 sales permissions in authorization.permissions (Migration 025).
@@ -118,14 +119,14 @@ BEGIN
     IF v_role_id IS NULL THEN
         v_role_id := gen_random_uuid();
         INSERT INTO "authorization".roles (
-            id, tenant_id, role_code, name, description, is_system_role
+            id, tenant_id, role_code, name, is_system_role, created_at
         ) VALUES (
             v_role_id,
             v_tenant_id,
             v_role_code,
             'Demo Sales & POS Operator',
-            'Least-privilege role for sales order management and POS transaction posting in CLOUD-LOGISTICS.',
-            false
+            false,
+            now()
         );
         RAISE NOTICE '[STEP 1 PASS] Created role % with ID % in tenant DEMO-CLOUD.', v_role_code, v_role_id;
     ELSE
@@ -142,7 +143,7 @@ BEGIN
             v_role_id,
             v_perm,
             'company'
-        ) ON CONFLICT (tenant_id, role_id, permission_code) DO NOTHING;
+        ) ON CONFLICT (tenant_id, role_id, permission_code, scope_type) DO NOTHING;
     END LOOP;
 
     -- Verify exact permission count on DEMO_SALES_OPERATOR
@@ -165,16 +166,27 @@ BEGIN
     RAISE NOTICE '[STEP 3 PASS] Role % contains zero forbidden administrative permissions.', v_role_code;
 
     -- 5. Assign DEMO_SALES_OPERATOR to Tanzeel in DEMO-CLOUD
-    INSERT INTO "authorization".membership_role_assignments (
-        id, tenant_id, membership_id, role_id, effective_from
-    ) VALUES (
-        gen_random_uuid(),
-        v_tenant_id,
-        v_membership_id,
-        v_role_id,
-        now()
-    ) ON CONFLICT (tenant_id, membership_id, role_id) DO NOTHING;
-    RAISE NOTICE '[STEP 4 PASS] Assigned role % to Tanzeel membership %.', v_role_code, v_membership_id;
+    IF NOT EXISTS (
+        SELECT 1 FROM "authorization".membership_role_assignments
+        WHERE tenant_id = v_tenant_id
+          AND membership_id = v_membership_id
+          AND role_id = v_role_id
+          AND (effective_until IS NULL OR effective_until > now())
+    ) THEN
+        INSERT INTO "authorization".membership_role_assignments (
+            id, tenant_id, membership_id, role_id, assigned_by_user_id, effective_from
+        ) VALUES (
+            gen_random_uuid(),
+            v_tenant_id,
+            v_membership_id,
+            v_role_id,
+            v_user_id,
+            now()
+        );
+        RAISE NOTICE '[STEP 4 PASS] Assigned role % to Tanzeel membership %.', v_role_code, v_membership_id;
+    ELSE
+        RAISE NOTICE '[STEP 4 PASS] Role % already assigned to membership %.', v_role_code, v_membership_id;
+    END IF;
 
     -- 6. Verification: Assert identity.user_has_permission returns true for all 7 sales permissions
     FOREACH v_perm IN ARRAY c_sales_perms

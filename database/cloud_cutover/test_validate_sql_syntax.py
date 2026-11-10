@@ -14,6 +14,7 @@ def validate_all():
         "database/cloud_cutover/33_propose_demo_sales_operator.sql",
         "database/cloud_cutover/34_apply_and_verify_sales_authorization.sql",
         "database/cloud_cutover/35_verify_sales_and_pos_execution.sql",
+        "database/cloud_cutover/36_verify_sales_authorization_rollback_state.sql",
         "database/migrations/025_register_sales_permissions.sql",
         "database/migrations/025_register_sales_permissions.down.sql"
     ]
