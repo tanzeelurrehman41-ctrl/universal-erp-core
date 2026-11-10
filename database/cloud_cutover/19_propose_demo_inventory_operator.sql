@@ -137,15 +137,15 @@ BEGIN
     IF v_operator_role_id IS NULL THEN
         v_operator_role_id := gen_random_uuid();
         INSERT INTO "authorization".roles (
-            id, tenant_id, role_code, role_name, description, is_system_role
+            id, tenant_id, role_code, name, is_system_role, created_at
         )
         VALUES (
             v_operator_role_id,
             v_tenant_id,
             v_operator_role_code,
             'Demo Inventory Operator',
-            'Least-privilege role for executing stock transfers and adjustments in CLOUD-LOGISTICS',
-            false
+            false,
+            now()
         );
         RAISE NOTICE '[ROLE CREATED] Created new role % with ID %', v_operator_role_code, v_operator_role_id;
     ELSE
@@ -153,13 +153,29 @@ BEGIN
     END IF;
 
     -- 6. Assign DEMO_INVENTORY_OPERATOR strictly to Tanzeel's tenant membership
-    INSERT INTO "authorization".membership_role_assignments (
-        tenant_id, membership_id, role_id
-    )
-    VALUES (
-        v_tenant_id, v_membership_id, v_operator_role_id
-    )
-    ON CONFLICT (tenant_id, membership_id, role_id) DO NOTHING;
+    IF NOT EXISTS (
+        SELECT 1 FROM "authorization".membership_role_assignments
+        WHERE tenant_id = v_tenant_id
+          AND membership_id = v_membership_id
+          AND role_id = v_operator_role_id
+          AND effective_from <= now()
+          AND (effective_until IS NULL OR effective_until > now())
+    ) THEN
+        INSERT INTO "authorization".membership_role_assignments (
+            id, tenant_id, membership_id, role_id, assigned_by_user_id, effective_from
+        )
+        VALUES (
+            gen_random_uuid(),
+            v_tenant_id,
+            v_membership_id,
+            v_operator_role_id,
+            v_user_id,
+            now()
+        );
+        RAISE NOTICE '[ROLE ASSIGNED] Assigned % to membership %', v_operator_role_code, v_membership_id;
+    ELSE
+        RAISE NOTICE '[ROLE ALREADY ASSIGNED] % already assigned to membership %', v_operator_role_code, v_membership_id;
+    END IF;
 
     -- Assert role is assigned ONLY to Tanzeel
     IF EXISTS (
