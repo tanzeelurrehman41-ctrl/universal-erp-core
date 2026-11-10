@@ -80,20 +80,36 @@ BEGIN
     RAISE NOTICE '[PRECONDITION PASSED] Both required GL accounts (1200 Asset/Debit & 2010 Liability/Credit) verified active.';
 
     -- 4. Atomic Re-queue strictly for the two target GRN dead-letter outbox events
-    CREATE TEMP TABLE tmp_requeued_events ON COMMIT DROP AS
-    UPDATE erp_purchasing.outbox_event
-    SET status = 'pending',
-        attempt_count = 0,
-        last_error = NULL,
-        next_retry_at = NULL,
-        redrive_count = redrive_count + 1
-    WHERE tenant_id = v_tenant_id
-      AND company_id = v_company_id
-      AND grn_id IN (v_grn_id_1, v_grn_id_2)
-      AND event_type = 'grn.posted'
-      AND status = 'dead_letter'
-      AND published_at IS NULL
-    RETURNING event_id, grn_id, event_type, status, attempt_count, redrive_count, occurred_at;
+    CREATE TEMP TABLE tmp_requeued_events (
+        event_id uuid,
+        grn_id uuid,
+        event_type text,
+        status text,
+        attempt_count integer,
+        redrive_count integer,
+        occurred_at timestamptz
+    ) ON COMMIT DROP;
+
+    WITH updated AS (
+        UPDATE erp_purchasing.outbox_event
+        SET status = 'pending',
+            attempt_count = 0,
+            last_error = NULL,
+            next_retry_at = NULL,
+            redrive_count = redrive_count + 1
+        WHERE tenant_id = v_tenant_id
+          AND company_id = v_company_id
+          AND grn_id IN (v_grn_id_1, v_grn_id_2)
+          AND event_type = 'grn.posted'
+          AND status = 'dead_letter'
+          AND published_at IS NULL
+        RETURNING event_id, grn_id, event_type, status, attempt_count, redrive_count, occurred_at
+    )
+    INSERT INTO tmp_requeued_events (
+        event_id, grn_id, event_type, status, attempt_count, redrive_count, occurred_at
+    )
+    SELECT event_id, grn_id, event_type, status, attempt_count, redrive_count, occurred_at
+    FROM updated;
 
     GET DIAGNOSTICS v_requeue_count = ROW_COUNT;
 
