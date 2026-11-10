@@ -9,7 +9,11 @@ def validate_all():
         "database/cloud_cutover/28_verify_purchasing_outbox_processing.sql",
         "database/cloud_cutover/29_inspect_finance_workspace_verification.sql",
         "database/cloud_cutover/30_inspect_inventory_valuation_reconciliation.sql",
-        "database/cloud_cutover/31_inspect_sales_workspace_preconditions.sql"
+        "database/cloud_cutover/31_inspect_sales_workspace_preconditions.sql",
+        "database/cloud_cutover/32_apply_migration_025_sales_permissions.sql",
+        "database/cloud_cutover/33_propose_demo_sales_operator.sql",
+        "database/migrations/025_register_sales_permissions.sql",
+        "database/migrations/025_register_sales_permissions.down.sql"
     ]
 
     all_passed = True
