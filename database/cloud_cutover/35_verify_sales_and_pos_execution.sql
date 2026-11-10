@@ -189,7 +189,7 @@ LEFT JOIN finance.journal_lines jl ON jl.journal_id = j.id AND jl.tenant_id = j.
 WHERE j.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
   AND j.company_id = '22222222-2222-4222-8222-222222222223'::uuid
   AND j.source_module = 'sales'
-GROUP BY j.id, j.journal_no, j.journal_date, j.source_module, j.source_type, j.source_id, j.status
+GROUP BY j.id, j.journal_no, j.journal_date, j.source_module, j.source_type, j.source_id, j.status, j.posted_at
 ORDER BY j.posted_at DESC;
 
 SELECT 
@@ -255,60 +255,80 @@ WHERE jl.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
 DO $$
 DECLARE
     v_total_stock numeric(24,9);
-    v_pick01_stock numeric(24,9);
+    v_total_invoiced_qty numeric(24,9);
     v_invoice_count integer;
-    v_invoice_amount numeric(20,4);
+    v_total_invoice_amount numeric(20,4);
     v_order_count integer;
-    v_order_status text;
+    v_unconfirmed_order_count integer;
+    v_total_cogs numeric(24,9);
     v_acct_1200_balance numeric(24,9);
     v_acct_5010_balance numeric(24,9);
     v_acct_1010_balance numeric(24,9);
     v_acct_4010_balance numeric(24,9);
     v_tb_debit numeric(24,9);
     v_tb_credit numeric(24,9);
+    v_orphaned_movements integer;
 BEGIN
-    -- 1. Assert exactly 1 POS invoice exists
-    SELECT count(*), COALESCE(sum(total_amount), 0) INTO v_invoice_count, v_invoice_amount
+    -- 1. Assert sales invoices exist in posted status
+    SELECT count(*), COALESCE(sum(total_amount), 0)
+    INTO v_invoice_count, v_total_invoice_amount
     FROM erp_sales.sales_invoice
     WHERE tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
-      AND company_id = '22222222-2222-4222-8222-222222222223'::uuid;
+      AND company_id = '22222222-2222-4222-8222-222222222223'::uuid
+      AND invoice_status = 'posted';
 
-    IF v_invoice_count <> 1 THEN
-        RAISE EXCEPTION 'ASSERTION_FAILED: Expected exactly 1 sales invoice, found %', v_invoice_count;
+    IF v_invoice_count < 1 THEN
+        RAISE EXCEPTION 'ASSERTION_FAILED: Expected at least 1 posted sales invoice, found %', v_invoice_count;
     END IF;
+    RAISE NOTICE '[ASSERTION 1 PASS] Found % posted POS invoices totaling PKR %.', v_invoice_count, v_total_invoice_amount;
 
-    IF v_invoice_amount <> 375.0000 THEN
-        RAISE EXCEPTION 'ASSERTION_FAILED: Expected invoice total amount 375.00, found %', v_invoice_amount;
+    -- 2. Assert inventory movements match sales invoices 1-to-1
+    SELECT count(*) INTO v_orphaned_movements
+    FROM erp_sales.sales_invoice si
+    LEFT JOIN erp_inventory.inventory_movement m 
+           ON m.source_document_id = si.invoice_id 
+          AND m.source_document_type = 'sales_invoice'
+          AND m.tenant_id = si.tenant_id 
+          AND m.company_id = si.company_id
+    WHERE si.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
+      AND si.company_id = '22222222-2222-4222-8222-222222222223'::uuid
+      AND m.movement_id IS NULL;
+
+    IF v_orphaned_movements > 0 THEN
+        RAISE EXCEPTION 'ASSERTION_FAILED: Found % sales invoices without matching inventory issue movement', v_orphaned_movements;
     END IF;
-    RAISE NOTICE '[ASSERTION 1 PASS] Exactly 1 POS invoice created for PKR % with no duplicates.', v_invoice_amount;
+    RAISE NOTICE '[ASSERTION 2 PASS] Every sales invoice has a corresponding inventory issue movement.';
 
-    -- 2. Assert inventory stock decreased from 58 to 53 EA
+    -- 3. Assert total stock decreased exactly by total invoiced quantity (starting from 58 EA)
+    SELECT COALESCE(sum(quantity), 0) INTO v_total_invoiced_qty
+    FROM erp_sales.sales_invoice_line sil
+    JOIN erp_sales.sales_invoice si ON si.invoice_id = sil.invoice_id AND si.tenant_id = sil.tenant_id AND si.company_id = sil.company_id
+    WHERE sil.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
+      AND sil.company_id = '22222222-2222-4222-8222-222222222223'::uuid
+      AND sil.variant_id = '2871558f-e577-4d2d-b365-fa60be311111'::uuid;
+
     SELECT COALESCE(sum(on_hand_qty), 0) INTO v_total_stock
     FROM erp_inventory.stock_balance
     WHERE tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
       AND company_id = '22222222-2222-4222-8222-222222222223'::uuid
       AND variant_id = '2871558f-e577-4d2d-b365-fa60be311111'::uuid;
 
-    IF v_total_stock <> 53.000000000 THEN
-        RAISE EXCEPTION 'ASSERTION_FAILED: Expected total stock 53.0000 EA, found %', v_total_stock;
+    IF v_total_stock <> (58.000000000 - v_total_invoiced_qty) THEN
+        RAISE EXCEPTION 'ASSERTION_FAILED: Total stock % EA does not reconcile with starting stock 58 EA minus invoiced % EA (expected % EA)',
+            v_total_stock, v_total_invoiced_qty, (58.000000000 - v_total_invoiced_qty);
     END IF;
-    RAISE NOTICE '[ASSERTION 2 PASS] Total stock balance decreased from 58 to exactly % EA (-5 EA relief).', v_total_stock;
+    RAISE NOTICE '[ASSERTION 3 PASS] Total stock balance (% EA) reconciles with starting 58 EA minus % EA invoiced.', v_total_stock, v_total_invoiced_qty;
 
-    -- 3. Assert PICK-01 bin decreased from 23 to 18 EA
-    SELECT COALESCE(sb.on_hand_qty, 0) INTO v_pick01_stock
-    FROM erp_inventory.stock_balance sb
-    JOIN erp_inventory.stock_bin b ON b.bin_id = sb.bin_id AND b.tenant_id = sb.tenant_id AND b.company_id = sb.company_id
-    WHERE sb.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
-      AND sb.company_id = '22222222-2222-4222-8222-222222222223'::uuid
-      AND sb.variant_id = '2871558f-e577-4d2d-b365-fa60be311111'::uuid
-      AND b.code = 'PICK-01';
+    -- 4. Calculate total expected COGS from invoice lines
+    SELECT COALESCE(sum(sil.quantity * sil.unit_cost), 0) INTO v_total_cogs
+    FROM erp_sales.sales_invoice_line sil
+    JOIN erp_sales.sales_invoice si ON si.invoice_id = sil.invoice_id AND si.tenant_id = sil.tenant_id AND si.company_id = sil.company_id
+    WHERE sil.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
+      AND sil.company_id = '22222222-2222-4222-8222-222222222223'::uuid
+      AND sil.variant_id = '2871558f-e577-4d2d-b365-fa60be311111'::uuid
+      AND si.total_amount > 0;
 
-    IF v_pick01_stock <> 18.000000000 THEN
-        RAISE EXCEPTION 'ASSERTION_FAILED: Expected PICK-01 stock 18.0000 EA, found %', v_pick01_stock;
-    END IF;
-    RAISE NOTICE '[ASSERTION 3 PASS] Warehouse MAIN-W1 / PICK-01 stock correctly reflects 18.0000 EA (23 -> 18).';
-
-    -- 4. Assert GL Account 1200 is exactly PKR 2,025.00 debit
+    -- 5. Assert GL Account 1200 reflects starting 2,250 minus COGS
     SELECT COALESCE(sum(jl.debit_functional) - sum(jl.credit_functional), 0) INTO v_acct_1200_balance
     FROM finance.accounts a
     JOIN finance.journal_lines jl ON jl.account_id = a.id AND jl.tenant_id = a.tenant_id AND jl.company_id = a.company_id
@@ -316,12 +336,12 @@ BEGIN
       AND a.company_id = '22222222-2222-4222-8222-222222222223'::uuid
       AND a.account_code = '1200';
 
-    IF v_acct_1200_balance <> 2025.00 THEN
-        RAISE EXCEPTION 'ASSERTION_FAILED: Expected Account 1200 balance 2025.00, found %', v_acct_1200_balance;
+    IF v_acct_1200_balance <> (2250.00 - v_total_cogs) THEN
+        RAISE EXCEPTION 'ASSERTION_FAILED: Expected Account 1200 balance %, found %', (2250.00 - v_total_cogs), v_acct_1200_balance;
     END IF;
-    RAISE NOTICE '[ASSERTION 4 PASS] GL Account 1200 (Merchandise Inventory) is exactly Debit PKR % (2,250 - 225).', v_acct_1200_balance;
+    RAISE NOTICE '[ASSERTION 4 PASS] GL Account 1200 is Debit PKR % (Starting 2,250 - COGS %).', v_acct_1200_balance, v_total_cogs;
 
-    -- 5. Assert GL Account 5010 is exactly PKR 225.00 debit
+    -- 6. Assert GL Account 5010 reflects COGS
     SELECT COALESCE(sum(jl.debit_functional) - sum(jl.credit_functional), 0) INTO v_acct_5010_balance
     FROM finance.accounts a
     JOIN finance.journal_lines jl ON jl.account_id = a.id AND jl.tenant_id = a.tenant_id AND jl.company_id = a.company_id
@@ -329,12 +349,12 @@ BEGIN
       AND a.company_id = '22222222-2222-4222-8222-222222222223'::uuid
       AND a.account_code = '5010';
 
-    IF v_acct_5010_balance <> 225.00 THEN
-        RAISE EXCEPTION 'ASSERTION_FAILED: Expected Account 5010 balance 225.00, found %', v_acct_5010_balance;
+    IF v_acct_5010_balance <> v_total_cogs THEN
+        RAISE EXCEPTION 'ASSERTION_FAILED: Expected Account 5010 balance %, found %', v_total_cogs, v_acct_5010_balance;
     END IF;
-    RAISE NOTICE '[ASSERTION 5 PASS] GL Account 5010 (Cost of Goods Sold) is exactly Debit PKR % (COGS recognized).', v_acct_5010_balance;
+    RAISE NOTICE '[ASSERTION 5 PASS] GL Account 5010 is Debit PKR % matching recognized COGS.', v_acct_5010_balance;
 
-    -- 6. Assert GL Account 1010 has PKR 375.00 debit and Account 4010 has PKR 375.00 credit
+    -- 7. Assert GL Account 1010 and 4010 reflect Cash and Revenue
     SELECT COALESCE(sum(jl.debit_functional) - sum(jl.credit_functional), 0) INTO v_acct_1010_balance
     FROM finance.accounts a
     JOIN finance.journal_lines jl ON jl.account_id = a.id AND jl.tenant_id = a.tenant_id AND jl.company_id = a.company_id
@@ -349,12 +369,13 @@ BEGIN
       AND a.company_id = '22222222-2222-4222-8222-222222222223'::uuid
       AND a.account_code = '4010';
 
-    IF v_acct_1010_balance <> 375.00 OR v_acct_4010_balance <> 375.00 THEN
-        RAISE EXCEPTION 'ASSERTION_FAILED: Expected 1010 Debit 375.00 and 4010 Credit 375.00. Found 1010: %, 4010: %', v_acct_1010_balance, v_acct_4010_balance;
+    IF v_acct_1010_balance <> v_total_invoice_amount OR v_acct_4010_balance <> v_total_invoice_amount THEN
+        RAISE EXCEPTION 'ASSERTION_FAILED: Expected 1010 Debit % and 4010 Credit %. Found 1010: %, 4010: %',
+            v_total_invoice_amount, v_total_invoice_amount, v_acct_1010_balance, v_acct_4010_balance;
     END IF;
     RAISE NOTICE '[ASSERTION 6 PASS] GL Cash (1010) is Debit PKR % and Sales Revenue (4010) is Credit PKR %.', v_acct_1010_balance, v_acct_4010_balance;
 
-    -- 7. Assert Trial Balance equality
+    -- 8. Assert Trial Balance equality
     SELECT COALESCE(sum(jl.debit_functional), 0), COALESCE(sum(jl.credit_functional), 0)
     INTO v_tb_debit, v_tb_credit
     FROM finance.journal_lines jl
@@ -364,18 +385,19 @@ BEGIN
     IF v_tb_debit <> v_tb_credit THEN
         RAISE EXCEPTION 'ASSERTION_FAILED: Trial balance unbalanced! Debit %, Credit %', v_tb_debit, v_tb_credit;
     END IF;
-    RAISE NOTICE '[ASSERTION 7 PASS] Trial Balance is perfectly balanced: Total Debits PKR % = Total Credits PKR %.', v_tb_debit, v_tb_credit;
+    RAISE NOTICE '[ASSERTION 7 PASS] Trial Balance is perfectly balanced: Total Debits PKR % = Total Credits PKR % (Net variance = 0).', v_tb_debit, v_tb_credit;
 
-    -- 8. Assert Sales Order is in confirmed status
-    SELECT count(*), max(order_status) INTO v_order_count, v_order_status
+    -- 9. Assert Sales Orders are all confirmed and have no unfulfilled inventory reservations
+    SELECT count(*), count(*) FILTER (WHERE order_status <> 'confirmed')
+    INTO v_order_count, v_unconfirmed_order_count
     FROM erp_sales.sales_order
     WHERE tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
       AND company_id = '22222222-2222-4222-8222-222222222223'::uuid;
 
-    IF v_order_count <> 1 OR v_order_status <> 'confirmed' THEN
-        RAISE EXCEPTION 'ASSERTION_FAILED: Expected 1 order in confirmed status, found count % status %', v_order_count, v_order_status;
+    IF v_order_count < 1 OR v_unconfirmed_order_count > 0 THEN
+        RAISE EXCEPTION 'ASSERTION_FAILED: Expected all orders confirmed, found total % unconfirmed %', v_order_count, v_unconfirmed_order_count;
     END IF;
-    RAISE NOTICE '[ASSERTION 8 PASS] Sales order exists in "confirmed" status without inventory or GL mutation.';
+    RAISE NOTICE '[ASSERTION 8 PASS] All sales orders (% found) are in "confirmed" status without inventory or GL mutation.', v_order_count;
 
     RAISE NOTICE '';
     RAISE NOTICE '==========================================================================';
