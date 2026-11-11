@@ -268,6 +268,8 @@ DECLARE
     v_tb_debit numeric(24,9);
     v_tb_credit numeric(24,9);
     v_orphaned_movements integer;
+    v_pick01_stock numeric(24,9);
+    v_pick01_invoiced_qty numeric(24,9);
 BEGIN
     -- 1. Assert sales invoices exist in posted status
     SELECT count(*), COALESCE(sum(total_amount), 0)
@@ -318,6 +320,30 @@ BEGIN
             v_total_stock, v_total_invoiced_qty, (58.000000000 - v_total_invoiced_qty);
     END IF;
     RAISE NOTICE '[ASSERTION 3 PASS] Total stock balance (% EA) reconciles with starting 58 EA minus % EA invoiced.', v_total_stock, v_total_invoiced_qty;
+
+    -- 3b. Assert PICK-01 bin stock specifically reconciles with baseline 23 EA minus invoiced from PICK-01
+    SELECT COALESCE(sum(sil.quantity), 0) INTO v_pick01_invoiced_qty
+    FROM erp_sales.sales_invoice_line sil
+    JOIN erp_sales.sales_invoice si ON si.invoice_id = sil.invoice_id AND si.tenant_id = sil.tenant_id AND si.company_id = sil.company_id
+    JOIN erp_inventory.stock_bin b ON b.bin_id = sil.bin_id AND b.tenant_id = sil.tenant_id AND b.company_id = sil.company_id
+    WHERE sil.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
+      AND sil.company_id = '22222222-2222-4222-8222-222222222223'::uuid
+      AND sil.variant_id = '2871558f-e577-4d2d-b365-fa60be311111'::uuid
+      AND b.code = 'PICK-01';
+
+    SELECT COALESCE(sb.on_hand_qty, 0) INTO v_pick01_stock
+    FROM erp_inventory.stock_balance sb
+    JOIN erp_inventory.stock_bin b ON b.bin_id = sb.bin_id AND b.tenant_id = sb.tenant_id AND b.company_id = sb.company_id
+    WHERE sb.tenant_id = '22222222-2222-4222-8222-222222222222'::uuid
+      AND sb.company_id = '22222222-2222-4222-8222-222222222223'::uuid
+      AND sb.variant_id = '2871558f-e577-4d2d-b365-fa60be311111'::uuid
+      AND b.code = 'PICK-01';
+
+    IF v_pick01_stock <> (23.000000000 - v_pick01_invoiced_qty) THEN
+        RAISE EXCEPTION 'ASSERTION_FAILED: PICK-01 stock % EA does not reconcile with starting 23 EA minus invoiced % EA (expected % EA)',
+            v_pick01_stock, v_pick01_invoiced_qty, (23.000000000 - v_pick01_invoiced_qty);
+    END IF;
+    RAISE NOTICE '[ASSERTION 3b PASS] Warehouse MAIN-W1 / PICK-01 stock (% EA) reconciles with starting 23 EA minus % EA invoiced.', v_pick01_stock, v_pick01_invoiced_qty;
 
     -- 4. Calculate total expected COGS from invoice lines
     SELECT COALESCE(sum(sil.quantity * sil.unit_cost), 0) INTO v_total_cogs
