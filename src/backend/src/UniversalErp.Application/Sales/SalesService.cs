@@ -177,8 +177,42 @@ public sealed class SalesService(
         if (request.Lines is null || request.Lines.Count == 0)
             return Result<SalesInvoiceSummary>.Failure("INVOICE_REQUIRES_LINES");
 
-        if (request.Lines.Any(l => l.Quantity <= 0 || l.UnitPrice < 0 || l.VariantId == Guid.Empty || l.WarehouseId == Guid.Empty || l.BinId == Guid.Empty))
-            return Result<SalesInvoiceSummary>.Failure("INVALID_INVOICE_LINE");
+        if (request.DiscountAmount < 0)
+            return Result<SalesInvoiceSummary>.Failure("INVALID_DISCOUNT_AMOUNT");
+
+        foreach (var line in request.Lines)
+        {
+            if (line.VariantId == Guid.Empty || line.WarehouseId == Guid.Empty || line.BinId == Guid.Empty || line.Quantity <= 0)
+                return Result<SalesInvoiceSummary>.Failure("INVALID_INVOICE_LINE");
+            if (line.UnitPrice <= 0)
+                return Result<SalesInvoiceSummary>.Failure("INVALID_SELLING_PRICE");
+            if (line.TaxRate < 0)
+                return Result<SalesInvoiceSummary>.Failure("INVALID_TAX_RATE");
+            if (line.UnitCost < 0)
+                return Result<SalesInvoiceSummary>.Failure("INVALID_UNIT_COST");
+        }
+
+        var variantIds = request.Lines.Select(l => l.VariantId).Distinct().ToArray();
+        var variantRequiresCogs = await repository.GetVariantRequiresCogsAsync(variantIds, cancellationToken);
+        foreach (var line in request.Lines)
+        {
+            var requiresCogs = !variantRequiresCogs.TryGetValue(line.VariantId, out var tracked) || tracked;
+            if (requiresCogs && line.UnitCost <= 0)
+                return Result<SalesInvoiceSummary>.Failure("UNIT_COST_REQUIRED");
+        }
+
+        decimal subtotal = 0m;
+        decimal tax = 0m;
+        foreach (var line in request.Lines)
+        {
+            var lineSubtotal = line.Quantity * line.UnitPrice;
+            subtotal += lineSubtotal;
+            tax += lineSubtotal * line.TaxRate;
+        }
+        var netRevenue = subtotal - request.DiscountAmount;
+        var total = subtotal + tax - request.DiscountAmount;
+        if (subtotal <= 0m || netRevenue <= 0m || total <= 0m)
+            return Result<SalesInvoiceSummary>.Failure("INVALID_INVOICE_TOTAL");
 
         try
         {
@@ -194,16 +228,35 @@ public sealed class SalesService(
         {
             return Result<SalesInvoiceSummary>.Failure("INSUFFICIENT_STOCK");
         }
+        catch (InvalidOperationException ex) when (ex.Message.StartsWith("INVALID_SELLING_PRICE", StringComparison.OrdinalIgnoreCase))
+        {
+            return Result<SalesInvoiceSummary>.Failure("INVALID_SELLING_PRICE");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.StartsWith("UNIT_COST_REQUIRED", StringComparison.OrdinalIgnoreCase))
+        {
+            return Result<SalesInvoiceSummary>.Failure("UNIT_COST_REQUIRED");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.StartsWith("INVALID_INVOICE_TOTAL", StringComparison.OrdinalIgnoreCase))
+        {
+            return Result<SalesInvoiceSummary>.Failure("INVALID_INVOICE_TOTAL");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.StartsWith("GL_POSTING_FAILED", StringComparison.OrdinalIgnoreCase))
+        {
+            return Result<SalesInvoiceSummary>.Failure("GL_POSTING_FAILED");
+        }
         catch (Exception ex) when (ex.Message.Contains("unique", StringComparison.OrdinalIgnoreCase) ||
                                 ex.Message.Contains("23505", StringComparison.OrdinalIgnoreCase))
         {
-            // Idempotency: return existing invoice if same transaction ID
+            // Idempotency: return existing invoice only if the same ClientTransactionId is replayed.
             var all = await repository.ListInvoicesAsync(cancellationToken);
-            var existing = all.FirstOrDefault(i => i.ClientTransactionId == request.ClientTransactionId ||
-                                                   i.InvoiceNumber.Equals(invoiceNo, StringComparison.OrdinalIgnoreCase));
-            return existing is null
-                ? Result<SalesInvoiceSummary>.Failure("DUPLICATE_INVOICE_TRANSACTION")
-                : Result<SalesInvoiceSummary>.Success(existing);
+            var existingByTx = all.FirstOrDefault(i => i.ClientTransactionId == request.ClientTransactionId);
+            if (existingByTx is not null)
+                return Result<SalesInvoiceSummary>.Success(existingByTx);
+
+            var existingByNo = all.FirstOrDefault(i => i.InvoiceNumber.Equals(invoiceNo, StringComparison.OrdinalIgnoreCase));
+            return existingByNo is not null
+                ? Result<SalesInvoiceSummary>.Failure("DUPLICATE_INVOICE_NUMBER")
+                : Result<SalesInvoiceSummary>.Failure("DUPLICATE_INVOICE_TRANSACTION");
         }
     }
 }

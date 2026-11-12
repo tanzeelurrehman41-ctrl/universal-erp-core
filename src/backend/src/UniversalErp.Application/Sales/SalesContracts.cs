@@ -176,6 +176,7 @@ public interface ISalesRepository
     Task ConfirmOrderAsync(Guid orderId, CancellationToken cancellationToken);
 
     // Invoices & POS
+    Task<IReadOnlyDictionary<Guid, bool>> GetVariantRequiresCogsAsync(IReadOnlyCollection<Guid> variantIds, CancellationToken cancellationToken);
     Task<IReadOnlyList<SalesInvoiceSummary>> ListInvoicesAsync(CancellationToken cancellationToken);
     Task<SalesInvoiceSummary?> GetInvoiceAsync(Guid invoiceId, CancellationToken cancellationToken);
     Task<Guid> PostInvoiceAsync(PostSalesInvoiceRequest request, Guid createdBy, CancellationToken cancellationToken);

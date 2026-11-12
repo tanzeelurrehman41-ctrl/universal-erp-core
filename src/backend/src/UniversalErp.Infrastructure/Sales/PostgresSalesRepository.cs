@@ -472,6 +472,38 @@ public sealed class PostgresSalesRepository(
         }).ToList();
     }
 
+    public async Task<IReadOnlyDictionary<Guid, bool>> GetVariantRequiresCogsAsync(
+        IReadOnlyCollection<Guid> variantIds,
+        CancellationToken ct)
+    {
+        var result = new Dictionary<Guid, bool>();
+        if (variantIds.Count == 0) return result;
+
+        await using var conn = await OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        await SetRls(cmd, Ctx);
+
+        cmd.CommandText = """
+            SELECT v.variant_id, (p.product_type = 'stock') AS requires_cogs
+            FROM erp_inventory.product_variant v
+            JOIN erp_inventory.product p ON p.tenant_id = v.tenant_id AND p.product_id = v.product_id
+            WHERE v.tenant_id = @tid AND v.variant_id = ANY(@ids);
+            """;
+        cmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+        cmd.Parameters.AddWithValue("ids", variantIds.ToArray());
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            result[reader.GetGuid(0)] = reader.GetBoolean(1);
+        }
+        await reader.CloseAsync();
+        await tx.CommitAsync(ct);
+        return result;
+    }
+
     public async Task<SalesInvoiceSummary?> GetInvoiceAsync(Guid invoiceId, CancellationToken ct)
     {
         var all = await ListInvoicesAsync(ct);
@@ -487,6 +519,69 @@ public sealed class PostgresSalesRepository(
         await SetRls(cmd, Ctx);
 
         var lines = req.Lines ?? [];
+        if (lines.Count == 0)
+            throw new InvalidOperationException("INVOICE_REQUIRES_LINES");
+        if (req.DiscountAmount < 0m)
+            throw new InvalidOperationException("INVALID_DISCOUNT_AMOUNT");
+
+        // 0. Defense-in-depth validation of pricing, costs, and totals before any mutations
+        decimal subtotal = 0;
+        decimal tax = 0;
+        decimal totalCost = 0;
+        foreach (var l in lines)
+        {
+            if (l.Quantity <= 0m)
+                throw new InvalidOperationException("INVALID_INVOICE_LINE: Quantity must be greater than zero.");
+            if (l.UnitPrice <= 0m)
+                throw new InvalidOperationException("INVALID_SELLING_PRICE: Selling price must be greater than zero.");
+            if (l.TaxRate < 0m)
+                throw new InvalidOperationException("INVALID_TAX_RATE: Tax rate cannot be negative.");
+            if (l.UnitCost < 0m)
+                throw new InvalidOperationException("INVALID_UNIT_COST: Unit cost cannot be negative.");
+
+            var lineSub = l.Quantity * l.UnitPrice;
+            var lineTax = lineSub * l.TaxRate;
+            subtotal += lineSub;
+            tax += lineTax;
+            totalCost += (l.Quantity * l.UnitCost);
+        }
+
+        var netRevenue = subtotal - req.DiscountAmount;
+        var total = subtotal + tax - req.DiscountAmount;
+        if (subtotal <= 0m || netRevenue <= 0m || total <= 0m)
+            throw new InvalidOperationException("INVALID_INVOICE_TOTAL: Invoice total and net revenue must be greater than zero.");
+
+        var variantCogsRequired = new Dictionary<Guid, bool>();
+        await using (var varCmd = conn.CreateCommand())
+        {
+            varCmd.Transaction = tx;
+            varCmd.CommandText = """
+                SELECT v.variant_id, (p.product_type = 'stock') AS requires_cogs
+                FROM erp_inventory.product_variant v
+                JOIN erp_inventory.product p ON p.tenant_id = v.tenant_id AND p.product_id = v.product_id
+                WHERE v.tenant_id = @tid AND v.variant_id = ANY(@ids);
+                """;
+            varCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+            varCmd.Parameters.AddWithValue("ids", lines.Select(l => l.VariantId).Distinct().ToArray());
+            await using var varReader = await varCmd.ExecuteReaderAsync(ct);
+            while (await varReader.ReadAsync(ct))
+            {
+                variantCogsRequired[varReader.GetGuid(0)] = varReader.GetBoolean(1);
+            }
+            await varReader.CloseAsync();
+        }
+
+        var anyInventoryTracked = false;
+        foreach (var l in lines)
+        {
+            var requiresCogs = !variantCogsRequired.TryGetValue(l.VariantId, out var tracked) || tracked;
+            if (requiresCogs)
+            {
+                anyInventoryTracked = true;
+                if (l.UnitCost <= 0m)
+                    throw new InvalidOperationException($"UNIT_COST_REQUIRED: Positive unit cost is required for inventory-tracked variant {l.VariantId}.");
+            }
+        }
 
         // 1. Verify stock sufficiency for all lines
         foreach (var l in lines)
@@ -513,19 +608,7 @@ public sealed class PostgresSalesRepository(
             }
         }
 
-        // 2. Compute Invoice Totals
-        decimal subtotal = 0;
-        decimal tax = 0;
-        decimal totalCost = 0;
-        foreach (var l in lines)
-        {
-            var lineSub = l.Quantity * l.UnitPrice;
-            var lineTax = lineSub * l.TaxRate;
-            subtotal += lineSub;
-            tax += lineTax;
-            totalCost += (l.Quantity * l.UnitCost);
-        }
-        var total = subtotal + tax - req.DiscountAmount;
+        // 2. Payment and Metadata Initialization
         var paid = req.PaymentMethod == "credit" ? 0m : total;
         var invoiceId = Guid.NewGuid();
         var invoiceDate = req.InvoiceDate?.ToDateTime(TimeOnly.MinValue) ?? DateTime.UtcNow.Date;
@@ -719,13 +802,32 @@ public sealed class PostgresSalesRepository(
             await accReader.CloseAsync();
         }
 
-        if (openPeriodId.HasValue && salesRevenueAccount.HasValue && total > 0)
+        var debitAccountId = req.PaymentMethod switch
         {
-            var journalId = Guid.NewGuid();
-            var journalNo = $"JRN-INV-{req.InvoiceNumber}";
-            var glIdempotencyKey = $"sales-inv-gl-{invoiceId}";
+            "credit" => arAccount ?? cashAccount,
+            "card" or "bank_transfer" => bankAccount ?? cashAccount,
+            _ => cashAccount,
+        };
 
-            await using var jourCmd = conn.CreateCommand();
+        if (!openPeriodId.HasValue)
+            throw new InvalidOperationException("GL_POSTING_FAILED: No open fiscal period found for sales invoice GL posting.");
+        if (!debitAccountId.HasValue)
+            throw new InvalidOperationException("GL_POSTING_FAILED: Debit account (Cash/Bank/AR) is missing.");
+        if (!salesRevenueAccount.HasValue)
+            throw new InvalidOperationException("GL_POSTING_FAILED: Sales Revenue account (4010) is missing.");
+        if (tax > 0 && !salesTaxAccount.HasValue)
+            throw new InvalidOperationException("GL_POSTING_FAILED: Sales Tax Output account (2100) is missing.");
+        if ((anyInventoryTracked || totalCost > 0) && (!cogsAccount.HasValue || !inventoryAssetAccount.HasValue))
+            throw new InvalidOperationException("GL_POSTING_FAILED: COGS (5010) or Inventory Asset (1200) account is missing.");
+        if (anyInventoryTracked && totalCost <= 0)
+            throw new InvalidOperationException("GL_POSTING_FAILED: Positive COGS is required for inventory-tracked sales.");
+
+        var journalId = Guid.NewGuid();
+        var journalNo = $"JRN-INV-{req.InvoiceNumber}";
+        var glIdempotencyKey = $"sales-inv-gl-{invoiceId}";
+
+        await using (var jourCmd = conn.CreateCommand())
+        {
             jourCmd.Transaction = tx;
             jourCmd.CommandText = """
                 INSERT INTO finance.journals
@@ -748,114 +850,61 @@ public sealed class PostgresSalesRepository(
             jourCmd.Parameters.AddWithValue("key", glIdempotencyKey);
             jourCmd.Parameters.AddWithValue("by", createdBy == Guid.Empty ? DBNull.Value : (object)createdBy);
             await jourCmd.ExecuteNonQueryAsync(ct);
-
-            var lineNo = 1;
-
-            // Line 1: Debit Cash or Bank or AR for Total
-            var debitAccountId = req.PaymentMethod switch
-            {
-                "credit" => arAccount ?? cashAccount,
-                "card" or "bank_transfer" => bankAccount ?? cashAccount,
-                _ => cashAccount,
-            };
-
-            const string insLineSql = """
-                INSERT INTO finance.journal_lines
-                    (tenant_id, company_id, journal_id, line_no, account_id, description,
-                     transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
-                VALUES
-                    (@tid, @cid, @jId, @ln, @acc, @desc,
-                     'PKR', @amt, 1.0, @deb, @cred);
-                """;
-
-            if (debitAccountId.HasValue)
-            {
-                await using var l1 = conn.CreateCommand();
-                l1.Transaction = tx;
-                l1.CommandText = insLineSql;
-                l1.Parameters.AddWithValue("tid", Ctx.TenantId);
-                l1.Parameters.AddWithValue("cid", Ctx.CompanyId);
-                l1.Parameters.AddWithValue("jId", journalId);
-                l1.Parameters.AddWithValue("ln", lineNo++);
-                l1.Parameters.AddWithValue("acc", debitAccountId.Value);
-                l1.Parameters.AddWithValue("desc", $"Payment/Receivable - {req.InvoiceNumber}");
-                l1.Parameters.AddWithValue("amt", total);
-                l1.Parameters.AddWithValue("deb", total);
-                l1.Parameters.AddWithValue("cred", 0m);
-                await l1.ExecuteNonQueryAsync(ct);
-            }
-
-            // Line 2: Credit Sales Revenue for Net Revenue (Subtotal - Discount)
-            var netRevenue = subtotal - req.DiscountAmount;
-            if (netRevenue > 0)
-            {
-                await using var l2 = conn.CreateCommand();
-                l2.Transaction = tx;
-                l2.CommandText = insLineSql;
-                l2.Parameters.AddWithValue("tid", Ctx.TenantId);
-                l2.Parameters.AddWithValue("cid", Ctx.CompanyId);
-                l2.Parameters.AddWithValue("jId", journalId);
-                l2.Parameters.AddWithValue("ln", lineNo++);
-                l2.Parameters.AddWithValue("acc", salesRevenueAccount.Value);
-                l2.Parameters.AddWithValue("desc", $"Sales Revenue - {req.InvoiceNumber}");
-                l2.Parameters.AddWithValue("amt", netRevenue);
-                l2.Parameters.AddWithValue("deb", 0m);
-                l2.Parameters.AddWithValue("cred", netRevenue);
-                await l2.ExecuteNonQueryAsync(ct);
-            }
-
-            // Line 3: Credit Sales Tax Payable (if tax > 0)
-            if (tax > 0 && salesTaxAccount.HasValue)
-            {
-                await using var l3 = conn.CreateCommand();
-                l3.Transaction = tx;
-                l3.CommandText = insLineSql;
-                l3.Parameters.AddWithValue("tid", Ctx.TenantId);
-                l3.Parameters.AddWithValue("cid", Ctx.CompanyId);
-                l3.Parameters.AddWithValue("jId", journalId);
-                l3.Parameters.AddWithValue("ln", lineNo++);
-                l3.Parameters.AddWithValue("acc", salesTaxAccount.Value);
-                l3.Parameters.AddWithValue("desc", $"Sales Tax Output - {req.InvoiceNumber}");
-                l3.Parameters.AddWithValue("amt", tax);
-                l3.Parameters.AddWithValue("deb", 0m);
-                l3.Parameters.AddWithValue("cred", tax);
-                await l3.ExecuteNonQueryAsync(ct);
-            }
-
-            // Line 4 & 5: Cost of Goods Sold & Inventory Asset (if cost > 0)
-            if (totalCost > 0 && cogsAccount.HasValue && inventoryAssetAccount.HasValue)
-            {
-                // Debit COGS
-                await using var l4 = conn.CreateCommand();
-                l4.Transaction = tx;
-                l4.CommandText = insLineSql;
-                l4.Parameters.AddWithValue("tid", Ctx.TenantId);
-                l4.Parameters.AddWithValue("cid", Ctx.CompanyId);
-                l4.Parameters.AddWithValue("jId", journalId);
-                l4.Parameters.AddWithValue("ln", lineNo++);
-                l4.Parameters.AddWithValue("acc", cogsAccount.Value);
-                l4.Parameters.AddWithValue("desc", $"COGS - {req.InvoiceNumber}");
-                l4.Parameters.AddWithValue("amt", totalCost);
-                l4.Parameters.AddWithValue("deb", totalCost);
-                l4.Parameters.AddWithValue("cred", 0m);
-                await l4.ExecuteNonQueryAsync(ct);
-
-                // Credit Inventory Asset
-                await using var l5 = conn.CreateCommand();
-                l5.Transaction = tx;
-                l5.CommandText = insLineSql;
-                l5.Parameters.AddWithValue("tid", Ctx.TenantId);
-                l5.Parameters.AddWithValue("cid", Ctx.CompanyId);
-                l5.Parameters.AddWithValue("jId", journalId);
-                l5.Parameters.AddWithValue("ln", lineNo++);
-                l5.Parameters.AddWithValue("acc", inventoryAssetAccount.Value);
-                l5.Parameters.AddWithValue("desc", $"Inventory relief - {req.InvoiceNumber}");
-                l5.Parameters.AddWithValue("amt", totalCost);
-                l5.Parameters.AddWithValue("deb", 0m);
-                l5.Parameters.AddWithValue("cred", totalCost);
-                await l5.ExecuteNonQueryAsync(ct);
-            }
         }
+
+        const string insLineSql = """
+            INSERT INTO finance.journal_lines
+                (tenant_id, company_id, journal_id, line_no, account_id, description,
+                 transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
+            VALUES
+                (@tid, @cid, @jId, @ln, @acc, @desc,
+                 'PKR', @amt, 1.0, @deb, @cred);
+            """;
+
+        var lineNo = 1;
+        decimal totalJournalDebits = 0m;
+        decimal totalJournalCredits = 0m;
+
+        async Task InsertJournalLineAsync(Guid accountId, string description, decimal debit, decimal credit)
+        {
+            await using var lineCmd = conn.CreateCommand();
+            lineCmd.Transaction = tx;
+            lineCmd.CommandText = insLineSql;
+            lineCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+            lineCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+            lineCmd.Parameters.AddWithValue("jId", journalId);
+            lineCmd.Parameters.AddWithValue("ln", lineNo++);
+            lineCmd.Parameters.AddWithValue("acc", accountId);
+            lineCmd.Parameters.AddWithValue("desc", description);
+            lineCmd.Parameters.AddWithValue("amt", debit > 0 ? debit : credit);
+            lineCmd.Parameters.AddWithValue("deb", debit);
+            lineCmd.Parameters.AddWithValue("cred", credit);
+            await lineCmd.ExecuteNonQueryAsync(ct);
+            totalJournalDebits += debit;
+            totalJournalCredits += credit;
+        }
+
+        // Line 1: Debit Cash or Bank or AR for Total
+        await InsertJournalLineAsync(debitAccountId.Value, $"Payment/Receivable - {req.InvoiceNumber}", total, 0m);
+
+        // Line 2: Credit Sales Revenue for Net Revenue (Subtotal - Discount)
+        await InsertJournalLineAsync(salesRevenueAccount.Value, $"Sales Revenue - {req.InvoiceNumber}", 0m, netRevenue);
+
+        // Line 3: Credit Sales Tax Payable (if tax > 0)
+        if (tax > 0)
+        {
+            await InsertJournalLineAsync(salesTaxAccount!.Value, $"Sales Tax Output - {req.InvoiceNumber}", 0m, tax);
+        }
+
+        // Line 4 & 5: Cost of Goods Sold & Inventory Asset (when cost > 0)
+        if (totalCost > 0)
+        {
+            await InsertJournalLineAsync(cogsAccount!.Value, $"COGS - {req.InvoiceNumber}", totalCost, 0m);
+            await InsertJournalLineAsync(inventoryAssetAccount!.Value, $"Inventory relief - {req.InvoiceNumber}", 0m, totalCost);
+        }
+
+        if (totalJournalDebits <= 0m || totalJournalDebits != totalJournalCredits)
+            throw new InvalidOperationException($"GL_POSTING_FAILED: Unbalanced GL journal (Debits {totalJournalDebits}, Credits {totalJournalCredits}).");
 
         // 8. Outbox Event
         var outboxPayload = JsonSerializer.Serialize(new

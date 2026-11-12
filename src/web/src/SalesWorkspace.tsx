@@ -132,6 +132,13 @@ type Props = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+function parseStrictNumber(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  const num = Number(trimmed);
+  return Number.isFinite(num) ? num : null;
+}
+
 async function apiGet<T>(path: string, workspace: ApiWorkspaceScope | null): Promise<T> {
   const response = await apiFetch(path, {}, workspace);
   if (!response.ok) throw new Error(`Request failed (${response.status}).`);
@@ -183,7 +190,7 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
     price: string;
     taxRate: string;
     cost: string;
-  }>>([{ variantId: "", qty: "1", price: "0", taxRate: "0", cost: "0" }]);
+  }>>([{ variantId: "", qty: "1", price: "", taxRate: "0", cost: "" }]);
 
   // Customer Form State
   const [custCode, setCustCode] = useState("");
@@ -268,22 +275,57 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
     }
   }, [posWarehouseId, bins]);
 
-  // Calculations for POS checkout
+  // Calculations & Strict Validation for POS checkout
   const posSubtotal = posLines.reduce((sum, l) => {
-    const q = parseFloat(l.qty) || 0;
-    const p = parseFloat(l.price) || 0;
+    const q = parseStrictNumber(l.qty);
+    const p = parseStrictNumber(l.price);
+    if (q === null || q <= 0 || p === null || p <= 0) return sum;
     return sum + (q * p);
   }, 0);
 
   const posTaxTotal = posLines.reduce((sum, l) => {
-    const q = parseFloat(l.qty) || 0;
-    const p = parseFloat(l.price) || 0;
-    const t = parseFloat(l.taxRate) || 0;
+    const q = parseStrictNumber(l.qty);
+    const p = parseStrictNumber(l.price);
+    const t = parseStrictNumber(l.taxRate);
+    if (q === null || q <= 0 || p === null || p <= 0 || t === null || t < 0) return sum;
     return sum + (q * p * (t / 100));
   }, 0);
 
-  const posDiscountNum = parseFloat(posDiscount) || 0;
-  const posNetPayable = Math.max(0, posSubtotal + posTaxTotal - posDiscountNum);
+  const parsedPosDiscount = parseStrictNumber(posDiscount);
+  const posDiscountNum = parsedPosDiscount !== null && parsedPosDiscount >= 0 ? parsedPosDiscount : 0;
+  const posRawNetPayable = posSubtotal + posTaxTotal - (parsedPosDiscount ?? 0);
+  const posNetPayable = posRawNetPayable;
+
+  const posValidationError = (() => {
+    if (!posCustomerId || !posWarehouseId || !posBinId) {
+      return "Please select Customer, Warehouse, and Bin.";
+    }
+    if (posLines.length === 0) {
+      return "At least one item line is required.";
+    }
+    for (let i = 0; i < posLines.length; i++) {
+      const l = posLines[i];
+      if (!l.variantId) return `Line ${i + 1}: Please select a product variant.`;
+      const qty = parseStrictNumber(l.qty);
+      if (qty === null || qty <= 0) return `Line ${i + 1}: Quantity must be greater than zero.`;
+      const price = parseStrictNumber(l.price);
+      if (price === null || price <= 0) return `Line ${i + 1}: Selling price (PKR) must be greater than zero.`;
+      const cost = parseStrictNumber(l.cost);
+      if (cost === null || cost <= 0) return `Line ${i + 1}: Unit cost (PKR) must be greater than zero for COGS accounting.`;
+      const tax = parseStrictNumber(l.taxRate);
+      if (tax === null || tax < 0 || tax > 100) return `Line ${i + 1}: Tax % must be between 0 and 100.`;
+    }
+    if (parsedPosDiscount === null || parsedPosDiscount < 0) {
+      return "Discount (PKR) must be a valid non-negative number.";
+    }
+    if (posSubtotal - parsedPosDiscount <= 0) {
+      return "Discount cannot equal or exceed the gross subtotal.";
+    }
+    if (posRawNetPayable <= 0) {
+      return "Invoice total payable must be greater than PKR 0.00.";
+    }
+    return null;
+  })();
 
   // Handlers
   const handleCreateCustomer = async (e: FormEvent) => {
@@ -370,12 +412,14 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
 
   const handlePostPosSale = async (e: FormEvent) => {
     e.preventDefault();
-    if (!posCustomerId || !posWarehouseId || !posBinId) {
-      setMessage("Please select Customer, Warehouse, and Bin.");
+    if (posValidationError) {
+      setMessage(posValidationError);
       return;
     }
-    if (posLines.some((l) => !l.variantId || (parseFloat(l.qty) || 0) <= 0)) {
-      setMessage("Please select a variant and valid positive quantity for each line.");
+
+    const discountAmount = parseStrictNumber(posDiscount);
+    if (discountAmount === null || discountAmount < 0) {
+      setMessage("Discount (PKR) must be a valid non-negative number.");
       return;
     }
 
@@ -388,15 +432,22 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
 
       const formattedLines = posLines.map((l) => {
         const variant = variants.find((v) => v.variantId === l.variantId);
+        const qty = parseStrictNumber(l.qty);
+        const price = parseStrictNumber(l.price);
+        const cost = parseStrictNumber(l.cost);
+        const tax = parseStrictNumber(l.taxRate);
+        if (qty === null || qty <= 0 || price === null || price <= 0 || cost === null || cost <= 0 || tax === null || tax < 0) {
+          throw new Error("Invalid line values: positive quantity, selling price, and unit cost are required.");
+        }
         return {
           variantId: l.variantId,
           warehouseId: posWarehouseId,
           binId: posBinId,
-          quantity: parseFloat(l.qty) || 1,
+          quantity: qty,
           unitOfMeasureId: variant?.baseUnitOfMeasureId ?? "00000000-0000-0000-0000-000000000000",
-          unitPrice: parseFloat(l.price) || 0,
-          unitCost: parseFloat(l.cost) || 0,
-          taxRate: (parseFloat(l.taxRate) || 0) / 100,
+          unitPrice: price,
+          unitCost: cost,
+          taxRate: tax / 100,
         };
       });
 
@@ -405,13 +456,13 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
         invoiceNumber,
         customerId: posCustomerId,
         paymentMethod: posPaymentMethod,
-        discountAmount: posDiscountNum,
+        discountAmount,
         note: posNote || null,
         lines: formattedLines,
       }, workspace, { "Idempotency-Key": clientTxId });
 
       setMessage(`Sale completed! Invoice #${posted.invoiceNumber} posted (${posted.paymentMethod.toUpperCase()}: PKR ${posted.totalAmount.toLocaleString()}). Inventory relieved & General Ledger balanced.`);
-      setPosLines([{ variantId: "", qty: "1", price: "0", taxRate: "0", cost: "0" }]);
+      setPosLines([{ variantId: "", qty: "1", price: "", taxRate: "0", cost: "" }]);
       setPosNote("");
       setReloadVersion((v) => v + 1);
     } catch (err) {
@@ -567,21 +618,21 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
                       />
 
                       <input
-                        type="number" min="0" step="0.01" placeholder="Price (PKR)" required
+                        type="number" min="0.01" step="0.01" placeholder="Price (PKR)" required
                         value={line.price}
                         onChange={(e) => setPosLines(posLines.map((l, i) => i === idx ? { ...l, price: e.target.value } : l))}
                         style={{ flex: "1", minWidth: "90px" }}
                       />
 
                       <input
-                        type="number" min="0" step="0.01" placeholder="Cost (PKR)" title="Cost per unit for COGS"
+                        type="number" min="0.01" step="0.01" placeholder="Cost (PKR)" title="Cost per unit for COGS" required
                         value={line.cost}
                         onChange={(e) => setPosLines(posLines.map((l, i) => i === idx ? { ...l, cost: e.target.value } : l))}
                         style={{ flex: "1", minWidth: "80px" }}
                       />
 
                       <input
-                        type="number" min="0" max="100" step="0.1" placeholder="Tax %"
+                        type="number" min="0" max="100" step="0.1" placeholder="Tax %" required
                         value={line.taxRate}
                         onChange={(e) => setPosLines(posLines.map((l, i) => i === idx ? { ...l, taxRate: e.target.value } : l))}
                         style={{ flex: "0.8", minWidth: "60px" }}
@@ -604,7 +655,7 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
                 type="button"
                 className="secondary-button"
                 style={{ marginBottom: "1rem" }}
-                onClick={() => setPosLines([...posLines, { variantId: "", qty: "1", price: "0", taxRate: "0", cost: "0" }])}
+                onClick={() => setPosLines([...posLines, { variantId: "", qty: "1", price: "", taxRate: "0", cost: "" }])}
               >
                 + Add item line
               </button>
@@ -613,7 +664,7 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
                 <label style={{ flex: "1" }}>
                   Discount (PKR)
                   <input
-                    type="number" min="0" step="1"
+                    type="number" min="0" step="1" required
                     value={posDiscount}
                     onChange={(e) => setPosDiscount(e.target.value)}
                   />
@@ -629,12 +680,33 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
                 </label>
               </div>
 
+              {posValidationError && (
+                <div
+                  role="alert"
+                  style={{
+                    marginTop: "0.75rem",
+                    padding: "0.6rem 0.85rem",
+                    borderRadius: "6px",
+                    background: "rgba(211, 47, 47, 0.08)",
+                    border: "1px solid rgba(211, 47, 47, 0.35)",
+                    color: "#b71c1c",
+                    fontSize: "0.85rem",
+                  }}
+                >
+                  {posValidationError}
+                </div>
+              )}
+
               <button
-                disabled={!enabled || isSaving || posLines.length === 0}
+                disabled={!enabled || isSaving || posLines.length === 0 || posValidationError !== null}
                 type="submit"
                 style={{ marginTop: "1rem", width: "100%", padding: "0.8rem", fontSize: "1.05rem" }}
               >
-                {isSaving ? "Posting Sale & Updating Ledger…" : `Pay PKR ${posNetPayable.toLocaleString()} & Complete Sale`}
+                {isSaving
+                  ? "Posting Sale & Updating Ledger…"
+                  : posNetPayable > 0
+                    ? `Pay PKR ${posNetPayable.toLocaleString()} & Complete Sale`
+                    : "Enter Valid Price, Cost & Positive Total to Checkout"}
               </button>
             </form>
           </article>

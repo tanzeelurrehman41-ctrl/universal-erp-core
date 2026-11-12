@@ -142,6 +142,7 @@ public static class SalesEndpointMappings
             _ when code.EndsWith("_NOT_FOUND", StringComparison.Ordinal)   => StatusCodes.Status404NotFound,
             "ORDER_NOT_IN_DRAFT"                                           => StatusCodes.Status409Conflict,
             "INSUFFICIENT_STOCK"                                           => StatusCodes.Status422UnprocessableEntity,
+            "GL_POSTING_FAILED"                                            => StatusCodes.Status422UnprocessableEntity,
             _ => StatusCodes.Status400BadRequest,
         };
         return Results.Problem(statusCode: status, title: code,
