@@ -143,6 +143,8 @@ public static class SalesEndpointMappings
             "ORDER_NOT_IN_DRAFT"                                           => StatusCodes.Status409Conflict,
             "INSUFFICIENT_STOCK"                                           => StatusCodes.Status422UnprocessableEntity,
             "GL_POSTING_FAILED"                                            => StatusCodes.Status422UnprocessableEntity,
+            "MISSING_VALUATION_DATA"                                       => StatusCodes.Status422UnprocessableEntity,
+            "INSUFFICIENT_VALUATION_LAYERS"                                => StatusCodes.Status422UnprocessableEntity,
             _ => StatusCodes.Status400BadRequest,
         };
         return Results.Problem(statusCode: status, title: code,

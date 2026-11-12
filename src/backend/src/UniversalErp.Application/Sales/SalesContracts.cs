@@ -136,7 +136,7 @@ public sealed record SalesInvoiceLineSummary(
     Guid UnitOfMeasureId,
     string UomCode,
     decimal UnitPrice,
-    decimal UnitCost,
+    decimal? UnitCost,
     decimal TaxRate,
     decimal LineTotal);
 
@@ -177,6 +177,7 @@ public interface ISalesRepository
 
     // Invoices & POS
     Task<IReadOnlyDictionary<Guid, bool>> GetVariantRequiresCogsAsync(IReadOnlyCollection<Guid> variantIds, CancellationToken cancellationToken);
+    Task<bool> CanViewCostAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<SalesInvoiceSummary>> ListInvoicesAsync(CancellationToken cancellationToken);
     Task<SalesInvoiceSummary?> GetInvoiceAsync(Guid invoiceId, CancellationToken cancellationToken);
     Task<Guid> PostInvoiceAsync(PostSalesInvoiceRequest request, Guid createdBy, CancellationToken cancellationToken);

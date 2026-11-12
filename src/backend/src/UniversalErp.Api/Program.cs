@@ -314,7 +314,7 @@ else
             "inventory.warehouse.view", "inventory.warehouse.create",
             "inventory.receipt.create", "inventory.receipt.post",
             "inventory.transfer.create", "inventory.adjustment.create",
-            "inventory.availability.view",
+            "inventory.availability.view", "inventory.valuation.view",
             "purchasing.supplier.view", "purchasing.supplier.create",
             "purchasing.po.view", "purchasing.po.create", "purchasing.po.confirm",
             "purchasing.grn.view", "purchasing.grn.post",

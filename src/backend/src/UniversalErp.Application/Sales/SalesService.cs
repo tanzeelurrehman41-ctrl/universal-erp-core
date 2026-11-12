@@ -150,11 +150,20 @@ public sealed class SalesService(
 
     // ── Sales Invoices & POS Receipts ───────────────────────────────────────
 
-    public Task<IReadOnlyList<SalesInvoiceSummary>> ListInvoicesAsync(CancellationToken cancellationToken) =>
-        repository.ListInvoicesAsync(cancellationToken);
+    public async Task<IReadOnlyList<SalesInvoiceSummary>> ListInvoicesAsync(CancellationToken cancellationToken)
+    {
+        var invoices = await repository.ListInvoicesAsync(cancellationToken);
+        var canViewCost = await repository.CanViewCostAsync(cancellationToken);
+        return canViewCost ? invoices : invoices.Select(RedactCosts).ToList();
+    }
 
-    public Task<SalesInvoiceSummary?> GetInvoiceAsync(Guid invoiceId, CancellationToken cancellationToken) =>
-        repository.GetInvoiceAsync(invoiceId, cancellationToken);
+    public async Task<SalesInvoiceSummary?> GetInvoiceAsync(Guid invoiceId, CancellationToken cancellationToken)
+    {
+        var invoice = await repository.GetInvoiceAsync(invoiceId, cancellationToken);
+        if (invoice is null) return null;
+        var canViewCost = await repository.CanViewCostAsync(cancellationToken);
+        return canViewCost ? invoice : RedactCosts(invoice);
+    }
 
     public async Task<Result<SalesInvoiceSummary>> PostInvoiceAsync(
         PostSalesInvoiceRequest request,
@@ -188,17 +197,6 @@ public sealed class SalesService(
                 return Result<SalesInvoiceSummary>.Failure("INVALID_SELLING_PRICE");
             if (line.TaxRate < 0)
                 return Result<SalesInvoiceSummary>.Failure("INVALID_TAX_RATE");
-            if (line.UnitCost < 0)
-                return Result<SalesInvoiceSummary>.Failure("INVALID_UNIT_COST");
-        }
-
-        var variantIds = request.Lines.Select(l => l.VariantId).Distinct().ToArray();
-        var variantRequiresCogs = await repository.GetVariantRequiresCogsAsync(variantIds, cancellationToken);
-        foreach (var line in request.Lines)
-        {
-            var requiresCogs = !variantRequiresCogs.TryGetValue(line.VariantId, out var tracked) || tracked;
-            if (requiresCogs && line.UnitCost <= 0)
-                return Result<SalesInvoiceSummary>.Failure("UNIT_COST_REQUIRED");
         }
 
         decimal subtotal = 0m;
@@ -217,9 +215,16 @@ public sealed class SalesService(
         try
         {
             var userId = tenantContext.Current.UserId;
-            var normalized = request with { InvoiceNumber = invoiceNo, PaymentMethod = paymentMethod };
+            // Strip any client-supplied UnitCost so server-side FIFO valuation always controls COGS.
+            var sanitizedLines = request.Lines.Select(l => l with { UnitCost = 0m }).ToList();
+            var normalized = request with
+            {
+                InvoiceNumber = invoiceNo,
+                PaymentMethod = paymentMethod,
+                Lines = sanitizedLines
+            };
             var invoiceId = await repository.PostInvoiceAsync(normalized, userId, cancellationToken);
-            var invoice = await repository.GetInvoiceAsync(invoiceId, cancellationToken);
+            var invoice = await GetInvoiceAsync(invoiceId, cancellationToken);
             return invoice is null
                 ? Result<SalesInvoiceSummary>.Failure("SALES_INVOICE_NOT_FOUND")
                 : Result<SalesInvoiceSummary>.Success(invoice);
@@ -232,9 +237,13 @@ public sealed class SalesService(
         {
             return Result<SalesInvoiceSummary>.Failure("INVALID_SELLING_PRICE");
         }
-        catch (InvalidOperationException ex) when (ex.Message.StartsWith("UNIT_COST_REQUIRED", StringComparison.OrdinalIgnoreCase))
+        catch (InvalidOperationException ex) when (ex.Message.StartsWith("MISSING_VALUATION_DATA", StringComparison.OrdinalIgnoreCase))
         {
-            return Result<SalesInvoiceSummary>.Failure("UNIT_COST_REQUIRED");
+            return Result<SalesInvoiceSummary>.Failure("MISSING_VALUATION_DATA");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.StartsWith("INSUFFICIENT_VALUATION_LAYERS", StringComparison.OrdinalIgnoreCase))
+        {
+            return Result<SalesInvoiceSummary>.Failure("INSUFFICIENT_VALUATION_LAYERS");
         }
         catch (InvalidOperationException ex) when (ex.Message.StartsWith("INVALID_INVOICE_TOTAL", StringComparison.OrdinalIgnoreCase))
         {
@@ -248,7 +257,7 @@ public sealed class SalesService(
                                 ex.Message.Contains("23505", StringComparison.OrdinalIgnoreCase))
         {
             // Idempotency: return existing invoice only if the same ClientTransactionId is replayed.
-            var all = await repository.ListInvoicesAsync(cancellationToken);
+            var all = await ListInvoicesAsync(cancellationToken);
             var existingByTx = all.FirstOrDefault(i => i.ClientTransactionId == request.ClientTransactionId);
             if (existingByTx is not null)
                 return Result<SalesInvoiceSummary>.Success(existingByTx);
@@ -259,4 +268,10 @@ public sealed class SalesService(
                 : Result<SalesInvoiceSummary>.Failure("DUPLICATE_INVOICE_TRANSACTION");
         }
     }
+
+    private static SalesInvoiceSummary RedactCosts(SalesInvoiceSummary invoice) =>
+        invoice with
+        {
+            Lines = invoice.Lines.Select(l => l with { UnitCost = null }).ToList()
+        };
 }

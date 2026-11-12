@@ -276,6 +276,8 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
 
         try
         {
+            await SeedCostLayerAsync(adminConn, tenantId, companyId, variantId, warehouseId, binId, 23m, 45m, DateTimeOffset.UtcNow.AddDays(-1));
+
             var context = new TenantContext(tenantId, companyId, userId);
             var repo = new PostgresSalesRepository(_appDataSource, new TestTenantContextAccessor(context));
             var req = new PostSalesInvoiceRequest(
@@ -285,20 +287,32 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
                 PaymentMethod: "cash",
                 Lines:
                 [
-                    new PostSalesInvoiceLineRequest(variantId, warehouseId, binId, 5m, uomId, UnitPrice: 75m, UnitCost: 45m, TaxRate: 0m)
+                    new PostSalesInvoiceLineRequest(variantId, warehouseId, binId, 5m, uomId, UnitPrice: 75m, TaxRate: 0m)
                 ]);
 
             var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => repo.PostInvoiceAsync(req, userId, CancellationToken.None));
             Assert.StartsWith("GL_POSTING_FAILED", ex.Message);
 
-            // Assert zero partial commits: stock must still be 23, zero invoices, zero movements
+            // Assert zero partial commits across stock, FIFO layers, allocations, invoices, and movements
             await using var balCmd = new NpgsqlCommand(
                 "SELECT on_hand_qty FROM erp_inventory.stock_balance WHERE tenant_id = @t AND company_id = @c AND variant_id = @v;", adminConn);
             balCmd.Parameters.AddWithValue("t", tenantId);
             balCmd.Parameters.AddWithValue("c", companyId);
             balCmd.Parameters.AddWithValue("v", variantId);
-            var onHand = (decimal)(await balCmd.ExecuteScalarAsync())!;
-            Assert.Equal(23m, onHand);
+            Assert.Equal(23m, (decimal)(await balCmd.ExecuteScalarAsync())!);
+
+            await using var layerCmd = new NpgsqlCommand(
+                "SELECT remaining_qty FROM erp_inventory.inventory_cost_layer WHERE tenant_id = @t AND company_id = @c AND variant_id = @v;", adminConn);
+            layerCmd.Parameters.AddWithValue("t", tenantId);
+            layerCmd.Parameters.AddWithValue("c", companyId);
+            layerCmd.Parameters.AddWithValue("v", variantId);
+            Assert.Equal(23m, (decimal)(await layerCmd.ExecuteScalarAsync())!);
+
+            await using var allocCmd = new NpgsqlCommand(
+                "SELECT count(*) FROM erp_inventory.inventory_cost_allocation WHERE tenant_id = @t AND company_id = @c;", adminConn);
+            allocCmd.Parameters.AddWithValue("t", tenantId);
+            allocCmd.Parameters.AddWithValue("c", companyId);
+            Assert.Equal(0L, (long)(await allocCmd.ExecuteScalarAsync())!);
 
             await using var invCmd = new NpgsqlCommand(
                 "SELECT count(*) FROM erp_sales.sales_invoice WHERE tenant_id = @t AND company_id = @c;", adminConn);
@@ -316,6 +330,104 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
         {
             await CleanupSalesTestHierarchyAsync(adminConn, tenantId);
         }
+    }
+
+    [Fact]
+    public async Task PostInvoiceAsync_MultiLayerFifo_IgnoresClientCost_PostsGl_And_PreventsDuplicateConsumption()
+    {
+        var tenantId = Guid.NewGuid();
+        var companyId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var locationId = Guid.NewGuid();
+        var warehouseId = Guid.NewGuid();
+        var binId = Guid.NewGuid();
+        var uomId = Guid.NewGuid();
+        var productId = Guid.NewGuid();
+        var variantId = Guid.NewGuid();
+        var customerId = Guid.NewGuid();
+
+        await using var adminConn = await _adminDataSource.OpenConnectionAsync();
+        await SeedSalesTestHierarchyAsync(
+            adminConn, tenantId, companyId, userId, locationId, warehouseId, binId, uomId, productId, variantId, customerId,
+            startingQty: 14m, seedFinanceAccounts: true);
+
+        try
+        {
+            var layer1Id = await SeedCostLayerAsync(adminConn, tenantId, companyId, variantId, warehouseId, binId, 4m, 40m, DateTimeOffset.UtcNow.AddDays(-2));
+            var layer2Id = await SeedCostLayerAsync(adminConn, tenantId, companyId, variantId, warehouseId, binId, 10m, 50m, DateTimeOffset.UtcNow.AddDays(-1));
+
+            var context = new TenantContext(tenantId, companyId, userId);
+            var repo = new PostgresSalesRepository(_appDataSource, new TestTenantContextAccessor(context));
+            var clientTxId = Guid.NewGuid();
+            var req = new PostSalesInvoiceRequest(
+                ClientTransactionId: clientTxId,
+                InvoiceNumber: "POS-FIFO-INT-01",
+                CustomerId: customerId,
+                PaymentMethod: "cash",
+                Lines:
+                [
+                    new PostSalesInvoiceLineRequest(variantId, warehouseId, binId, 5m, uomId, UnitPrice: 75m, UnitCost: 999m, TaxRate: 0m)
+                ]);
+
+            var invoiceId = await repo.PostInvoiceAsync(req, userId, CancellationToken.None);
+            Assert.NotEqual(Guid.Empty, invoiceId);
+
+            // Verify FIFO layer remaining quantities (4@40 exhausted, 1@50 consumed from layer 2 -> 9 remaining)
+            await using var l1Cmd = new NpgsqlCommand("SELECT remaining_qty FROM erp_inventory.inventory_cost_layer WHERE tenant_id = @t AND company_id = @c AND layer_id = @id;", adminConn);
+            l1Cmd.Parameters.AddWithValue("t", tenantId); l1Cmd.Parameters.AddWithValue("c", companyId); l1Cmd.Parameters.AddWithValue("id", layer1Id);
+            Assert.Equal(0m, (decimal)(await l1Cmd.ExecuteScalarAsync())!);
+
+            await using var l2Cmd = new NpgsqlCommand("SELECT remaining_qty FROM erp_inventory.inventory_cost_layer WHERE tenant_id = @t AND company_id = @c AND layer_id = @id;", adminConn);
+            l2Cmd.Parameters.AddWithValue("t", tenantId); l2Cmd.Parameters.AddWithValue("c", companyId); l2Cmd.Parameters.AddWithValue("id", layer2Id);
+            Assert.Equal(9m, (decimal)(await l2Cmd.ExecuteScalarAsync())!);
+
+            // Verify COGS GL posting = 4*40 + 1*50 = 210 PKR
+            await using var cogsCmd = new NpgsqlCommand(
+                "SELECT sum(jl.debit_functional) FROM finance.journal_lines jl JOIN finance.accounts a ON a.id = jl.account_id AND a.tenant_id = jl.tenant_id AND a.company_id = jl.company_id WHERE jl.tenant_id = @t AND jl.company_id = @c AND a.account_code = '5010';", adminConn);
+            cogsCmd.Parameters.AddWithValue("t", tenantId); cogsCmd.Parameters.AddWithValue("c", companyId);
+            Assert.Equal(210m, (decimal)(await cogsCmd.ExecuteScalarAsync())!);
+
+            // Replay with identical ClientTransactionId rejects at DB unique index before touching layers again
+            await Assert.ThrowsAnyAsync<Exception>(() => repo.PostInvoiceAsync(req, userId, CancellationToken.None));
+            Assert.Equal(9m, (decimal)(await l2Cmd.ExecuteScalarAsync())!);
+        }
+        finally
+        {
+            await CleanupSalesTestHierarchyAsync(adminConn, tenantId);
+        }
+    }
+
+    private static async Task<Guid> SeedCostLayerAsync(
+        NpgsqlConnection conn,
+        Guid tenantId,
+        Guid companyId,
+        Guid variantId,
+        Guid warehouseId,
+        Guid binId,
+        decimal qty,
+        decimal unitCost,
+        DateTimeOffset receivedAt)
+    {
+        var layerId = Guid.NewGuid();
+        await using var cmd = new NpgsqlCommand(
+            """
+            INSERT INTO erp_inventory.inventory_cost_layer
+                (tenant_id, company_id, layer_id, variant_id, warehouse_id, bin_id, status_code,
+                 source_document_type, received_at, original_qty, remaining_qty, unit_cost, currency_code)
+            VALUES
+                (@t, @c, @id, @v, @w, @b, 'available', 'grn', @r, @q, @q, @cost, 'PKR');
+            """, conn);
+        cmd.Parameters.AddWithValue("t", tenantId);
+        cmd.Parameters.AddWithValue("c", companyId);
+        cmd.Parameters.AddWithValue("id", layerId);
+        cmd.Parameters.AddWithValue("v", variantId);
+        cmd.Parameters.AddWithValue("w", warehouseId);
+        cmd.Parameters.AddWithValue("b", binId);
+        cmd.Parameters.AddWithValue("r", receivedAt);
+        cmd.Parameters.AddWithValue("q", qty);
+        cmd.Parameters.AddWithValue("cost", unitCost);
+        await cmd.ExecuteNonQueryAsync();
+        return layerId;
     }
 
     private static async Task SeedSalesTestHierarchyAsync(
@@ -449,6 +561,26 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
                 cmd.Parameters.AddWithValue("fy", fyId);
                 await cmd.ExecuteNonQueryAsync();
             }
+            var accounts = new[]
+            {
+                ("1010", "Cash on Hand", "asset", "debit"),
+                ("1200", "Merchandise Inventory Asset", "asset", "debit"),
+                ("4010", "Sales Revenue", "revenue", "credit"),
+                ("5010", "Cost of Goods Sold", "expense", "debit"),
+            };
+            foreach (var (code, name, type, normal) in accounts)
+            {
+                await using var acCmd = new NpgsqlCommand(
+                    "INSERT INTO finance.accounts (tenant_id, company_id, id, account_code, account_name, account_type, normal_balance, currency_code, is_control_account, allow_manual_posting, is_active) VALUES (@t, @c, @id, @code, @name, @type, @normal, 'PKR', true, true, true)", conn);
+                acCmd.Parameters.AddWithValue("t", tenantId);
+                acCmd.Parameters.AddWithValue("c", companyId);
+                acCmd.Parameters.AddWithValue("id", Guid.NewGuid());
+                acCmd.Parameters.AddWithValue("code", code);
+                acCmd.Parameters.AddWithValue("name", name);
+                acCmd.Parameters.AddWithValue("type", type);
+                acCmd.Parameters.AddWithValue("normal", normal);
+                await acCmd.ExecuteNonQueryAsync();
+            }
         }
     }
 
@@ -463,6 +595,9 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
             "finance.accounts",
             "finance.fiscal_periods",
             "finance.fiscal_years",
+            "erp_inventory.valuation_entry",
+            "erp_inventory.inventory_cost_allocation",
+            "erp_inventory.inventory_cost_layer",
             "erp_inventory.inventory_movement_leg",
             "erp_inventory.inventory_movement",
             "erp_inventory.stock_balance",

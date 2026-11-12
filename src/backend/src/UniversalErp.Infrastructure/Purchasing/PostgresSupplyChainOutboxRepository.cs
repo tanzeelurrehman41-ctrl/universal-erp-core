@@ -225,6 +225,62 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                         balCmd.Parameters.AddWithValue("qty", line.ReceivedQty);
                         balCmd.Parameters.AddWithValue("balId", Guid.NewGuid());
                         await balCmd.ExecuteNonQueryAsync(cancellationToken);
+
+                        if (line.ReceivedQty > 0m && line.UnitPrice > 0m)
+                        {
+                            await using var layerCmd = new NpgsqlCommand(
+                                """
+                                INSERT INTO erp_inventory.inventory_cost_layer
+                                    (tenant_id, company_id, layer_id, variant_id, warehouse_id, bin_id, status_code,
+                                     source_document_type, source_document_id, source_line_number, source_movement_id,
+                                     received_at, original_qty, remaining_qty, unit_cost, currency_code)
+                                VALUES
+                                    (@tenantId, @companyId, @layerId, @variantId, @whId, @binId, 'available',
+                                     'grn', @grnId, @lineNum, @movementId,
+                                     @receivedAt, @qty, @qty, @unitCost, 'PKR')
+                                ON CONFLICT (tenant_id, company_id, source_document_type, source_document_id, source_line_number, bin_id)
+                                WHERE source_document_id IS NOT NULL AND source_line_number IS NOT NULL
+                                DO NOTHING;
+                                """,
+                                connection,
+                                eventTx);
+                            layerCmd.Parameters.AddWithValue("tenantId", tenantId);
+                            layerCmd.Parameters.AddWithValue("companyId", companyId);
+                            layerCmd.Parameters.AddWithValue("layerId", Guid.NewGuid());
+                            layerCmd.Parameters.AddWithValue("variantId", line.VariantId);
+                            layerCmd.Parameters.AddWithValue("whId", payload.WarehouseId);
+                            layerCmd.Parameters.AddWithValue("binId", line.BinId);
+                            layerCmd.Parameters.AddWithValue("grnId", grnId);
+                            layerCmd.Parameters.AddWithValue("lineNum", i + 1);
+                            layerCmd.Parameters.AddWithValue("movementId", movementId);
+                            layerCmd.Parameters.AddWithValue("receivedAt", occurredAt);
+                            layerCmd.Parameters.AddWithValue("qty", line.ReceivedQty);
+                            layerCmd.Parameters.AddWithValue("unitCost", line.UnitPrice);
+                            await layerCmd.ExecuteNonQueryAsync(cancellationToken);
+
+                            var extendedCost = Math.Round(line.ReceivedQty * line.UnitPrice, 4, MidpointRounding.AwayFromZero);
+                            await using var valCmd = new NpgsqlCommand(
+                                """
+                                INSERT INTO erp_inventory.valuation_entry
+                                    (tenant_id, company_id, valuation_entry_id, movement_id, variant_id, entry_type,
+                                     quantity, unit_cost, extended_cost, currency_code, posted_at)
+                                VALUES
+                                    (@tenantId, @companyId, @valId, @movementId, @variantId, 'receipt_cost',
+                                     @qty, @unitCost, @extCost, 'PKR', @postedAt);
+                                """,
+                                connection,
+                                eventTx);
+                            valCmd.Parameters.AddWithValue("tenantId", tenantId);
+                            valCmd.Parameters.AddWithValue("companyId", companyId);
+                            valCmd.Parameters.AddWithValue("valId", Guid.NewGuid());
+                            valCmd.Parameters.AddWithValue("movementId", movementId);
+                            valCmd.Parameters.AddWithValue("variantId", line.VariantId);
+                            valCmd.Parameters.AddWithValue("qty", line.ReceivedQty);
+                            valCmd.Parameters.AddWithValue("unitCost", line.UnitPrice);
+                            valCmd.Parameters.AddWithValue("extCost", extendedCost);
+                            valCmd.Parameters.AddWithValue("postedAt", occurredAt);
+                            await valCmd.ExecuteNonQueryAsync(cancellationToken);
+                        }
                     }
 
                     movementsCreated++;

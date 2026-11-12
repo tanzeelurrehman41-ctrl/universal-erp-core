@@ -1,4 +1,5 @@
 using UniversalErp.Application.Abstractions;
+using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Sales;
 using UniversalErp.Domain.Tenancy;
 using Xunit;
@@ -12,12 +13,23 @@ public sealed class SalesServiceTests
         public TenantContext Current => context;
     }
 
+    private sealed class FakeFifoLayer
+    {
+        public Guid LayerId { get; init; } = Guid.NewGuid();
+        public Guid VariantId { get; init; }
+        public DateTimeOffset ReceivedAt { get; init; }
+        public decimal RemainingQty { get; set; }
+        public decimal UnitCost { get; init; }
+    }
+
     private sealed class FakeSalesRepository : ISalesRepository
     {
         public readonly List<CustomerSummary> Customers = [];
         public readonly List<SalesOrderSummary> Orders = [];
         public readonly List<SalesInvoiceSummary> Invoices = [];
         public readonly List<(Guid InvoiceId, Guid VariantId, decimal QtyDelta)> Movements = [];
+        public readonly List<FakeFifoLayer> FifoLayers = [];
+        public readonly List<(Guid InvoiceId, Guid LayerId, decimal ConsumedQty, decimal UnitCost)> Allocations = [];
         public readonly Dictionary<Guid, bool> VariantRequiresCogs = [];
         public readonly Dictionary<Guid, decimal> StockByVariant = [];
 
@@ -26,6 +38,19 @@ public sealed class SalesServiceTests
         public bool ThrowInsufficientStock = false;
         public bool ThrowDuplicateInvoice = false;
         public bool ThrowGlPostingFailed = false;
+        public bool AllowCostView = true;
+
+        public void SeedFifoLayer(Guid variantId, decimal qty, decimal unitCost, DateTimeOffset? receivedAt = null)
+        {
+            FifoLayers.Add(new FakeFifoLayer
+            {
+                VariantId = variantId,
+                RemainingQty = qty,
+                UnitCost = unitCost,
+                ReceivedAt = receivedAt ?? DateTimeOffset.UtcNow,
+            });
+            StockByVariant[variantId] = (StockByVariant.TryGetValue(variantId, out var existing) ? existing : 0m) + qty;
+        }
 
         public Task<IReadOnlyList<CustomerSummary>> ListCustomersAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<CustomerSummary>>(Customers);
@@ -116,6 +141,9 @@ public sealed class SalesServiceTests
             return Task.FromResult(map);
         }
 
+        public Task<bool> CanViewCostAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(AllowCostView);
+
         public Task<IReadOnlyList<SalesInvoiceSummary>> ListInvoicesAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<SalesInvoiceSummary>>(Invoices);
 
@@ -125,36 +153,63 @@ public sealed class SalesServiceTests
         public Task<Guid> PostInvoiceAsync(PostSalesInvoiceRequest request, Guid createdBy, CancellationToken cancellationToken)
         {
             if (ThrowInsufficientStock) throw new InvalidOperationException("INSUFFICIENT_STOCK: Required 10 but available 2");
-            if (ThrowDuplicateInvoice) throw new Exception("23505: duplicate key value");
+            if (ThrowDuplicateInvoice || Invoices.Any(i => i.ClientTransactionId == request.ClientTransactionId))
+            {
+                throw new Exception("23505: duplicate key value");
+            }
 
-            // Simulate transactional staging: stock deduction + GL posting must both succeed before commit
+            // Simulate transactional staging across stock, FIFO layers, allocations, and GL
             var stagedStock = new Dictionary<Guid, decimal>(StockByVariant);
+            var stagedLayerQty = FifoLayers.ToDictionary(l => l.LayerId, l => l.RemainingQty);
             var stagedMovements = new List<(Guid InvoiceId, Guid VariantId, decimal QtyDelta)>();
+            var stagedAllocations = new List<(Guid InvoiceId, Guid LayerId, decimal ConsumedQty, decimal UnitCost)>();
 
             var id = Guid.NewGuid();
-            var lines = (request.Lines ?? []).Select((l, i) => new SalesInvoiceLineSummary(
-                i + 1, l.OrderLineNumber, l.VariantId, "TEST-SKU", l.WarehouseId, "WH-1",
-                l.BinId, "BIN-1", l.Quantity, l.UnitOfMeasureId, "EA", l.UnitPrice,
-                l.UnitCost, l.TaxRate, l.Quantity * l.UnitPrice * (1 + l.TaxRate)
-            )).ToList();
+            var resultLines = new List<SalesInvoiceLineSummary>();
 
-            foreach (var l in request.Lines ?? [])
+            var reqLines = request.Lines ?? [];
+            for (var i = 0; i < reqLines.Count; i++)
             {
+                var l = reqLines[i];
+                var requiresCogs = !VariantRequiresCogs.TryGetValue(l.VariantId, out var reqCogs) || reqCogs;
+                decimal lineUnitCost = 0m;
+
+                if (requiresCogs)
+                {
+                    var availableSlices = FifoLayers
+                        .Where(fl => fl.VariantId == l.VariantId)
+                        .Select(fl => new FifoCostLayerSlice(fl.LayerId, fl.ReceivedAt, stagedLayerQty[fl.LayerId], fl.UnitCost))
+                        .ToList();
+
+                    var allocRes = FifoCostAllocator.Allocate(availableSlices, l.Quantity);
+                    lineUnitCost = allocRes.EffectiveUnitCost;
+                    foreach (var alloc in allocRes.Allocations)
+                    {
+                        stagedLayerQty[alloc.LayerId] -= alloc.ConsumedQty;
+                        stagedAllocations.Add((id, alloc.LayerId, alloc.ConsumedQty, alloc.UnitCost));
+                    }
+                }
+
                 if (stagedStock.ContainsKey(l.VariantId))
                 {
                     stagedStock[l.VariantId] -= l.Quantity;
                 }
                 stagedMovements.Add((id, l.VariantId, -l.Quantity));
+
+                resultLines.Add(new SalesInvoiceLineSummary(
+                    i + 1, l.OrderLineNumber, l.VariantId, "TEST-SKU", l.WarehouseId, "WH-1",
+                    l.BinId, "BIN-1", l.Quantity, l.UnitOfMeasureId, "EA", l.UnitPrice,
+                    lineUnitCost, l.TaxRate, l.Quantity * l.UnitPrice * (1 + l.TaxRate)));
             }
 
             if (ThrowGlPostingFailed)
             {
-                // Rollback: discard stagedStock & stagedMovements without committing
+                // Rollback: discard all staged stock, movements, and FIFO allocations
                 throw new InvalidOperationException("GL_POSTING_FAILED: Simulated accounting posting failure.");
             }
 
-            var subtotal = (request.Lines ?? []).Sum(l => l.Quantity * l.UnitPrice);
-            var tax = (request.Lines ?? []).Sum(l => l.Quantity * l.UnitPrice * l.TaxRate);
+            var subtotal = reqLines.Sum(l => l.Quantity * l.UnitPrice);
+            var tax = reqLines.Sum(l => l.Quantity * l.UnitPrice * l.TaxRate);
             var total = subtotal + tax - request.DiscountAmount;
             var paid = request.PaymentMethod == "credit" ? 0m : total;
             var inv = new SalesInvoiceSummary(
@@ -162,11 +217,14 @@ public sealed class SalesServiceTests
                 request.CustomerId, "Test Customer", request.PaymentMethod, "posted",
                 request.InvoiceDate ?? DateOnly.FromDateTime(DateTime.UtcNow),
                 subtotal, tax, request.DiscountAmount, total,
-                paid, request.Note, DateTimeOffset.UtcNow, lines);
+                paid, request.Note, DateTimeOffset.UtcNow, resultLines);
 
             foreach (var kvp in stagedStock)
                 StockByVariant[kvp.Key] = kvp.Value;
+            foreach (var layer in FifoLayers)
+                layer.RemainingQty = stagedLayerQty[layer.LayerId];
             Movements.AddRange(stagedMovements);
+            Allocations.AddRange(stagedAllocations);
             Invoices.Add(inv);
             return Task.FromResult(id);
         }
@@ -253,20 +311,132 @@ public sealed class SalesServiceTests
     }
 
     [Fact]
-    public async Task PostInvoice_Succeeds_And_Records_Lines()
+    public async Task PostInvoice_Valid_5Ea_At_75_Selling_Computes_Fifo_Cost_Without_Client_Input()
     {
         var repo = new FakeSalesRepository();
+        var variantId = Guid.NewGuid();
+        repo.SeedFifoLayer(variantId, 23m, 45m, DateTimeOffset.Parse("2026-11-10T00:00:00Z"));
         var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
 
-        var txId = Guid.NewGuid();
-        var line = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 5, Guid.NewGuid(), 2000m, UnitCost: 1200m);
-        var req = new PostSalesInvoiceRequest(txId, "INV-2026-001", Guid.NewGuid(), "cash", Lines: [line]);
+        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 5m, Guid.NewGuid(), UnitPrice: 75m);
+        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-VALID-001", Guid.NewGuid(), "cash", Lines: [line]);
 
         var result = await service.PostInvoiceAsync(req, CancellationToken.None);
+
         Assert.True(result.IsSuccess);
-        Assert.Equal("INV-2026-001", result.Value!.InvoiceNumber);
-        Assert.Equal("cash", result.Value!.PaymentMethod);
-        Assert.Equal(10000m, result.Value!.TotalAmount);
+        Assert.Equal(375m, result.Value!.TotalAmount);
+        Assert.Equal(375m, result.Value!.PaidAmount);
+        Assert.Equal(45m, result.Value!.Lines[0].UnitCost);
+        Assert.Equal(18m, repo.StockByVariant[variantId]);
+        Assert.Equal(18m, repo.FifoLayers[0].RemainingQty);
+        Assert.Single(repo.Movements);
+        Assert.Equal(-5m, repo.Movements[0].QtyDelta);
+    }
+
+    [Fact]
+    public async Task PostInvoice_Consumes_Oldest_Fifo_Layer_First_And_Partially()
+    {
+        var repo = new FakeSalesRepository();
+        var variantId = Guid.NewGuid();
+        repo.SeedFifoLayer(variantId, 10m, 40m, DateTimeOffset.Parse("2026-11-01T00:00:00Z")); // Older
+        repo.SeedFifoLayer(variantId, 10m, 55m, DateTimeOffset.Parse("2026-11-05T00:00:00Z")); // Newer
+        var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
+
+        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 4m, Guid.NewGuid(), UnitPrice: 75m);
+        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-FIFO-001", Guid.NewGuid(), "cash", Lines: [line]);
+
+        var result = await service.PostInvoiceAsync(req, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(40m, result.Value!.Lines[0].UnitCost);
+        Assert.Equal(6m, repo.FifoLayers[0].RemainingQty);  // Oldest partially consumed
+        Assert.Equal(10m, repo.FifoLayers[1].RemainingQty); // Newer untouched
+        Assert.Single(repo.Allocations);
+        Assert.Equal(40m, repo.Allocations[0].UnitCost);
+    }
+
+    [Fact]
+    public async Task PostInvoice_Consumes_Multiple_Layers_With_Different_Costs()
+    {
+        var repo = new FakeSalesRepository();
+        var variantId = Guid.NewGuid();
+        repo.SeedFifoLayer(variantId, 3m, 40m, DateTimeOffset.Parse("2026-11-01T00:00:00Z")); // 3 * 40 = 120
+        repo.SeedFifoLayer(variantId, 5m, 50m, DateTimeOffset.Parse("2026-11-02T00:00:00Z")); // 2 * 50 = 100
+        var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
+
+        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 5m, Guid.NewGuid(), UnitPrice: 75m);
+        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-FIFO-002", Guid.NewGuid(), "cash", Lines: [line]);
+
+        var result = await service.PostInvoiceAsync(req, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        // Total COGS = 120 + 100 = 220; effective unit cost = 220 / 5 = 44
+        Assert.Equal(44m, result.Value!.Lines[0].UnitCost);
+        Assert.Equal(0m, repo.FifoLayers[0].RemainingQty);
+        Assert.Equal(3m, repo.FifoLayers[1].RemainingQty);
+        Assert.Equal(2, repo.Allocations.Count);
+    }
+
+    [Fact]
+    public async Task PostInvoice_Client_Supplied_UnitCost_Cannot_Override_Server_Valuation()
+    {
+        var repo = new FakeSalesRepository();
+        var variantId = Guid.NewGuid();
+        repo.SeedFifoLayer(variantId, 10m, 45m, DateTimeOffset.Parse("2026-11-01T00:00:00Z"));
+        var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
+
+        // Malicious or stale client sends UnitCost: 999m
+        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 2m, Guid.NewGuid(), UnitPrice: 75m, UnitCost: 999m);
+        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-TAMPER-001", Guid.NewGuid(), "cash", Lines: [line]);
+
+        var result = await service.PostInvoiceAsync(req, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(45m, result.Value!.Lines[0].UnitCost);
+        Assert.Equal(45m, repo.Allocations[0].UnitCost);
+    }
+
+    [Fact]
+    public async Task PostInvoice_Rejects_Insufficient_Valuation_Layers_Without_Modifying_Stock()
+    {
+        var repo = new FakeSalesRepository();
+        var variantId = Guid.NewGuid();
+        repo.SeedFifoLayer(variantId, 3m, 45m, DateTimeOffset.Parse("2026-11-01T00:00:00Z"));
+        repo.StockByVariant[variantId] = 10m; // Physical stock exists, but valuation layers only cover 3 EA
+        var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
+
+        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 5m, Guid.NewGuid(), UnitPrice: 75m);
+        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-SHORT-LAYER", Guid.NewGuid(), "cash", Lines: [line]);
+
+        var result = await service.PostInvoiceAsync(req, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("INSUFFICIENT_VALUATION_LAYERS", result.Error);
+        Assert.Empty(repo.Invoices);
+        Assert.Empty(repo.Movements);
+        Assert.Equal(10m, repo.StockByVariant[variantId]);
+        Assert.Equal(3m, repo.FifoLayers[0].RemainingQty);
+    }
+
+    [Fact]
+    public async Task PostInvoice_Rejects_Missing_Valuation_Data_Without_Modifying_Stock()
+    {
+        var repo = new FakeSalesRepository();
+        var variantId = Guid.NewGuid();
+        repo.VariantRequiresCogs[variantId] = true;
+        repo.StockByVariant[variantId] = 10m; // Zero valuation layers seeded
+        var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
+
+        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 2m, Guid.NewGuid(), UnitPrice: 75m);
+        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-NO-LAYER", Guid.NewGuid(), "cash", Lines: [line]);
+
+        var result = await service.PostInvoiceAsync(req, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("MISSING_VALUATION_DATA", result.Error);
+        Assert.Empty(repo.Invoices);
+        Assert.Empty(repo.Movements);
+        Assert.Equal(10m, repo.StockByVariant[variantId]);
     }
 
     [Fact]
@@ -275,7 +445,7 @@ public sealed class SalesServiceTests
         var repo = new FakeSalesRepository { ThrowInsufficientStock = true };
         var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
 
-        var line = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 100, Guid.NewGuid(), 2000m, UnitCost: 1200m);
+        var line = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 100, Guid.NewGuid(), 2000m);
         var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "INV-2026-002", Guid.NewGuid(), "credit", Lines: [line]);
 
         var result = await service.PostInvoiceAsync(req, CancellationToken.None);
@@ -284,57 +454,46 @@ public sealed class SalesServiceTests
     }
 
     [Fact]
-    public async Task PostInvoice_Handles_Duplicate_Or_Idempotent_Replay()
+    public async Task PostInvoice_Idempotent_Retry_Does_Not_Consume_Fifo_Layers_Twice()
     {
         var repo = new FakeSalesRepository();
+        var variantId = Guid.NewGuid();
+        repo.SeedFifoLayer(variantId, 10m, 45m, DateTimeOffset.Parse("2026-11-01T00:00:00Z"));
         var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
 
         var txId = Guid.NewGuid();
-        var line = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 1, Guid.NewGuid(), 500m, UnitCost: 300m);
+        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 4m, Guid.NewGuid(), 75m);
         var req = new PostSalesInvoiceRequest(txId, "INV-IDEM-001", Guid.NewGuid(), "cash", Lines: [line]);
 
         var first = await service.PostInvoiceAsync(req, CancellationToken.None);
         Assert.True(first.IsSuccess);
+        Assert.Equal(6m, repo.FifoLayers[0].RemainingQty);
 
-        // Now simulate repository throwing unique constraint violation on replay
-        repo.ThrowDuplicateInvoice = true;
+        // Replay with identical ClientTransactionId
         var retry = await service.PostInvoiceAsync(req, CancellationToken.None);
         Assert.True(retry.IsSuccess);
         Assert.Equal(first.Value!.InvoiceId, retry.Value!.InvoiceId);
         Assert.Single(repo.Invoices);
         Assert.Single(repo.Movements);
+        Assert.Single(repo.Allocations);
+        Assert.Equal(6m, repo.FifoLayers[0].RemainingQty);
     }
 
     [Fact]
-    public async Task PostInvoice_Rejects_Zero_Selling_Price()
+    public async Task PostInvoice_Rejects_Zero_And_Negative_Selling_Price()
     {
         var repo = new FakeSalesRepository();
         var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
 
-        var line = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 2, Guid.NewGuid(), UnitPrice: 0m, UnitCost: 45m);
-        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-ZERO-001", Guid.NewGuid(), "cash", Lines: [line]);
+        var zeroLine = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 2, Guid.NewGuid(), UnitPrice: 0m);
+        var zeroRes = await service.PostInvoiceAsync(new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-ZERO-001", Guid.NewGuid(), "cash", Lines: [zeroLine]), CancellationToken.None);
+        Assert.False(zeroRes.IsSuccess);
+        Assert.Equal("INVALID_SELLING_PRICE", zeroRes.Error);
 
-        var result = await service.PostInvoiceAsync(req, CancellationToken.None);
-
-        Assert.False(result.IsSuccess);
-        Assert.Equal("INVALID_SELLING_PRICE", result.Error);
-        Assert.Empty(repo.Invoices);
-        Assert.Empty(repo.Movements);
-    }
-
-    [Fact]
-    public async Task PostInvoice_Rejects_Negative_Selling_Price()
-    {
-        var repo = new FakeSalesRepository();
-        var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
-
-        var line = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 2, Guid.NewGuid(), UnitPrice: -15m, UnitCost: 45m);
-        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-NEG-001", Guid.NewGuid(), "cash", Lines: [line]);
-
-        var result = await service.PostInvoiceAsync(req, CancellationToken.None);
-
-        Assert.False(result.IsSuccess);
-        Assert.Equal("INVALID_SELLING_PRICE", result.Error);
+        var negLine = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 2, Guid.NewGuid(), UnitPrice: -15m);
+        var negRes = await service.PostInvoiceAsync(new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-NEG-001", Guid.NewGuid(), "cash", Lines: [negLine]), CancellationToken.None);
+        Assert.False(negRes.IsSuccess);
+        Assert.Equal("INVALID_SELLING_PRICE", negRes.Error);
         Assert.Empty(repo.Invoices);
     }
 
@@ -344,7 +503,7 @@ public sealed class SalesServiceTests
         var repo = new FakeSalesRepository();
         var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
 
-        var line = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 5, Guid.NewGuid(), UnitPrice: 75m, UnitCost: 45m);
+        var line = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 5, Guid.NewGuid(), UnitPrice: 75m);
         var zeroTotalReq = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-DISC-ZERO", Guid.NewGuid(), "cash", DiscountAmount: 375m, Lines: [line]);
 
         var resZero = await service.PostInvoiceAsync(zeroTotalReq, CancellationToken.None);
@@ -359,62 +518,14 @@ public sealed class SalesServiceTests
     }
 
     [Fact]
-    public async Task PostInvoice_Rejects_Missing_Or_Zero_Unit_Cost_When_Cogs_Required()
-    {
-        var repo = new FakeSalesRepository();
-        var variantId = Guid.NewGuid();
-        repo.VariantRequiresCogs[variantId] = true; // Inventory-tracked stock variant
-        var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
-
-        var zeroCostLine = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 5, Guid.NewGuid(), UnitPrice: 75m, UnitCost: 0m);
-        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-NOCOST-001", Guid.NewGuid(), "cash", Lines: [zeroCostLine]);
-
-        var result = await service.PostInvoiceAsync(req, CancellationToken.None);
-        Assert.False(result.IsSuccess);
-        Assert.Equal("UNIT_COST_REQUIRED", result.Error);
-
-        var negCostLine = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 5, Guid.NewGuid(), UnitPrice: 75m, UnitCost: -10m);
-        var negReq = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-NEGCOST-001", Guid.NewGuid(), "cash", Lines: [negCostLine]);
-
-        var negResult = await service.PostInvoiceAsync(negReq, CancellationToken.None);
-        Assert.False(negResult.IsSuccess);
-        Assert.Equal("INVALID_UNIT_COST", negResult.Error);
-        Assert.Empty(repo.Invoices);
-    }
-
-    [Fact]
-    public async Task PostInvoice_Valid_5Ea_At_75_Selling_And_45_Cost_Succeeds()
-    {
-        var repo = new FakeSalesRepository();
-        var variantId = Guid.NewGuid();
-        repo.VariantRequiresCogs[variantId] = true;
-        repo.StockByVariant[variantId] = 23m;
-        var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
-
-        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 5m, Guid.NewGuid(), UnitPrice: 75m, UnitCost: 45m, TaxRate: 0m);
-        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-VALID-001", Guid.NewGuid(), "cash", Lines: [line]);
-
-        var result = await service.PostInvoiceAsync(req, CancellationToken.None);
-
-        Assert.True(result.IsSuccess);
-        Assert.Equal(375m, result.Value!.TotalAmount);
-        Assert.Equal(375m, result.Value!.PaidAmount);
-        Assert.Equal(45m, result.Value!.Lines[0].UnitCost);
-        Assert.Equal(18m, repo.StockByVariant[variantId]);
-        Assert.Single(repo.Movements);
-        Assert.Equal(-5m, repo.Movements[0].QtyDelta);
-    }
-
-    [Fact]
-    public async Task PostInvoice_Failed_Gl_Posting_Rolls_Back_Inventory_Issue()
+    public async Task PostInvoice_Failed_Gl_Posting_Rolls_Back_Invoice_Stock_And_Fifo_Layers()
     {
         var repo = new FakeSalesRepository { ThrowGlPostingFailed = true };
         var variantId = Guid.NewGuid();
-        repo.VariantRequiresCogs[variantId] = true;
-        repo.StockByVariant[variantId] = 23m;
+        repo.SeedFifoLayer(variantId, 23m, 45m, DateTimeOffset.Parse("2026-11-01T00:00:00Z"));
         var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
 
-        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 5m, Guid.NewGuid(), UnitPrice: 75m, UnitCost: 45m);
+        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 5m, Guid.NewGuid(), UnitPrice: 75m);
         var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-GLFAIL-001", Guid.NewGuid(), "cash", Lines: [line]);
 
         var result = await service.PostInvoiceAsync(req, CancellationToken.None);
@@ -423,7 +534,35 @@ public sealed class SalesServiceTests
         Assert.Equal("GL_POSTING_FAILED", result.Error);
         Assert.Empty(repo.Invoices);
         Assert.Empty(repo.Movements);
-        Assert.Equal(23m, repo.StockByVariant[variantId]); // Inventory unchanged after rollback
+        Assert.Empty(repo.Allocations);
+        Assert.Equal(23m, repo.StockByVariant[variantId]);
+        Assert.Equal(23m, repo.FifoLayers[0].RemainingQty);
+    }
+
+    [Fact]
+    public async Task PostInvoice_And_ListInvoices_Redact_UnitCost_For_Ordinary_Cashier()
+    {
+        var repo = new FakeSalesRepository { AllowCostView = false };
+        var variantId = Guid.NewGuid();
+        repo.SeedFifoLayer(variantId, 10m, 45m, DateTimeOffset.Parse("2026-11-01T00:00:00Z"));
+        var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
+
+        var line = new PostSalesInvoiceLineRequest(variantId, Guid.NewGuid(), Guid.NewGuid(), 2m, Guid.NewGuid(), UnitPrice: 75m);
+        var req = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-CASHIER-001", Guid.NewGuid(), "cash", Lines: [line]);
+
+        var postResult = await service.PostInvoiceAsync(req, CancellationToken.None);
+        Assert.True(postResult.IsSuccess);
+        Assert.Null(postResult.Value!.Lines[0].UnitCost);
+
+        var listed = await service.ListInvoicesAsync(CancellationToken.None);
+        Assert.Single(listed);
+        Assert.Null(listed[0].Lines[0].UnitCost);
+
+        // Authorized finance/inventory user sees the server-computed FIFO cost
+        repo.AllowCostView = true;
+        var financeView = await service.GetInvoiceAsync(postResult.Value!.InvoiceId, CancellationToken.None);
+        Assert.NotNull(financeView);
+        Assert.Equal(45m, financeView!.Lines[0].UnitCost);
     }
 
     [Fact]
@@ -432,15 +571,13 @@ public sealed class SalesServiceTests
         var repo = new FakeSalesRepository();
         var service = new SalesService(repo, new FakeTenantContextAccessor(TestContext));
 
-        // Promotional/free-item invoices are not supported; zero-price invoices must be rejected
-        var freeLine = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 1m, Guid.NewGuid(), UnitPrice: 0m, UnitCost: 45m);
+        var freeLine = new PostSalesInvoiceLineRequest(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 1m, Guid.NewGuid(), UnitPrice: 0m);
         var invReq = new PostSalesInvoiceRequest(Guid.NewGuid(), "POS-PROMO-001", Guid.NewGuid(), "cash", Lines: [freeLine]);
         var invResult = await service.PostInvoiceAsync(invReq, CancellationToken.None);
 
         Assert.False(invResult.IsSuccess);
         Assert.Equal("INVALID_SELLING_PRICE", invResult.Error);
 
-        // Supported standard/pos/wholesale Sales Order creation & confirmation remain intact
         var orderLine = new CreateSalesOrderLineRequest(Guid.NewGuid(), Guid.NewGuid(), 1m, Guid.NewGuid(), UnitPrice: 75m);
         var orderReq = new CreateSalesOrderRequest("SO-STD-001", Guid.NewGuid(), Guid.NewGuid(), OrderType: "standard", Lines: [orderLine]);
         var orderCreate = await service.CreateOrderAsync(orderReq, CancellationToken.None);

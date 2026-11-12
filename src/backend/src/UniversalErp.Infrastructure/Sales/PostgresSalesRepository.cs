@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Npgsql;
 using UniversalErp.Application.Abstractions;
+using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Sales;
 using UniversalErp.Domain.Tenancy;
 using UniversalErp.Infrastructure.Sync;
@@ -504,6 +505,35 @@ public sealed class PostgresSalesRepository(
         return result;
     }
 
+    public async Task<bool> CanViewCostAsync(CancellationToken ct)
+    {
+        if (Ctx.UserId == Guid.Empty) return false;
+
+        await using var conn = await OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        await SetRls(cmd, Ctx);
+
+        cmd.CommandText = """
+            SELECT (
+                identity.user_has_permission(@tid, @cid, @uid, 'inventory.valuation.view')
+                OR identity.user_has_permission(@tid, @cid, @uid, 'finance.journal.view')
+                OR identity.user_has_permission(@tid, @cid, @uid, 'finance.account.view')
+                OR identity.user_has_permission(@tid, @cid, @uid, 'inventory.receipt.post')
+                OR identity.user_has_permission(@tid, @cid, @uid, 'inventory.adjustment.create')
+                OR identity.user_has_permission(@tid, @cid, @uid, 'purchasing.grn.view')
+            );
+            """;
+        cmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+        cmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+        cmd.Parameters.AddWithValue("uid", Ctx.UserId);
+
+        var val = await cmd.ExecuteScalarAsync(ct);
+        await tx.CommitAsync(ct);
+        return val is bool b && b;
+    }
+
     public async Task<SalesInvoiceSummary?> GetInvoiceAsync(Guid invoiceId, CancellationToken ct)
     {
         var all = await ListInvoicesAsync(ct);
@@ -524,10 +554,9 @@ public sealed class PostgresSalesRepository(
         if (req.DiscountAmount < 0m)
             throw new InvalidOperationException("INVALID_DISCOUNT_AMOUNT");
 
-        // 0. Defense-in-depth validation of pricing, costs, and totals before any mutations
+        // 0. Defense-in-depth validation of pricing and totals (client-supplied UnitCost is ignored)
         decimal subtotal = 0;
         decimal tax = 0;
-        decimal totalCost = 0;
         foreach (var l in lines)
         {
             if (l.Quantity <= 0m)
@@ -536,14 +565,11 @@ public sealed class PostgresSalesRepository(
                 throw new InvalidOperationException("INVALID_SELLING_PRICE: Selling price must be greater than zero.");
             if (l.TaxRate < 0m)
                 throw new InvalidOperationException("INVALID_TAX_RATE: Tax rate cannot be negative.");
-            if (l.UnitCost < 0m)
-                throw new InvalidOperationException("INVALID_UNIT_COST: Unit cost cannot be negative.");
 
             var lineSub = l.Quantity * l.UnitPrice;
             var lineTax = lineSub * l.TaxRate;
             subtotal += lineSub;
             tax += lineTax;
-            totalCost += (l.Quantity * l.UnitCost);
         }
 
         var netRevenue = subtotal - req.DiscountAmount;
@@ -571,20 +597,15 @@ public sealed class PostgresSalesRepository(
             await varReader.CloseAsync();
         }
 
-        var anyInventoryTracked = false;
-        foreach (var l in lines)
-        {
-            var requiresCogs = !variantCogsRequired.TryGetValue(l.VariantId, out var tracked) || tracked;
-            if (requiresCogs)
-            {
-                anyInventoryTracked = true;
-                if (l.UnitCost <= 0m)
-                    throw new InvalidOperationException($"UNIT_COST_REQUIRED: Positive unit cost is required for inventory-tracked variant {l.VariantId}.");
-            }
-        }
+        var anyInventoryTracked = lines.Any(l =>
+            !variantCogsRequired.TryGetValue(l.VariantId, out var tracked) || tracked);
 
-        // 1. Verify stock sufficiency for all lines
-        foreach (var l in lines)
+        // 1. Verify aggregated stock sufficiency per (variant, warehouse, bin)
+        var requestedByBucket = lines
+            .GroupBy(l => (l.VariantId, l.WarehouseId, l.BinId))
+            .ToDictionary(g => g.Key, g => g.Sum(x => x.Quantity));
+
+        foreach (var bucket in requestedByBucket)
         {
             await using var chkCmd = conn.CreateCommand();
             chkCmd.Transaction = tx;
@@ -596,15 +617,15 @@ public sealed class PostgresSalesRepository(
                 """;
             chkCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
             chkCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-            chkCmd.Parameters.AddWithValue("var", l.VariantId);
-            chkCmd.Parameters.AddWithValue("wh", l.WarehouseId);
-            chkCmd.Parameters.AddWithValue("bin", l.BinId);
+            chkCmd.Parameters.AddWithValue("var", bucket.Key.VariantId);
+            chkCmd.Parameters.AddWithValue("wh", bucket.Key.WarehouseId);
+            chkCmd.Parameters.AddWithValue("bin", bucket.Key.BinId);
 
             var onHandVal = await chkCmd.ExecuteScalarAsync(ct);
             var onHand = onHandVal is decimal dec ? dec : 0m;
-            if (onHand < l.Quantity)
+            if (onHand < bucket.Value)
             {
-                throw new InvalidOperationException($"INSUFFICIENT_STOCK: Available {onHand}, Requested {l.Quantity}");
+                throw new InvalidOperationException($"INSUFFICIENT_STOCK: Available {onHand}, Requested {bucket.Value}");
             }
         }
 
@@ -613,7 +634,7 @@ public sealed class PostgresSalesRepository(
         var invoiceId = Guid.NewGuid();
         var invoiceDate = req.InvoiceDate?.ToDateTime(TimeOnly.MinValue) ?? DateTime.UtcNow.Date;
 
-        // 3. Insert Invoice Header
+        // 3. Insert Invoice Header FIRST (enforces idempotency on ClientTransactionId & InvoiceNumber before stock/FIFO mutations)
         cmd.CommandText = """
             INSERT INTO erp_sales.sales_invoice
                 (tenant_id, company_id, invoice_id, invoice_number, client_transaction_id,
@@ -645,41 +666,7 @@ public sealed class PostgresSalesRepository(
         cmd.Parameters.AddWithValue("by", createdBy == Guid.Empty ? DBNull.Value : (object)createdBy);
         await cmd.ExecuteNonQueryAsync(ct);
 
-        // 4. Insert Invoice Lines
-        for (var i = 0; i < lines.Count; i++)
-        {
-            var l = lines[i];
-            var lineTot = (l.Quantity * l.UnitPrice) * (1 + l.TaxRate);
-            await using var lCmd = conn.CreateCommand();
-            lCmd.Transaction = tx;
-            lCmd.CommandText = """
-                INSERT INTO erp_sales.sales_invoice_line
-                    (tenant_id, company_id, invoice_id, line_number, order_line_number,
-                     variant_id, warehouse_id, bin_id, quantity, unit_of_measure_id,
-                     unit_price, unit_cost, tax_rate, line_total)
-                VALUES
-                    (@tid, @cid, @inv, @ln, @oln,
-                     @var, @wh, @bin, @qty, @uom,
-                     @price, @cost, @tax, @tot);
-                """;
-            lCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-            lCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-            lCmd.Parameters.AddWithValue("inv", invoiceId);
-            lCmd.Parameters.AddWithValue("ln", i + 1);
-            lCmd.Parameters.AddWithValue("oln", l.OrderLineNumber.HasValue ? (object)l.OrderLineNumber.Value : DBNull.Value);
-            lCmd.Parameters.AddWithValue("var", l.VariantId);
-            lCmd.Parameters.AddWithValue("wh", l.WarehouseId);
-            lCmd.Parameters.AddWithValue("bin", l.BinId);
-            lCmd.Parameters.AddWithValue("qty", l.Quantity);
-            lCmd.Parameters.AddWithValue("uom", l.UnitOfMeasureId);
-            lCmd.Parameters.AddWithValue("price", l.UnitPrice);
-            lCmd.Parameters.AddWithValue("cost", l.UnitCost);
-            lCmd.Parameters.AddWithValue("tax", l.TaxRate);
-            lCmd.Parameters.AddWithValue("tot", lineTot);
-            await lCmd.ExecuteNonQueryAsync(ct);
-        }
-
-        // 5. Update Inventory Movement & Balances (Stock Relief)
+        // 4. Create Inventory Movement Header
         var movementId = Guid.NewGuid();
         await using (var movCmd = conn.CreateCommand())
         {
@@ -702,35 +689,181 @@ public sealed class PostgresSalesRepository(
             await movCmd.ExecuteNonQueryAsync(ct);
         }
 
+        // 5. Server-Side FIFO Valuation Consumption, Invoice Lines, Movement Legs & Stock Relief
+        decimal totalCost = 0m;
         for (var i = 0; i < lines.Count; i++)
         {
             var l = lines[i];
-            await using var legCmd = conn.CreateCommand();
-            legCmd.Transaction = tx;
-            legCmd.CommandText = """
-                INSERT INTO erp_inventory.inventory_movement_leg
-                    (tenant_id, company_id, movement_id, leg_number, variant_id,
-                     warehouse_id, bin_id, status_code, quantity_delta, base_uom_id)
-                VALUES
-                    (@tid, @cid, @mId, @ln, @var,
-                     @wh, @bin, 'available', @qtyDelta, @uom);
+            var lineNumber = i + 1;
+            var requiresCogs = !variantCogsRequired.TryGetValue(l.VariantId, out var tracked) || tracked;
+            var lineUnitCost = 0m;
 
-                UPDATE erp_inventory.stock_balance
-                SET on_hand_qty = on_hand_qty - @qty, updated_at = now()
-                WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
-                  AND warehouse_id = @wh AND bin_id = @bin AND status_code = 'available';
-                """;
-            legCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-            legCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-            legCmd.Parameters.AddWithValue("mId", movementId);
-            legCmd.Parameters.AddWithValue("ln", i + 1);
-            legCmd.Parameters.AddWithValue("var", l.VariantId);
-            legCmd.Parameters.AddWithValue("wh", l.WarehouseId);
-            legCmd.Parameters.AddWithValue("bin", l.BinId);
-            legCmd.Parameters.AddWithValue("qtyDelta", -l.Quantity);
-            legCmd.Parameters.AddWithValue("qty", l.Quantity);
-            legCmd.Parameters.AddWithValue("uom", l.UnitOfMeasureId);
-            await legCmd.ExecuteNonQueryAsync(ct);
+            if (requiresCogs)
+            {
+                var openLayers = new List<FifoCostLayerSlice>();
+                await using (var layerSel = conn.CreateCommand())
+                {
+                    layerSel.Transaction = tx;
+                    layerSel.CommandText = """
+                        SELECT layer_id, received_at, remaining_qty, unit_cost
+                        FROM erp_inventory.inventory_cost_layer
+                        WHERE tenant_id = @tid
+                          AND company_id = @cid
+                          AND variant_id = @var
+                          AND status_code = 'available'
+                          AND remaining_qty > 0
+                          AND unit_cost > 0
+                        ORDER BY received_at ASC, created_at ASC, layer_id ASC
+                        FOR UPDATE;
+                        """;
+                    layerSel.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    layerSel.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    layerSel.Parameters.AddWithValue("var", l.VariantId);
+                    await using var lr = await layerSel.ExecuteReaderAsync(ct);
+                    while (await lr.ReadAsync(ct))
+                    {
+                        openLayers.Add(new FifoCostLayerSlice(
+                            LayerId: lr.GetGuid(0),
+                            ReceivedAt: lr.GetFieldValue<DateTimeOffset>(1),
+                            RemainingQty: lr.GetDecimal(2),
+                            UnitCost: lr.GetDecimal(3)));
+                    }
+                    await lr.CloseAsync();
+                }
+
+                var allocationResult = FifoCostAllocator.Allocate(openLayers, l.Quantity);
+                lineUnitCost = allocationResult.EffectiveUnitCost;
+                totalCost += allocationResult.TotalCost;
+
+                foreach (var alloc in allocationResult.Allocations)
+                {
+                    await using var updLayer = conn.CreateCommand();
+                    updLayer.Transaction = tx;
+                    updLayer.CommandText = """
+                        UPDATE erp_inventory.inventory_cost_layer
+                        SET remaining_qty = remaining_qty - @consumed,
+                            updated_at = now()
+                        WHERE tenant_id = @tid
+                          AND company_id = @cid
+                          AND layer_id = @layerId
+                          AND remaining_qty >= @consumed;
+                        """;
+                    updLayer.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    updLayer.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    updLayer.Parameters.AddWithValue("layerId", alloc.LayerId);
+                    updLayer.Parameters.AddWithValue("consumed", alloc.ConsumedQty);
+                    var rowsUpdated = await updLayer.ExecuteNonQueryAsync(ct);
+                    if (rowsUpdated != 1)
+                    {
+                        throw new InvalidOperationException($"INSUFFICIENT_VALUATION_LAYERS: Concurrent layer modification on layer {alloc.LayerId}.");
+                    }
+
+                    await using var insAlloc = conn.CreateCommand();
+                    insAlloc.Transaction = tx;
+                    insAlloc.CommandText = """
+                        INSERT INTO erp_inventory.inventory_cost_allocation
+                            (tenant_id, company_id, allocation_id, layer_id, movement_id,
+                             source_document_type, source_document_id, source_line_number,
+                             variant_id, consumed_qty, unit_cost, extended_cost, currency_code)
+                        VALUES
+                            (@tid, @cid, @allocId, @layerId, @movId,
+                             'sales_invoice', @invId, @ln,
+                             @var, @qty, @cost, @extCost, 'PKR');
+                        """;
+                    insAlloc.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    insAlloc.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    insAlloc.Parameters.AddWithValue("allocId", Guid.NewGuid());
+                    insAlloc.Parameters.AddWithValue("layerId", alloc.LayerId);
+                    insAlloc.Parameters.AddWithValue("movId", movementId);
+                    insAlloc.Parameters.AddWithValue("invId", invoiceId);
+                    insAlloc.Parameters.AddWithValue("ln", lineNumber);
+                    insAlloc.Parameters.AddWithValue("var", l.VariantId);
+                    insAlloc.Parameters.AddWithValue("qty", alloc.ConsumedQty);
+                    insAlloc.Parameters.AddWithValue("cost", alloc.UnitCost);
+                    insAlloc.Parameters.AddWithValue("extCost", alloc.ExtendedCost);
+                    await insAlloc.ExecuteNonQueryAsync(ct);
+                }
+
+                await using var valEntryCmd = conn.CreateCommand();
+                valEntryCmd.Transaction = tx;
+                valEntryCmd.CommandText = """
+                    INSERT INTO erp_inventory.valuation_entry
+                        (tenant_id, company_id, valuation_entry_id, movement_id, variant_id,
+                         entry_type, quantity, unit_cost, extended_cost, currency_code, posted_at)
+                    VALUES
+                        (@tid, @cid, @valId, @movId, @var,
+                         'issue_cost', @qty, @unitCost, @extCost, 'PKR', now());
+                    """;
+                valEntryCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+                valEntryCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                valEntryCmd.Parameters.AddWithValue("valId", Guid.NewGuid());
+                valEntryCmd.Parameters.AddWithValue("movId", movementId);
+                valEntryCmd.Parameters.AddWithValue("var", l.VariantId);
+                valEntryCmd.Parameters.AddWithValue("qty", -l.Quantity);
+                valEntryCmd.Parameters.AddWithValue("unitCost", lineUnitCost);
+                valEntryCmd.Parameters.AddWithValue("extCost", -allocationResult.TotalCost);
+                await valEntryCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            var lineTot = (l.Quantity * l.UnitPrice) * (1 + l.TaxRate);
+            await using (var lCmd = conn.CreateCommand())
+            {
+                lCmd.Transaction = tx;
+                lCmd.CommandText = """
+                    INSERT INTO erp_sales.sales_invoice_line
+                        (tenant_id, company_id, invoice_id, line_number, order_line_number,
+                         variant_id, warehouse_id, bin_id, quantity, unit_of_measure_id,
+                         unit_price, unit_cost, tax_rate, line_total)
+                    VALUES
+                        (@tid, @cid, @inv, @ln, @oln,
+                         @var, @wh, @bin, @qty, @uom,
+                         @price, @cost, @tax, @tot);
+                    """;
+                lCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+                lCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                lCmd.Parameters.AddWithValue("inv", invoiceId);
+                lCmd.Parameters.AddWithValue("ln", lineNumber);
+                lCmd.Parameters.AddWithValue("oln", l.OrderLineNumber.HasValue ? (object)l.OrderLineNumber.Value : DBNull.Value);
+                lCmd.Parameters.AddWithValue("var", l.VariantId);
+                lCmd.Parameters.AddWithValue("wh", l.WarehouseId);
+                lCmd.Parameters.AddWithValue("bin", l.BinId);
+                lCmd.Parameters.AddWithValue("qty", l.Quantity);
+                lCmd.Parameters.AddWithValue("uom", l.UnitOfMeasureId);
+                lCmd.Parameters.AddWithValue("price", l.UnitPrice);
+                lCmd.Parameters.AddWithValue("cost", lineUnitCost);
+                lCmd.Parameters.AddWithValue("tax", l.TaxRate);
+                lCmd.Parameters.AddWithValue("tot", lineTot);
+                await lCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var legCmd = conn.CreateCommand())
+            {
+                legCmd.Transaction = tx;
+                legCmd.CommandText = """
+                    INSERT INTO erp_inventory.inventory_movement_leg
+                        (tenant_id, company_id, movement_id, leg_number, variant_id,
+                         warehouse_id, bin_id, status_code, quantity_delta, base_uom_id)
+                    VALUES
+                        (@tid, @cid, @mId, @ln, @var,
+                         @wh, @bin, 'available', @qtyDelta, @uom);
+
+                    UPDATE erp_inventory.stock_balance
+                    SET on_hand_qty = on_hand_qty - @qty, updated_at = now()
+                    WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
+                      AND warehouse_id = @wh AND bin_id = @bin AND status_code = 'available';
+                    """;
+                legCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+                legCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                legCmd.Parameters.AddWithValue("mId", movementId);
+                legCmd.Parameters.AddWithValue("ln", lineNumber);
+                legCmd.Parameters.AddWithValue("var", l.VariantId);
+                legCmd.Parameters.AddWithValue("wh", l.WarehouseId);
+                legCmd.Parameters.AddWithValue("bin", l.BinId);
+                legCmd.Parameters.AddWithValue("qtyDelta", -l.Quantity);
+                legCmd.Parameters.AddWithValue("qty", l.Quantity);
+                legCmd.Parameters.AddWithValue("uom", l.UnitOfMeasureId);
+                await legCmd.ExecuteNonQueryAsync(ct);
+            }
         }
 
         // 6. Update Customer Outstanding Balance if credit sale
