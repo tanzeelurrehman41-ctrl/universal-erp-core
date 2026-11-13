@@ -94,7 +94,7 @@ BEGIN
         FROM organization.companies c
         JOIN platform.tenants t ON t.id = c.tenant_id
         WHERE t.id = v_tenant_id AND c.id = v_company_id
-          AND t.code = 'DEMO-CLOUD' AND c.code = 'CLOUD-LOGISTICS'
+          AND t.tenant_code = 'DEMO-CLOUD' AND c.company_code = 'CLOUD-LOGISTICS'
     ) THEN
         RAISE EXCEPTION 'PRECONDITION_FAILED: Target tenant DEMO-CLOUD / company CLOUD-LOGISTICS not found.';
     END IF;
