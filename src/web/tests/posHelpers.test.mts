@@ -64,7 +64,42 @@ const variants = [
 
 test("POS availability displays 18 EA for MAIN-W1 / PICK-01 available stock", () => {
   const avail = getAvailableStock(sampleBalances, VAR_SCISSOR, WH_MAIN, BIN_PICK01);
+  const valued = getValuedStock(sampleBalances, VAR_SCISSOR, WH_MAIN, BIN_PICK01);
   assert.equal(avail, 18);
+  assert.equal(valued, 18);
+});
+
+test("POS availability displays 29 EA physical and 29 EA valued for MAIN-W1 / RECEIVE-01", () => {
+  const avail = getAvailableStock(sampleBalances, VAR_SCISSOR, WH_MAIN, BIN_RECEIVE01);
+  const valued = getValuedStock(sampleBalances, VAR_SCISSOR, WH_MAIN, BIN_RECEIVE01);
+  assert.equal(avail, 29);
+  assert.equal(valued, 29);
+});
+
+test("Checkout in RECEIVE-01 blocks quantity exceeding 29 EA and allows valid quantity", () => {
+  const resExceeded = validatePosCheckout({
+    posCustomerId: CUST_ID,
+    posWarehouseId: WH_MAIN,
+    posBinId: BIN_RECEIVE01,
+    posLines: [{ variantId: VAR_SCISSOR, qty: "30", price: "75", taxRate: "0" }],
+    posDiscount: "0",
+    balances: sampleBalances,
+    variants,
+  });
+  assert.match(resExceeded.validationError ?? "", /Insufficient stock.*Available: 29 EA.*Requested: 30 EA/);
+
+  const resValid = validatePosCheckout({
+    posCustomerId: CUST_ID,
+    posWarehouseId: WH_MAIN,
+    posBinId: BIN_RECEIVE01,
+    posLines: [{ variantId: VAR_SCISSOR, qty: "10", price: "75", taxRate: "0" }],
+    posDiscount: "0",
+    balances: sampleBalances,
+    variants,
+  });
+  assert.equal(resValid.validationError, null);
+  assert.equal(resValid.subtotal, 750);
+  assert.equal(resValid.netPayable, 750);
 });
 
 test("Availability URL scopes by selected warehouse and refreshes across warehouse/bin/product changes", () => {
