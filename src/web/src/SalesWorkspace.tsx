@@ -3,6 +3,7 @@ import { apiFetch, type ApiWorkspaceScope } from "./auth";
 import {
   buildAvailabilityUrl,
   getAvailableStock,
+  getValuedStock,
   parseStrictNumber,
   validatePosCheckout,
   type PosLineDraft,
@@ -561,8 +562,14 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
                 const avail = line.variantId && posWarehouseId && posBinId
                   ? getAvailableStock(balances, line.variantId, posWarehouseId, posBinId)
                   : null;
+                const valued = line.variantId && posWarehouseId && posBinId
+                  ? getValuedStock(balances, line.variantId, posWarehouseId, posBinId)
+                  : null;
                 const reqQty = parseStrictNumber(line.qty) ?? 0;
                 const isInsufficient = avail !== null && (avail <= 0 || reqQty > avail);
+                const isUnvalued = valued !== null && avail !== null && avail > 0 && valued <= 0;
+                const isInsufficientValued = valued !== null && !isUnvalued && (reqQty > valued);
+                const hasWarning = isInsufficient || isUnvalued || isInsufficientValued;
                 return (
                   <div key={idx} style={{ border: "1px solid var(--border)", padding: "0.75rem", borderRadius: "6px", marginBottom: "0.75rem" }}>
                     <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -609,9 +616,13 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
                       )}
                     </div>
                     {avail !== null && (
-                      <div style={{ fontSize: "0.75rem", marginTop: "0.25rem", color: isInsufficient && !isLoadingAvailability ? "var(--color-danger, #d32f2f)" : "var(--text-muted)" }}>
-                        Available in Bin: <strong>{isLoadingAvailability ? "Refreshing…" : `${avail} EA`}</strong>{" "}
-                        {!isLoadingAvailability && isInsufficient && "(Insufficient stock for requested quantity!)"}
+                      <div style={{ fontSize: "0.75rem", marginTop: "0.25rem", color: hasWarning && !isLoadingAvailability ? "var(--color-danger, #d32f2f)" : "var(--text-muted)" }}>
+                        Available in Bin: <strong>{isLoadingAvailability ? "Refreshing…" : `${avail} EA`}</strong>
+                        {valued !== null && !isLoadingAvailability && (
+                          <span> (Valued: <strong>{valued} EA</strong>{isUnvalued ? " — Unvalued stock cannot be sold" : ""})</span>
+                        )}
+                        {!isLoadingAvailability && isInsufficient && !isUnvalued && " (Insufficient physical stock!)"}
+                        {!isLoadingAvailability && isInsufficientValued && " (Insufficient valued stock!)"}
                       </div>
                     )}
                   </div>

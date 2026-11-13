@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildAvailabilityUrl,
   getAvailableStock,
+  getValuedStock,
   validatePosCheckout,
   type StockBalance,
 } from "../src/posHelpers.ts";
@@ -25,6 +26,7 @@ const sampleBalances: StockBalance[] = [
     stockStatus: "available",
     onHandQuantity: 18,
     unitOfMeasureId: UOM_EA,
+    valuedQuantity: 18,
   },
   {
     variantId: VAR_SCISSOR,
@@ -33,6 +35,7 @@ const sampleBalances: StockBalance[] = [
     stockStatus: "quarantine",
     onHandQuantity: 4,
     unitOfMeasureId: UOM_EA,
+    valuedQuantity: 0,
   },
   {
     variantId: VAR_SCISSOR,
@@ -41,6 +44,7 @@ const sampleBalances: StockBalance[] = [
     stockStatus: "available",
     onHandQuantity: 29,
     unitOfMeasureId: UOM_EA,
+    valuedQuantity: 29,
   },
   {
     variantId: VAR_SCISSOR,
@@ -49,6 +53,7 @@ const sampleBalances: StockBalance[] = [
     stockStatus: "available",
     onHandQuantity: 3,
     unitOfMeasureId: UOM_EA,
+    valuedQuantity: 0,
   },
 ];
 
@@ -122,4 +127,64 @@ test("Checkout succeeds for valid 5 EA at PKR 75 in PICK-01 without manual cost"
   assert.equal(res.validationError, null);
   assert.equal(res.subtotal, 375);
   assert.equal(res.netPayable, 375);
+});
+
+test("Checkout blocks unvalued stock in STORE-01 with clear explanation", () => {
+  const avail = getAvailableStock(sampleBalances, VAR_SCISSOR, WH_STORE, BIN_STORE01);
+  const valued = getValuedStock(sampleBalances, VAR_SCISSOR, WH_STORE, BIN_STORE01);
+  assert.equal(avail, 3);
+  assert.equal(valued, 0);
+
+  const res = validatePosCheckout({
+    posCustomerId: CUST_ID,
+    posWarehouseId: WH_STORE,
+    posBinId: BIN_STORE01,
+    posLines: [{ variantId: VAR_SCISSOR, qty: "1", price: "75", taxRate: "0" }],
+    posDiscount: "0",
+    balances: sampleBalances,
+    variants,
+  });
+  assert.equal(
+    res.validationError,
+    "Selected bin contains unvalued stock for SCISSOR-EA-01 (Physical: 3 EA, Valued: 0 EA). Unvalued stock cannot be sold."
+  );
+});
+
+test("Checkout blocks when requested quantity exceeds valued quantity", () => {
+  const partialBalances: StockBalance[] = [
+    {
+      variantId: VAR_SCISSOR,
+      warehouseId: WH_MAIN,
+      binId: BIN_PICK01,
+      stockStatus: "available",
+      onHandQuantity: 10,
+      unitOfMeasureId: UOM_EA,
+      valuedQuantity: 5,
+    },
+  ];
+
+  const resExceeded = validatePosCheckout({
+    posCustomerId: CUST_ID,
+    posWarehouseId: WH_MAIN,
+    posBinId: BIN_PICK01,
+    posLines: [{ variantId: VAR_SCISSOR, qty: "6", price: "75", taxRate: "0" }],
+    posDiscount: "0",
+    balances: partialBalances,
+    variants,
+  });
+  assert.equal(
+    resExceeded.validationError,
+    "Insufficient valued stock for SCISSOR-EA-01 in selected bin (Valued: 5 EA, Physical: 10 EA, Requested: 6 EA)."
+  );
+
+  const resValid = validatePosCheckout({
+    posCustomerId: CUST_ID,
+    posWarehouseId: WH_MAIN,
+    posBinId: BIN_PICK01,
+    posLines: [{ variantId: VAR_SCISSOR, qty: "4", price: "75", taxRate: "0" }],
+    posDiscount: "0",
+    balances: partialBalances,
+    variants,
+  });
+  assert.equal(resValid.validationError, null);
 });

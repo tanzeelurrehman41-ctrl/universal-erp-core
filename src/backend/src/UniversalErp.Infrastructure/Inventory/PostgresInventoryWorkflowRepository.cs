@@ -416,10 +416,45 @@ public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSou
         CancellationToken cancellationToken)
     {
         await using var db = await OpenScopeAsync(tenantId, companyId, cancellationToken);
-        await using var command = new NpgsqlCommand(
-            "SELECT balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code, balance.on_hand_qty, variant.base_uom_id FROM erp_inventory.stock_balance AS balance JOIN erp_inventory.product_variant AS variant ON variant.tenant_id = balance.tenant_id AND variant.variant_id = balance.variant_id WHERE balance.tenant_id = @tenantId AND balance.company_id = @companyId AND (@variantId IS NULL OR balance.variant_id = @variantId) AND (@warehouseId IS NULL OR balance.warehouse_id = @warehouseId) ORDER BY balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code",
+
+        bool hasCostLayersTable;
+        await using (var checkCmd = new NpgsqlCommand(
+            "SELECT to_regclass('erp_inventory.inventory_cost_layer') IS NOT NULL;",
             db.Connection,
-            db.Transaction);
+            db.Transaction))
+        {
+            var res = await checkCmd.ExecuteScalarAsync(cancellationToken);
+            hasCostLayersTable = res is bool b && b;
+        }
+
+        var sql = hasCostLayersTable
+            ? """
+              SELECT balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code, balance.on_hand_qty, variant.base_uom_id, COALESCE(vl.valued_qty, 0) AS valued_qty
+              FROM erp_inventory.stock_balance AS balance
+              JOIN erp_inventory.product_variant AS variant ON variant.tenant_id = balance.tenant_id AND variant.variant_id = balance.variant_id
+              LEFT JOIN (
+                  SELECT variant_id, warehouse_id, bin_id, sum(remaining_qty) AS valued_qty
+                  FROM erp_inventory.inventory_cost_layer
+                  WHERE tenant_id = @tenantId AND company_id = @companyId
+                    AND status_code = 'available' AND remaining_qty > 0 AND unit_cost > 0
+                  GROUP BY variant_id, warehouse_id, bin_id
+              ) AS vl ON vl.variant_id = balance.variant_id AND vl.warehouse_id = balance.warehouse_id AND vl.bin_id = balance.bin_id
+              WHERE balance.tenant_id = @tenantId AND balance.company_id = @companyId
+                AND (@variantId IS NULL OR balance.variant_id = @variantId)
+                AND (@warehouseId IS NULL OR balance.warehouse_id = @warehouseId)
+              ORDER BY balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code
+              """
+            : """
+              SELECT balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code, balance.on_hand_qty, variant.base_uom_id, NULL::numeric AS valued_qty
+              FROM erp_inventory.stock_balance AS balance
+              JOIN erp_inventory.product_variant AS variant ON variant.tenant_id = balance.tenant_id AND variant.variant_id = balance.variant_id
+              WHERE balance.tenant_id = @tenantId AND balance.company_id = @companyId
+                AND (@variantId IS NULL OR balance.variant_id = @variantId)
+                AND (@warehouseId IS NULL OR balance.warehouse_id = @warehouseId)
+              ORDER BY balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code
+              """;
+
+        await using var command = new NpgsqlCommand(sql, db.Connection, db.Transaction);
         command.Parameters.AddWithValue("tenantId", tenantId);
         command.Parameters.AddWithValue("companyId", companyId);
         AddNullableUuid(command, "variantId", variantId);
@@ -428,9 +463,10 @@ public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSou
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            decimal? valQty = reader.IsDBNull(6) ? null : reader.GetDecimal(6);
             items.Add(new InventoryAvailabilitySummary(
                 reader.GetGuid(0), reader.GetGuid(1), reader.GetGuid(2), reader.GetString(3),
-                reader.GetDecimal(4), reader.GetGuid(5)));
+                reader.GetDecimal(4), reader.GetGuid(5), valQty));
         }
         await reader.CloseAsync();
         await db.Transaction.CommitAsync(cancellationToken);
@@ -819,6 +855,173 @@ public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSou
                 upsertDest.Parameters.AddWithValue("qty", request.Quantity);
                 upsertDest.Parameters.AddWithValue("balanceId", Guid.NewGuid());
                 await upsertDest.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 9b. Transfer FIFO Cost Layers from source bin to destination bin (preserving chronology, unit cost, and original GRN source)
+            bool costLayerTableExists;
+            await using (var checkLayersTable = new NpgsqlCommand(
+                "SELECT to_regclass('erp_inventory.inventory_cost_layer') IS NOT NULL;",
+                db.Connection,
+                db.Transaction))
+            {
+                var checkRes = await checkLayersTable.ExecuteScalarAsync(cancellationToken);
+                costLayerTableExists = checkRes is bool b && b;
+            }
+
+            if (costLayerTableExists)
+            {
+                var openLayers = new List<(
+                    Guid LayerId,
+                    string SourceDocType,
+                    Guid? SourceDocId,
+                    int? SourceLineNo,
+                    DateTimeOffset ReceivedAt,
+                    decimal RemainingQty,
+                    decimal UnitCost,
+                    string CurrencyCode)>();
+
+                await using (var selectLayers = new NpgsqlCommand(
+                    """
+                    SELECT layer_id, source_document_type, source_document_id, source_line_number,
+                           received_at, remaining_qty, unit_cost, currency_code
+                    FROM erp_inventory.inventory_cost_layer
+                    WHERE tenant_id = @tenantId
+                      AND company_id = @companyId
+                      AND variant_id = @variantId
+                      AND warehouse_id = @srcWhId
+                      AND bin_id = @srcBinId
+                      AND status_code = 'available'
+                      AND remaining_qty > 0
+                    ORDER BY received_at ASC, created_at ASC, layer_id ASC
+                    FOR UPDATE;
+                    """,
+                    db.Connection,
+                    db.Transaction))
+                {
+                    selectLayers.Parameters.AddWithValue("tenantId", context.TenantId);
+                    selectLayers.Parameters.AddWithValue("companyId", context.CompanyId);
+                    selectLayers.Parameters.AddWithValue("variantId", request.VariantId);
+                    selectLayers.Parameters.AddWithValue("srcWhId", request.SourceWarehouseId);
+                    selectLayers.Parameters.AddWithValue("srcBinId", request.SourceBinId);
+
+                    await using var layerReader = await selectLayers.ExecuteReaderAsync(cancellationToken);
+                    while (await layerReader.ReadAsync(cancellationToken))
+                    {
+                        openLayers.Add((
+                            LayerId: layerReader.GetGuid(0),
+                            SourceDocType: layerReader.GetString(1),
+                            SourceDocId: layerReader.IsDBNull(2) ? null : layerReader.GetGuid(2),
+                            SourceLineNo: layerReader.IsDBNull(3) ? null : layerReader.GetInt32(3),
+                            ReceivedAt: layerReader.GetFieldValue<DateTimeOffset>(4),
+                            RemainingQty: layerReader.GetDecimal(5),
+                            UnitCost: layerReader.GetDecimal(6),
+                            CurrencyCode: layerReader.GetString(7)));
+                    }
+                    await layerReader.CloseAsync();
+                }
+
+                decimal qtyLeftToTransfer = request.Quantity;
+                int transferAllocLine = 1;
+
+                foreach (var srcLayer in openLayers)
+                {
+                    if (qtyLeftToTransfer <= 0) break;
+
+                    var takeQty = Math.Min(srcLayer.RemainingQty, qtyLeftToTransfer);
+                    if (takeQty <= 0) continue;
+
+                    // 1. Decrement remaining_qty on source layer
+                    await using (var decSourceLayer = new NpgsqlCommand(
+                        """
+                        UPDATE erp_inventory.inventory_cost_layer
+                        SET remaining_qty = remaining_qty - @qty,
+                            updated_at = now()
+                        WHERE tenant_id = @tenantId
+                          AND company_id = @companyId
+                          AND layer_id = @layerId
+                          AND remaining_qty >= @qty;
+                        """,
+                        db.Connection,
+                        db.Transaction))
+                    {
+                        decSourceLayer.Parameters.AddWithValue("tenantId", context.TenantId);
+                        decSourceLayer.Parameters.AddWithValue("companyId", context.CompanyId);
+                        decSourceLayer.Parameters.AddWithValue("layerId", srcLayer.LayerId);
+                        decSourceLayer.Parameters.AddWithValue("qty", takeQty);
+                        var updatedCount = await decSourceLayer.ExecuteNonQueryAsync(cancellationToken);
+                        if (updatedCount != 1)
+                        {
+                            throw new InvalidOperationException($"INSUFFICIENT_VALUATION_LAYERS: Concurrent modification on layer {srcLayer.LayerId}.");
+                        }
+                    }
+
+                    // 2. Insert audit trail into inventory_cost_allocation
+                    await using (var insAlloc = new NpgsqlCommand(
+                        """
+                        INSERT INTO erp_inventory.inventory_cost_allocation
+                            (tenant_id, company_id, allocation_id, layer_id, movement_id,
+                             source_document_type, source_document_id, source_line_number,
+                             variant_id, consumed_qty, unit_cost, extended_cost, currency_code)
+                        VALUES
+                            (@tenantId, @companyId, @allocId, @layerId, @movementId,
+                             'inventory_transfer', @movementId, @lineNo,
+                             @variantId, @consumedQty, @unitCost, @extendedCost, @currency);
+                        """,
+                        db.Connection,
+                        db.Transaction))
+                    {
+                        insAlloc.Parameters.AddWithValue("tenantId", context.TenantId);
+                        insAlloc.Parameters.AddWithValue("companyId", context.CompanyId);
+                        insAlloc.Parameters.AddWithValue("allocId", Guid.NewGuid());
+                        insAlloc.Parameters.AddWithValue("layerId", srcLayer.LayerId);
+                        insAlloc.Parameters.AddWithValue("movementId", movementId);
+                        insAlloc.Parameters.AddWithValue("lineNo", transferAllocLine++);
+                        insAlloc.Parameters.AddWithValue("variantId", request.VariantId);
+                        insAlloc.Parameters.AddWithValue("consumedQty", takeQty);
+                        insAlloc.Parameters.AddWithValue("unitCost", srcLayer.UnitCost);
+                        insAlloc.Parameters.AddWithValue("extendedCost", takeQty * srcLayer.UnitCost);
+                        insAlloc.Parameters.AddWithValue("currency", srcLayer.CurrencyCode);
+                        await insAlloc.ExecuteNonQueryAsync(cancellationToken);
+                    }
+
+                    // 3. Create destination child layer in inventory_cost_layer
+                    await using (var insChildLayer = new NpgsqlCommand(
+                        """
+                        INSERT INTO erp_inventory.inventory_cost_layer
+                            (tenant_id, company_id, layer_id, parent_layer_id, variant_id,
+                             warehouse_id, bin_id, status_code, source_document_type,
+                             source_document_id, source_line_number, source_movement_id,
+                             received_at, original_qty, remaining_qty, unit_cost, currency_code)
+                        VALUES
+                            (@tenantId, @companyId, @childLayerId, @parentLayerId, @variantId,
+                             @destWhId, @destBinId, 'available', @srcDocType,
+                             @srcDocId, @srcLineNo, @movId,
+                             @receivedAt, @origQty, @remainingQty, @unitCost, @currency);
+                        """,
+                        db.Connection,
+                        db.Transaction))
+                    {
+                        insChildLayer.Parameters.AddWithValue("tenantId", context.TenantId);
+                        insChildLayer.Parameters.AddWithValue("companyId", context.CompanyId);
+                        insChildLayer.Parameters.AddWithValue("childLayerId", Guid.NewGuid());
+                        insChildLayer.Parameters.AddWithValue("parentLayerId", srcLayer.LayerId);
+                        insChildLayer.Parameters.AddWithValue("variantId", request.VariantId);
+                        insChildLayer.Parameters.AddWithValue("destWhId", request.DestinationWarehouseId);
+                        insChildLayer.Parameters.AddWithValue("destBinId", request.DestinationBinId);
+                        insChildLayer.Parameters.AddWithValue("srcDocType", srcLayer.SourceDocType);
+                        insChildLayer.Parameters.AddWithValue("srcDocId", (object?)srcLayer.SourceDocId ?? DBNull.Value);
+                        insChildLayer.Parameters.AddWithValue("srcLineNo", (object?)srcLayer.SourceLineNo ?? DBNull.Value);
+                        insChildLayer.Parameters.AddWithValue("movId", movementId);
+                        insChildLayer.Parameters.AddWithValue("receivedAt", srcLayer.ReceivedAt);
+                        insChildLayer.Parameters.AddWithValue("origQty", takeQty);
+                        insChildLayer.Parameters.AddWithValue("remainingQty", takeQty);
+                        insChildLayer.Parameters.AddWithValue("unitCost", srcLayer.UnitCost);
+                        insChildLayer.Parameters.AddWithValue("currency", srcLayer.CurrencyCode);
+                        await insChildLayer.ExecuteNonQueryAsync(cancellationToken);
+                    }
+
+                    qtyLeftToTransfer -= takeQty;
+                }
             }
 
             // 10. Outbox event

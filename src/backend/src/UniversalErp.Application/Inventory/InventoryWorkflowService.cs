@@ -80,7 +80,8 @@ public sealed record InventoryAvailabilitySummary(
     Guid BinId,
     string StockStatus,
     decimal OnHandQuantity,
-    Guid UnitOfMeasureId);
+    Guid UnitOfMeasureId,
+    decimal? ValuedQuantity = null);
 
 public sealed record InventoryReceiptSummary(
     Guid TransactionId,

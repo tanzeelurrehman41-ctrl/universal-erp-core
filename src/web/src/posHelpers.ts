@@ -5,6 +5,7 @@ export type StockBalance = {
   stockStatus: string;
   onHandQuantity: number;
   unitOfMeasureId: string;
+  valuedQuantity?: number | null;
 };
 
 export type PosLineDraft = {
@@ -50,6 +51,26 @@ export function getAvailableStock(
         b.stockStatus === "available"
     )
     .reduce((sum, b) => sum + (Number(b.onHandQuantity) || 0), 0);
+}
+
+export function getValuedStock(
+  balances: readonly StockBalance[],
+  variantId: string,
+  warehouseId: string,
+  binId: string
+): number | null {
+  if (!variantId || !warehouseId || !binId) return null;
+  const matching = balances.filter(
+    (b) =>
+      b.variantId === variantId &&
+      b.warehouseId === warehouseId &&
+      b.binId === binId &&
+      b.stockStatus === "available"
+  );
+  if (matching.length === 0) return 0;
+  const hasValued = matching.some((b) => b.valuedQuantity !== undefined && b.valuedQuantity !== null);
+  if (!hasValued) return null;
+  return matching.reduce((sum, b) => sum + (Number(b.valuedQuantity) || 0), 0);
 }
 
 export function validatePosCheckout(params: {
@@ -131,6 +152,18 @@ export function validatePosCheckout(params: {
         const v = variants.find((item) => item.variantId === variantId);
         const skuLabel = v?.sku ?? "selected item";
         return `Insufficient stock for ${skuLabel} in selected bin (Available: ${avail} EA, Requested: ${requestedQty} EA).`;
+      }
+
+      const valued = getValuedStock(balances, variantId, posWarehouseId, posBinId);
+      if (valued !== null) {
+        const v = variants.find((item) => item.variantId === variantId);
+        const skuLabel = v?.sku ?? "selected item";
+        if (avail > 0 && valued <= 0) {
+          return `Selected bin contains unvalued stock for ${skuLabel} (Physical: ${avail} EA, Valued: 0 EA). Unvalued stock cannot be sold.`;
+        }
+        if (requestedQty > valued) {
+          return `Insufficient valued stock for ${skuLabel} in selected bin (Valued: ${valued} EA, Physical: ${avail} EA, Requested: ${requestedQty} EA).`;
+        }
       }
     }
 

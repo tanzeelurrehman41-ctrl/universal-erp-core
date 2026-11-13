@@ -12,11 +12,12 @@ VALUES
   ('inventory.valuation.view', 'View server-side FIFO inventory valuation layers and unit cost details.', 'inventory')
 ON CONFLICT (permission_code) DO NOTHING;
 
--- 2. FIFO Cost Layers (one row per inbound receipt lot/layer)
+-- 2. FIFO Cost Layers (one row per inbound receipt lot/layer, with parent linkage on transfer)
 CREATE TABLE IF NOT EXISTS erp_inventory.inventory_cost_layer (
   tenant_id uuid NOT NULL,
   company_id uuid NOT NULL,
   layer_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  parent_layer_id uuid,
   variant_id uuid NOT NULL,
   warehouse_id uuid NOT NULL,
   bin_id uuid NOT NULL,
@@ -35,6 +36,8 @@ CREATE TABLE IF NOT EXISTS erp_inventory.inventory_cost_layer (
   PRIMARY KEY (tenant_id, company_id, layer_id),
   FOREIGN KEY (tenant_id, company_id)
     REFERENCES organization.companies(tenant_id, id),
+  FOREIGN KEY (tenant_id, company_id, parent_layer_id)
+    REFERENCES erp_inventory.inventory_cost_layer(tenant_id, company_id, layer_id),
   FOREIGN KEY (tenant_id, variant_id)
     REFERENCES erp_inventory.product_variant(tenant_id, variant_id),
   FOREIGN KEY (tenant_id, company_id, warehouse_id)
@@ -46,12 +49,16 @@ CREATE TABLE IF NOT EXISTS erp_inventory.inventory_cost_layer (
 );
 
 CREATE INDEX IF NOT EXISTS ix_cost_layer_fifo_open
-  ON erp_inventory.inventory_cost_layer (tenant_id, company_id, variant_id, received_at ASC, created_at ASC, layer_id ASC)
+  ON erp_inventory.inventory_cost_layer (tenant_id, company_id, variant_id, warehouse_id, bin_id, received_at ASC, created_at ASC, layer_id ASC)
   WHERE remaining_qty > 0 AND status_code = 'available';
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_cost_layer_source_line
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cost_layer_source_receipt
   ON erp_inventory.inventory_cost_layer (tenant_id, company_id, source_document_type, source_document_id, source_line_number, bin_id)
-  WHERE source_document_id IS NOT NULL AND source_line_number IS NOT NULL;
+  WHERE parent_layer_id IS NULL AND source_document_id IS NOT NULL AND source_line_number IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cost_layer_transfer
+  ON erp_inventory.inventory_cost_layer (tenant_id, company_id, parent_layer_id, source_movement_id)
+  WHERE parent_layer_id IS NOT NULL AND source_movement_id IS NOT NULL;
 
 -- 3. FIFO Cost Layer Consumption Allocations (immutable audit trail per outbound line)
 CREATE TABLE IF NOT EXISTS erp_inventory.inventory_cost_allocation (
@@ -117,8 +124,20 @@ GRANT SELECT, INSERT ON erp_inventory.inventory_cost_allocation TO erp_app;
 GRANT SELECT, INSERT ON erp_inventory.valuation_entry TO erp_app;
 
 -- 6. Record migration version
-INSERT INTO public.schema_migrations (version, applied_at)
-VALUES ('026_fifo_valuation_layers', now())
-ON CONFLICT (version) DO NOTHING;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'schema_migrations' AND column_name = 'checksum'
+  ) THEN
+    INSERT INTO public.schema_migrations (version, checksum, applied_at)
+    VALUES ('026_fifo_valuation_layers', 'manual_migration_026', now())
+    ON CONFLICT (version) DO NOTHING;
+  ELSE
+    INSERT INTO public.schema_migrations (version, applied_at)
+    VALUES ('026_fifo_valuation_layers', now())
+    ON CONFLICT (version) DO NOTHING;
+  END IF;
+END $$;
 
 COMMIT;

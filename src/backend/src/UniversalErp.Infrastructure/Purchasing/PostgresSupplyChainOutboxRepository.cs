@@ -239,7 +239,7 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                                      'grn', @grnId, @lineNum, @movementId,
                                      @receivedAt, @qty, @qty, @unitCost, 'PKR')
                                 ON CONFLICT (tenant_id, company_id, source_document_type, source_document_id, source_line_number, bin_id)
-                                WHERE source_document_id IS NOT NULL AND source_line_number IS NOT NULL
+                                WHERE parent_layer_id IS NULL AND source_document_id IS NOT NULL AND source_line_number IS NOT NULL
                                 DO NOTHING;
                                 """,
                                 connection,

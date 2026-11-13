@@ -705,11 +705,13 @@ public sealed class PostgresSalesRepository(
                 {
                     layerSel.Transaction = tx;
                     layerSel.CommandText = """
-                        SELECT layer_id, received_at, remaining_qty, unit_cost
+                        SELECT layer_id, received_at, remaining_qty, unit_cost, warehouse_id, bin_id
                         FROM erp_inventory.inventory_cost_layer
                         WHERE tenant_id = @tid
                           AND company_id = @cid
                           AND variant_id = @var
+                          AND warehouse_id = @wh
+                          AND bin_id = @bin
                           AND status_code = 'available'
                           AND remaining_qty > 0
                           AND unit_cost > 0
@@ -719,6 +721,8 @@ public sealed class PostgresSalesRepository(
                     layerSel.Parameters.AddWithValue("tid", Ctx.TenantId);
                     layerSel.Parameters.AddWithValue("cid", Ctx.CompanyId);
                     layerSel.Parameters.AddWithValue("var", l.VariantId);
+                    layerSel.Parameters.AddWithValue("wh", l.WarehouseId);
+                    layerSel.Parameters.AddWithValue("bin", l.BinId);
                     await using var lr = await layerSel.ExecuteReaderAsync(ct);
                     while (await lr.ReadAsync(ct))
                     {
@@ -726,12 +730,19 @@ public sealed class PostgresSalesRepository(
                             LayerId: lr.GetGuid(0),
                             ReceivedAt: lr.GetFieldValue<DateTimeOffset>(1),
                             RemainingQty: lr.GetDecimal(2),
-                            UnitCost: lr.GetDecimal(3)));
+                            UnitCost: lr.GetDecimal(3),
+                            WarehouseId: lr.GetGuid(4),
+                            BinId: lr.GetGuid(5)));
                     }
                     await lr.CloseAsync();
                 }
 
-                var allocationResult = FifoCostAllocator.Allocate(openLayers, l.Quantity);
+                var allocationResult = FifoCostAllocator.Allocate(
+                    openLayers,
+                    l.Quantity,
+                    locationDescription: $"warehouse {l.WarehouseId}, bin {l.BinId}",
+                    expectedWarehouseId: l.WarehouseId,
+                    expectedBinId: l.BinId);
                 lineUnitCost = allocationResult.EffectiveUnitCost;
                 totalCost += allocationResult.TotalCost;
 

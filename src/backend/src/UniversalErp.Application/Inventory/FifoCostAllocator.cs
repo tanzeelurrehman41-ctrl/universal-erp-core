@@ -7,7 +7,9 @@ public sealed record FifoCostLayerSlice(
     Guid LayerId,
     DateTimeOffset ReceivedAt,
     decimal RemainingQty,
-    decimal UnitCost);
+    decimal UnitCost,
+    Guid? WarehouseId = null,
+    Guid? BinId = null);
 
 /// <summary>
 /// Represents the quantity and cost consumed from a single FIFO valuation layer.
@@ -28,6 +30,7 @@ public sealed record FifoAllocationResult(
 
 /// <summary>
 /// Deterministic First-In, First-Out (FIFO) inventory cost allocation calculator.
+/// Strictly bin-bounded: never permits borrowing valuation layers across warehouses or bins.
 /// </summary>
 public static class FifoCostAllocator
 {
@@ -35,15 +38,33 @@ public static class FifoCostAllocator
     /// Allocates <paramref name="requestedQty"/> across <paramref name="availableLayers"/> in FIFO order
     /// (oldest <see cref="FifoCostLayerSlice.ReceivedAt"/> first, breaking ties by <see cref="FifoCostLayerSlice.LayerId"/>).
     /// Throws <see cref="InvalidOperationException"/> with <c>MISSING_VALUATION_DATA</c> or
-    /// <c>INSUFFICIENT_VALUATION_LAYERS</c> when valid open layers cannot cover the full quantity.
+    /// <c>INSUFFICIENT_VALUATION_LAYERS</c> when valid open layers in the target bin cannot cover the full quantity.
+    /// Throws <c>CROSS_BIN_VALUATION_FORBIDDEN</c> if any layer targets a different warehouse/bin.
     /// </summary>
     public static FifoAllocationResult Allocate(
         IReadOnlyList<FifoCostLayerSlice> availableLayers,
-        decimal requestedQty)
+        decimal requestedQty,
+        string? locationDescription = null,
+        Guid? expectedWarehouseId = null,
+        Guid? expectedBinId = null)
     {
         if (requestedQty <= 0m)
         {
             throw new InvalidOperationException("INVALID_INVOICE_LINE: Requested quantity must be greater than zero.");
+        }
+
+        // Strict bin containment check: fail-closed if any layer does not belong to the target location
+        if (expectedWarehouseId.HasValue || expectedBinId.HasValue)
+        {
+            foreach (var l in availableLayers)
+            {
+                if ((expectedWarehouseId.HasValue && l.WarehouseId.HasValue && l.WarehouseId.Value != expectedWarehouseId.Value) ||
+                    (expectedBinId.HasValue && l.BinId.HasValue && l.BinId.Value != expectedBinId.Value))
+                {
+                    throw new InvalidOperationException(
+                        $"CROSS_BIN_VALUATION_FORBIDDEN: Attempted to consume layer {l.LayerId} belonging to Warehouse {l.WarehouseId}/Bin {l.BinId} for checkout in {locationDescription ?? $"{expectedWarehouseId}/{expectedBinId}"}.");
+                }
+            }
         }
 
         var openLayers = availableLayers
@@ -52,17 +73,21 @@ public static class FifoCostAllocator
             .ThenBy(l => l.LayerId)
             .ToList();
 
+        var locationSuffix = string.IsNullOrWhiteSpace(locationDescription)
+            ? (expectedBinId.HasValue ? $"in bin {expectedBinId}" : "in selected bin")
+            : $"in {locationDescription}";
+
         if (openLayers.Count == 0)
         {
             throw new InvalidOperationException(
-                $"MISSING_VALUATION_DATA: No valid open FIFO valuation layers exist to value {requestedQty} units.");
+                $"MISSING_VALUATION_DATA: Selected bin contains unvalued stock or no valid FIFO cost layers exist {locationSuffix} to value {requestedQty} units.");
         }
 
         var totalAvailable = openLayers.Sum(l => l.RemainingQty);
         if (totalAvailable < requestedQty)
         {
             throw new InvalidOperationException(
-                $"INSUFFICIENT_VALUATION_LAYERS: Available valued quantity {totalAvailable}, Requested {requestedQty}.");
+                $"INSUFFICIENT_VALUATION_LAYERS: Selected bin contains unvalued or insufficiently valued stock {locationSuffix}. Available valued quantity is {totalAvailable}, Requested {requestedQty}.");
         }
 
         var allocations = new List<FifoLayerAllocation>();

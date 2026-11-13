@@ -2,8 +2,10 @@ using System.Data;
 using System.Threading;
 using Npgsql;
 using UniversalErp.Application.Abstractions;
+using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Sales;
 using UniversalErp.Domain.Tenancy;
+using UniversalErp.Infrastructure.Inventory;
 using UniversalErp.Infrastructure.Sales;
 using Xunit;
 
@@ -397,6 +399,318 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
         }
     }
 
+    [Fact]
+    public async Task PostInvoiceAsync_CrossBinValuationForbidden_ThrowsWhenBinHasUnvaluedStock()
+    {
+        var tenantId = Guid.NewGuid();
+        var companyId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var locationId = Guid.NewGuid();
+        var warehouseId = Guid.NewGuid();
+        var binPickId = Guid.NewGuid();
+        var binStoreId = Guid.NewGuid();
+        var uomId = Guid.NewGuid();
+        var productId = Guid.NewGuid();
+        var variantId = Guid.NewGuid();
+        var customerId = Guid.NewGuid();
+
+        await using var adminConn = await _adminDataSource.OpenConnectionAsync();
+        await SeedSalesTestHierarchyAsync(
+            adminConn, tenantId, companyId, userId, locationId, warehouseId, binPickId, uomId, productId, variantId, customerId,
+            startingQty: 18m, seedFinanceAccounts: true);
+
+        // Add second bin: STORE-01
+        await using (var cmd = new NpgsqlCommand(
+            "INSERT INTO erp_inventory.stock_bin (tenant_id, company_id, warehouse_id, bin_id, code, bin_type, is_active) VALUES (@t, @c, @w, @id, 'STORE-01', 'storage', true)", adminConn))
+        {
+            cmd.Parameters.AddWithValue("t", tenantId);
+            cmd.Parameters.AddWithValue("c", companyId);
+            cmd.Parameters.AddWithValue("w", warehouseId);
+            cmd.Parameters.AddWithValue("id", binStoreId);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // Add 3 EA unvalued stock to STORE-01 (stock_balance exists, but 0 cost layers)
+        await using (var cmd = new NpgsqlCommand(
+            "INSERT INTO erp_inventory.stock_balance (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, on_hand_qty, balance_id) VALUES (@t, @c, @v, @w, @b, 'available', 3, @balId)", adminConn))
+        {
+            cmd.Parameters.AddWithValue("t", tenantId);
+            cmd.Parameters.AddWithValue("c", companyId);
+            cmd.Parameters.AddWithValue("v", variantId);
+            cmd.Parameters.AddWithValue("w", warehouseId);
+            cmd.Parameters.AddWithValue("b", binStoreId);
+            cmd.Parameters.AddWithValue("balId", Guid.NewGuid());
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // Add 18 EA valued cost layer to PICK-01
+        await SeedCostLayerAsync(adminConn, tenantId, companyId, variantId, warehouseId, binPickId, 18m, 45m, DateTimeOffset.UtcNow.AddDays(-1));
+
+        try
+        {
+            var context = new TenantContext(tenantId, companyId, userId);
+            var repo = new PostgresSalesRepository(_appDataSource, new TestTenantContextAccessor(context));
+
+            // Attempt checkout from STORE-01 (has 3 EA physical, but 0 layers). Must fail fail-closed with MISSING_VALUATION_DATA
+            // and must NOT borrow layers from PICK-01!
+            var req = new PostSalesInvoiceRequest(
+                ClientTransactionId: Guid.NewGuid(),
+                InvoiceNumber: "POS-UNVALUED-01",
+                CustomerId: customerId,
+                PaymentMethod: "cash",
+                Lines:
+                [
+                    new PostSalesInvoiceLineRequest(variantId, warehouseId, binStoreId, 1m, uomId, UnitPrice: 75m, TaxRate: 0m)
+                ]);
+
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => repo.PostInvoiceAsync(req, userId, CancellationToken.None));
+            Assert.StartsWith("MISSING_VALUATION_DATA", ex.Message);
+            Assert.Contains("unvalued stock", ex.Message);
+
+            // Assert PICK-01 layer remained completely untouched
+            await using var checkPickLayer = new NpgsqlCommand(
+                "SELECT remaining_qty FROM erp_inventory.inventory_cost_layer WHERE tenant_id = @t AND bin_id = @b;", adminConn);
+            checkPickLayer.Parameters.AddWithValue("t", tenantId);
+            checkPickLayer.Parameters.AddWithValue("b", binPickId);
+            Assert.Equal(18m, (decimal)(await checkPickLayer.ExecuteScalarAsync())!);
+        }
+        finally
+        {
+            await CleanupSalesTestHierarchyAsync(adminConn, tenantId);
+        }
+    }
+
+    [Fact]
+    public async Task PostTransferAsync_MovesCostLayersAcrossBins_PreservingReceiptChronologyAndUnitCost()
+    {
+        var tenantId = Guid.NewGuid();
+        var companyId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var locationId = Guid.NewGuid();
+        var warehouseId = Guid.NewGuid();
+        var binPickId = Guid.NewGuid();
+        var binReceiveId = Guid.NewGuid();
+        var uomId = Guid.NewGuid();
+        var productId = Guid.NewGuid();
+        var variantId = Guid.NewGuid();
+        var customerId = Guid.NewGuid();
+
+        await using var adminConn = await _adminDataSource.OpenConnectionAsync();
+        await SeedSalesTestHierarchyAsync(
+            adminConn, tenantId, companyId, userId, locationId, warehouseId, binPickId, uomId, productId, variantId, customerId,
+            startingQty: 10m, seedFinanceAccounts: true);
+
+        // Add second bin: RECEIVE-01
+        await using (var cmd = new NpgsqlCommand(
+            "INSERT INTO erp_inventory.stock_bin (tenant_id, company_id, warehouse_id, bin_id, code, bin_type, is_active) VALUES (@t, @c, @w, @id, 'RECEIVE-01', 'receiving', true)", adminConn))
+        {
+            cmd.Parameters.AddWithValue("t", tenantId);
+            cmd.Parameters.AddWithValue("c", companyId);
+            cmd.Parameters.AddWithValue("w", warehouseId);
+            cmd.Parameters.AddWithValue("id", binReceiveId);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var sourceLayerDate = DateTimeOffset.UtcNow.AddDays(-5);
+        var sourceLayerId = await SeedCostLayerAsync(adminConn, tenantId, companyId, variantId, warehouseId, binPickId, 10m, 45m, sourceLayerDate);
+
+        try
+        {
+            var context = new TenantContext(tenantId, companyId, userId);
+            var inventoryRepo = new PostgresInventoryWorkflowRepository(_appDataSource);
+
+            // Transfer 4 EA from PICK-01 to RECEIVE-01
+            var transferReq = new PostInventoryTransferRequest(
+                VariantId: variantId,
+                SourceWarehouseId: warehouseId,
+                SourceBinId: binPickId,
+                DestinationWarehouseId: warehouseId,
+                DestinationBinId: binReceiveId,
+                Quantity: 4m,
+                UnitOfMeasureId: uomId,
+                Note: "Transfer 4 EA for testing FIFO layer movement");
+
+            var transferResult = await inventoryRepo.PostTransferAsync(context, Guid.NewGuid(), "hash-01", transferReq, CancellationToken.None);
+            Assert.True(transferResult.IsSuccess, transferResult.Error);
+
+            // Assert source bin balance is decremented to 6 EA
+            await using var srcBalCmd = new NpgsqlCommand(
+                "SELECT on_hand_qty FROM erp_inventory.stock_balance WHERE tenant_id = @t AND bin_id = @b AND status_code = 'available';", adminConn);
+            srcBalCmd.Parameters.AddWithValue("t", tenantId);
+            srcBalCmd.Parameters.AddWithValue("b", binPickId);
+            Assert.Equal(6m, (decimal)(await srcBalCmd.ExecuteScalarAsync())!);
+
+            // Assert destination bin balance is 4 EA
+            await using var dstBalCmd = new NpgsqlCommand(
+                "SELECT on_hand_qty FROM erp_inventory.stock_balance WHERE tenant_id = @t AND bin_id = @b AND status_code = 'available';", adminConn);
+            dstBalCmd.Parameters.AddWithValue("t", tenantId);
+            dstBalCmd.Parameters.AddWithValue("b", binReceiveId);
+            Assert.Equal(4m, (decimal)(await dstBalCmd.ExecuteScalarAsync())!);
+
+            // Assert source layer remaining_qty is decremented to 6 EA
+            await using var srcLayerCmd = new NpgsqlCommand(
+                "SELECT remaining_qty FROM erp_inventory.inventory_cost_layer WHERE tenant_id = @t AND layer_id = @id;", adminConn);
+            srcLayerCmd.Parameters.AddWithValue("t", tenantId);
+            srcLayerCmd.Parameters.AddWithValue("id", sourceLayerId);
+            Assert.Equal(6m, (decimal)(await srcLayerCmd.ExecuteScalarAsync())!);
+
+            // Assert destination child layer exists with parent_layer_id, original unit_cost 45, original received_at, and remaining_qty 4
+            await using var dstLayerCmd = new NpgsqlCommand(
+                """
+                SELECT layer_id, parent_layer_id, original_qty, remaining_qty, unit_cost, received_at
+                FROM erp_inventory.inventory_cost_layer
+                WHERE tenant_id = @t AND bin_id = @b AND parent_layer_id = @parent;
+                """, adminConn);
+            dstLayerCmd.Parameters.AddWithValue("t", tenantId);
+            dstLayerCmd.Parameters.AddWithValue("b", binReceiveId);
+            dstLayerCmd.Parameters.AddWithValue("parent", sourceLayerId);
+            await using (var reader = await dstLayerCmd.ExecuteReaderAsync())
+            {
+                Assert.True(await reader.ReadAsync());
+                Assert.Equal(sourceLayerId, reader.GetGuid(1));
+                Assert.Equal(4m, reader.GetDecimal(2));
+                Assert.Equal(4m, reader.GetDecimal(3));
+                Assert.Equal(45m, reader.GetDecimal(4));
+                Assert.Equal(sourceLayerDate.ToUnixTimeSeconds(), reader.GetFieldValue<DateTimeOffset>(5).ToUnixTimeSeconds());
+            }
+
+            // Assert inventory_cost_allocation has transfer record
+            await using var allocCmd = new NpgsqlCommand(
+                """
+                SELECT count(*), sum(consumed_qty), sum(extended_cost)
+                FROM erp_inventory.inventory_cost_allocation
+                WHERE tenant_id = @t AND source_document_type = 'inventory_transfer' AND layer_id = @parent;
+                """, adminConn);
+            allocCmd.Parameters.AddWithValue("t", tenantId);
+            allocCmd.Parameters.AddWithValue("parent", sourceLayerId);
+            await using (var allocReader = await allocCmd.ExecuteReaderAsync())
+            {
+                Assert.True(await allocReader.ReadAsync());
+                Assert.Equal(1L, allocReader.GetInt64(0));
+                Assert.Equal(4m, allocReader.GetDecimal(1));
+                Assert.Equal(180m, allocReader.GetDecimal(2));
+            }
+
+            // Now post a POS invoice from RECEIVE-01 for the transferred 4 EA
+            var salesRepo = new PostgresSalesRepository(_appDataSource, new TestTenantContextAccessor(context));
+            var invoiceReq = new PostSalesInvoiceRequest(
+                ClientTransactionId: Guid.NewGuid(),
+                InvoiceNumber: "POS-TRANS-01",
+                CustomerId: customerId,
+                PaymentMethod: "cash",
+                Lines:
+                [
+                    new PostSalesInvoiceLineRequest(variantId, warehouseId, binReceiveId, 4m, uomId, UnitPrice: 75m, TaxRate: 0m)
+                ]);
+
+            var invoiceId = await salesRepo.PostInvoiceAsync(invoiceReq, userId, CancellationToken.None);
+            Assert.NotEqual(Guid.Empty, invoiceId);
+
+            // Assert destination child layer is now fully consumed (remaining_qty = 0)
+            await using var dstConsumedCmd = new NpgsqlCommand(
+                "SELECT remaining_qty FROM erp_inventory.inventory_cost_layer WHERE tenant_id = @t AND bin_id = @b AND parent_layer_id = @parent;", adminConn);
+            dstConsumedCmd.Parameters.AddWithValue("t", tenantId);
+            dstConsumedCmd.Parameters.AddWithValue("b", binReceiveId);
+            dstConsumedCmd.Parameters.AddWithValue("parent", sourceLayerId);
+            Assert.Equal(0m, (decimal)(await dstConsumedCmd.ExecuteScalarAsync())!);
+
+            // Assert COGS recorded for 4 EA @ 45 = 180 PKR
+            await using var cogsCmd = new NpgsqlCommand(
+                """
+                SELECT sum(jl.debit_functional)
+                FROM finance.journal_lines jl
+                JOIN finance.accounts a ON a.id = jl.account_id AND a.tenant_id = jl.tenant_id AND a.company_id = jl.company_id
+                WHERE jl.tenant_id = @t AND jl.company_id = @c AND a.account_code = '5010';
+                """, adminConn);
+            cogsCmd.Parameters.AddWithValue("t", tenantId);
+            cogsCmd.Parameters.AddWithValue("c", companyId);
+            Assert.Equal(180m, (decimal)(await cogsCmd.ExecuteScalarAsync())!);
+        }
+        finally
+        {
+            await CleanupSalesTestHierarchyAsync(adminConn, tenantId);
+        }
+    }
+
+    [Fact]
+    public async Task PostTransferAsync_UnvaluedStock_MovesPhysicalStockWithoutCreatingCostLayers()
+    {
+        var tenantId = Guid.NewGuid();
+        var companyId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var locationId = Guid.NewGuid();
+        var warehouseId = Guid.NewGuid();
+        var binStoreId = Guid.NewGuid();
+        var binReceiveId = Guid.NewGuid();
+        var uomId = Guid.NewGuid();
+        var productId = Guid.NewGuid();
+        var variantId = Guid.NewGuid();
+        var customerId = Guid.NewGuid();
+
+        await using var adminConn = await _adminDataSource.OpenConnectionAsync();
+        await SeedSalesTestHierarchyAsync(
+            adminConn, tenantId, companyId, userId, locationId, warehouseId, binStoreId, uomId, productId, variantId, customerId,
+            startingQty: 3m, seedFinanceAccounts: false);
+
+        // Add second bin: RECEIVE-01
+        await using (var cmd = new NpgsqlCommand(
+            "INSERT INTO erp_inventory.stock_bin (tenant_id, company_id, warehouse_id, bin_id, code, bin_type, is_active) VALUES (@t, @c, @w, @id, 'RECEIVE-01', 'receiving', true)", adminConn))
+        {
+            cmd.Parameters.AddWithValue("t", tenantId);
+            cmd.Parameters.AddWithValue("c", companyId);
+            cmd.Parameters.AddWithValue("w", warehouseId);
+            cmd.Parameters.AddWithValue("id", binReceiveId);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // NOTE: ZERO cost layers seeded for STORE-01 (unvalued stock)
+
+        try
+        {
+            var context = new TenantContext(tenantId, companyId, userId);
+            var inventoryRepo = new PostgresInventoryWorkflowRepository(_appDataSource);
+
+            // Transfer 2 EA from STORE-01 to RECEIVE-01
+            var transferReq = new PostInventoryTransferRequest(
+                VariantId: variantId,
+                SourceWarehouseId: warehouseId,
+                SourceBinId: binStoreId,
+                DestinationWarehouseId: warehouseId,
+                DestinationBinId: binReceiveId,
+                Quantity: 2m,
+                UnitOfMeasureId: uomId,
+                Note: "Transfer 2 EA unvalued stock");
+
+            var transferResult = await inventoryRepo.PostTransferAsync(context, Guid.NewGuid(), "hash-02", transferReq, CancellationToken.None);
+            Assert.True(transferResult.IsSuccess, transferResult.Error);
+
+            // Assert source balance is decremented to 1 EA
+            await using var srcBalCmd = new NpgsqlCommand(
+                "SELECT on_hand_qty FROM erp_inventory.stock_balance WHERE tenant_id = @t AND bin_id = @b AND status_code = 'available';", adminConn);
+            srcBalCmd.Parameters.AddWithValue("t", tenantId);
+            srcBalCmd.Parameters.AddWithValue("b", binStoreId);
+            Assert.Equal(1m, (decimal)(await srcBalCmd.ExecuteScalarAsync())!);
+
+            // Assert destination balance is 2 EA
+            await using var dstBalCmd = new NpgsqlCommand(
+                "SELECT on_hand_qty FROM erp_inventory.stock_balance WHERE tenant_id = @t AND bin_id = @b AND status_code = 'available';", adminConn);
+            dstBalCmd.Parameters.AddWithValue("t", tenantId);
+            dstBalCmd.Parameters.AddWithValue("b", binReceiveId);
+            Assert.Equal(2m, (decimal)(await dstBalCmd.ExecuteScalarAsync())!);
+
+            // Assert ZERO cost layers exist anywhere for this tenant/variant (no layers fabricated for unvalued stock!)
+            await using var layerCheckCmd = new NpgsqlCommand(
+                "SELECT count(*) FROM erp_inventory.inventory_cost_layer WHERE tenant_id = @t AND variant_id = @v;", adminConn);
+            layerCheckCmd.Parameters.AddWithValue("t", tenantId);
+            layerCheckCmd.Parameters.AddWithValue("v", variantId);
+            Assert.Equal(0L, (long)(await layerCheckCmd.ExecuteScalarAsync())!);
+        }
+        finally
+        {
+            await CleanupSalesTestHierarchyAsync(adminConn, tenantId);
+        }
+    }
+
     private static async Task<Guid> SeedCostLayerAsync(
         NpgsqlConnection conn,
         Guid tenantId,
@@ -522,7 +836,7 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
             await cmd.ExecuteNonQueryAsync();
         }
         await using (var cmd = new NpgsqlCommand(
-            "INSERT INTO erp_inventory.stock_balance (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, on_hand_qty) VALUES (@t, @c, @v, @w, @b, 'available', @qty)", conn))
+            "INSERT INTO erp_inventory.stock_balance (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, on_hand_qty, balance_id) VALUES (@t, @c, @v, @w, @b, 'available', @qty, @balId)", conn))
         {
             cmd.Parameters.AddWithValue("t", tenantId);
             cmd.Parameters.AddWithValue("c", companyId);
@@ -530,6 +844,7 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
             cmd.Parameters.AddWithValue("w", warehouseId);
             cmd.Parameters.AddWithValue("b", binId);
             cmd.Parameters.AddWithValue("qty", startingQty);
+            cmd.Parameters.AddWithValue("balId", Guid.NewGuid());
             await cmd.ExecuteNonQueryAsync();
         }
         await using (var cmd = new NpgsqlCommand(
@@ -586,10 +901,20 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
 
     private static async Task CleanupSalesTestHierarchyAsync(NpgsqlConnection conn, Guid tenantId)
     {
+        await using (var resetJournals = new NpgsqlCommand(
+            "UPDATE finance.journals SET status = 'draft' WHERE tenant_id = @t;", conn))
+        {
+            resetJournals.Parameters.AddWithValue("t", tenantId);
+            await resetJournals.ExecuteNonQueryAsync();
+        }
+
         var tables = new[]
         {
-            "sync.company_change_log",
+            "sync.change_log",
+            "sync.company_change_counters",
             "erp_sales.outbox_event",
+            "erp_inventory.outbox_event",
+            "erp_inventory.command_idempotency",
             "finance.journal_lines",
             "finance.journals",
             "finance.accounts",
@@ -615,9 +940,14 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
         };
         foreach (var table in tables)
         {
-            await using var cmd = new NpgsqlCommand($"DELETE FROM {table} WHERE tenant_id = @t;", conn);
-            cmd.Parameters.AddWithValue("t", tenantId);
-            await cmd.ExecuteNonQueryAsync();
+            await using var checkCmd = new NpgsqlCommand($"SELECT to_regclass('{table}') IS NOT NULL;", conn);
+            var exists = (bool)(await checkCmd.ExecuteScalarAsync())!;
+            if (exists)
+            {
+                await using var cmd = new NpgsqlCommand($"DELETE FROM {table} WHERE tenant_id = @t;", conn);
+                cmd.Parameters.AddWithValue("t", tenantId);
+                await cmd.ExecuteNonQueryAsync();
+            }
         }
         await using var tCmd = new NpgsqlCommand("DELETE FROM platform.tenants WHERE id = @t;", conn);
         tCmd.Parameters.AddWithValue("t", tenantId);
