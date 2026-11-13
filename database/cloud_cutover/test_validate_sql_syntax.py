@@ -17,6 +17,7 @@ def validate_all():
         "database/cloud_cutover/36_verify_sales_authorization_rollback_state.sql",
         "database/cloud_cutover/37_inspect_sales_and_pos_state.sql",
         "database/cloud_cutover/38_propose_fifo_layer_backfill.sql",
+        "database/cloud_cutover/39_verify_fifo_valuation_state.sql",
         "database/migrations/025_register_sales_permissions.sql",
         "database/migrations/025_register_sales_permissions.down.sql",
         "database/migrations/026_fifo_valuation_layers.sql",
