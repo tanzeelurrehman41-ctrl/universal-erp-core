@@ -106,6 +106,9 @@ h1 { font-size: clamp(36px, 6vw, 58px); line-height: 1.04; margin: 16px 0; lette
 .receipt-retry-btn { background: #fee7dc; color: #9c4210; border-color: #fbd0be; font-weight: 600; }
 .receipt-retry-btn:hover { background: #fed7c5; }
 .receipt-error-detail { color: #b91c1c; font-size: 11px; margin-top: 2px; }
+.transfer-stock-hint { color: #59677f; font-size: 11px; font-weight: 500; margin-top: 3px; display: block; }
+.transfer-stock-hint-warn { color: #b91c1c; font-weight: 700; }
+.transfer-stock-alert { grid-column: 1 / -1; margin: 4px 0 0; padding: 7px 10px; background: #fff1f1; border: 1px solid #fecaca; border-radius: 6px; color: #b91c1c; font-size: 12px; font-weight: 600; line-height: 1.4; }
 .availability-card { margin-top: 14px; }
 .availability-list { border-top: 1px solid #e7ebf2; }
 .availability-row { display: grid; grid-template-columns: 1fr 1.2fr 1fr 1fr; align-items: center; gap: 12px; padding: 12px 2px; border-bottom: 1px solid #edf0f5; font-size: 12px; }

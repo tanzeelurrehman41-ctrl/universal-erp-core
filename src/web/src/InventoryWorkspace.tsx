@@ -12,6 +12,7 @@ import {
   type OfflineReceiptOperation,
   type ReceiptQueueScope,
 } from "./offlineReceiptQueue";
+import { getTransferSourceStock, validateStockTransfer } from "./transferHelpers";
 
 type Props = {
   enabled: boolean;
@@ -409,6 +410,11 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
       setMessage("Source and destination bins must differ.");
       return;
     }
+    const availableStock = getTransferSourceStock(data.balances, transferVariantId, transferSourceWarehouseId, transferSourceBinId);
+    if (Number(transferQuantity) > availableStock) {
+      setMessage(`Cannot transfer: requested quantity (${transferQuantity}) exceeds available stock in source bin (${availableStock}).`);
+      return;
+    }
     setIsSaving(true);
     setMessage("");
     try {
@@ -488,6 +494,19 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
   const binsById = new Map(data.bins.map((bin) => [bin.binId, bin]));
   const unresolvedReceipts = receiptOperations.filter((operation) => operation.status !== "accepted");
   const confirmedReceipts = receiptOperations.filter((operation) => operation.status === "accepted");
+
+  const transferVariant = variantsById.get(transferVariantId);
+  const transferValidation = validateStockTransfer({
+    variantId: transferVariantId,
+    sourceWarehouseId: transferSourceWarehouseId,
+    sourceBinId: transferSourceBinId,
+    destinationWarehouseId: transferDestWarehouseId,
+    destinationBinId: transferDestBinId,
+    quantity: transferQuantity,
+    balances: data.balances,
+    enabled,
+    isSaving,
+  });
 
   return (
     <section className="inventory-workspace" aria-labelledby="inventory-workflow-title">
@@ -654,10 +673,18 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
               <option value="">Choose warehouse</option>
               {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
             </select></label>
-            <label>Source bin<select required value={transferSourceBinId} onChange={(e) => setTransferSourceBinId(e.target.value)}>
-              <option value="">Choose bin</option>
-              {binsForTransferSource.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
-            </select></label>
+            <label>
+              Source bin
+              <select required value={transferSourceBinId} onChange={(e) => setTransferSourceBinId(e.target.value)}>
+                <option value="">Choose bin</option>
+                {binsForTransferSource.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
+              </select>
+              {transferVariantId && transferSourceBinId && (
+                <span className={transferValidation.availableStock > 0 ? "transfer-stock-hint" : "transfer-stock-hint transfer-stock-hint-warn"}>
+                  Available: {transferValidation.availableStock} {unitsById.get(transferVariant?.baseUnitOfMeasureId ?? "") ?? "units"}
+                </span>
+              )}
+            </label>
 
             <label>Destination warehouse<select required value={transferDestWarehouseId} onChange={(e) => { setTransferDestWarehouseId(e.target.value); setTransferDestBinId(""); }}>
               <option value="">Choose warehouse</option>
@@ -670,7 +697,10 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
 
             <label>Quantity<input min="0.000000001" step="0.000000001" required type="number" value={transferQuantity} onChange={(e) => setTransferQuantity(e.target.value)} /></label>
             <label>Note<input maxLength={2000} value={transferNote} onChange={(e) => setTransferNote(e.target.value)} placeholder="e.g. Relocation" /></label>
-            <button disabled={!enabled || isSaving || !transferVariantId || !transferSourceBinId || !transferDestBinId} type="submit">{isSaving ? "Transferring…" : "Post transfer"}</button>
+            {transferValidation.validationError && (
+              <p className="transfer-stock-alert" role="alert">{transferValidation.validationError}</p>
+            )}
+            <button disabled={!transferValidation.isValid} type="submit">{isSaving ? "Transferring…" : "Post transfer"}</button>
           </form>
         </article>
 
