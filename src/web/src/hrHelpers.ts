@@ -83,29 +83,92 @@ export function calculateMonthlyIncomeTaxPkr(monthlyTaxableIncome: number): numb
 }
 
 /**
- * Resolves effective statutory minimum wage for a specific Pakistani administrative jurisdiction.
- * Supports current TY2027 rates and historical payroll periods (< 2026-07-01).
+ * Resolves official statutory minimum wage for a specific Pakistani administrative jurisdiction and skill category.
+ * Supports current TY2027 rates and historical intervals:
+ * - 2024-07-01: Federal/ICT 37,000; Punjab 37,000; Sindh 37,000; KP 36,000; Balochistan 37,000
+ * - 2025-07-01: Punjab 40,000; Sindh 40,000; KP 40,000; Federal/ICT 37,000; Balochistan 37,000
+ * - 2026-07-01: ICT/Federal 40,700; Sindh 43,000 (unskilled) / 44,484 / 53,350 / 55,626; Punjab 40,000; KP 40,000; Balochistan 37,000
  */
-export function getJurisdictionalMinimumWage(jurisdiction: string = 'FEDERAL', effectiveDate?: string): number {
+export function getJurisdictionalMinimumWage(
+  jurisdiction: string = 'FEDERAL',
+  skillCategory: string = 'unskilled',
+  effectiveDate?: string
+): number {
   const norm = (jurisdiction || 'FEDERAL').trim().toUpperCase();
-  const isHistorical = effectiveDate ? effectiveDate < '2026-07-01' : false;
+  const skill = (skillCategory || 'unskilled').trim().toLowerCase();
+  const dateStr = effectiveDate || '2026-07-01';
 
-  if (isHistorical) {
-    if (norm === 'KPK' || norm === 'KP') return 30000;
-    return 32000; // Historical Federal, Punjab, Sindh, Balochistan
+  // Historical Period 1: 2024-07-01 to 2025-06-30
+  if (dateStr < '2025-07-01') {
+    if (norm === 'KPK' || norm === 'KP') return 36000;
+    return 37000; // Federal, ICT, Punjab, Sindh, Balochistan
+  }
+
+  // Historical Period 2: 2025-07-01 to 2026-06-30
+  if (dateStr < '2026-07-01') {
+    if (norm === 'PUNJAB' || norm === 'SINDH' || norm === 'KPK' || norm === 'KP') {
+      return 40000;
+    }
+    return 37000; // Federal, ICT, Balochistan
+  }
+
+  // Current TY2027 Period: 2026-07-01 onwards
+  if (norm === 'SINDH') {
+    switch (skill) {
+      case 'semi_skilled':
+      case 'semiskilled':
+        return 44484;
+      case 'skilled':
+        return 53350;
+      case 'highly_skilled':
+      case 'highlyskilled':
+        return 55626;
+      case 'unskilled':
+      default:
+        return 43000;
+    }
   }
 
   switch (norm) {
+    case 'FEDERAL':
+    case 'ICT':
+      return 40700;
+    case 'PUNJAB':
+      return 40000;
     case 'KPK':
     case 'KP':
-      return 36000; // Official KP notification
-    case 'PUNJAB':
-    case 'SINDH':
+      return 40000;
     case 'BALOCHISTAN':
-    case 'ICT':
-    case 'FEDERAL':
+      return 37000;
     default:
-      return 37000; // Official Federal, Punjab, Sindh, Balochistan notification
+      return 40700;
+  }
+}
+
+/**
+ * Resolves official Provincial Social Security wage ceilings:
+ * - PESSI (Punjab): PKR 40,000
+ * - SESSI (Sindh): PKR 43,000
+ * - KP ESSI (KP): PKR 40,000
+ * - BESSI (Balochistan): PKR 37,000
+ * - Federal / ICT: PKR 40,700
+ */
+export function getProvincialSocialSecurityCeiling(jurisdiction: string = 'FEDERAL'): number {
+  const norm = (jurisdiction || 'FEDERAL').trim().toUpperCase();
+  switch (norm) {
+    case 'PUNJAB':
+      return 40000;
+    case 'SINDH':
+      return 43000;
+    case 'KPK':
+    case 'KP':
+      return 40000;
+    case 'BALOCHISTAN':
+      return 37000;
+    case 'FEDERAL':
+    case 'ICT':
+    default:
+      return 40700;
   }
 }
 
@@ -114,6 +177,7 @@ export function getJurisdictionalMinimumWage(jurisdiction: string = 'FEDERAL', e
  * Standard statutory rates under EOBI Act 1976:
  * - Employee pays 1% of statutory contribution base
  * - Employer pays 5% of statutory contribution base
+ * Decoupled from provincial minimum wage increases.
  */
 export function calculateEobiContributions(applicable: boolean, contributionBase: number = 37000): EobiResult {
   if (!applicable || contributionBase <= 0) return { employee: 0, employer: 0, total: 0 };
@@ -131,11 +195,10 @@ export function calculateEobiContributions(applicable: boolean, contributionBase
 export function calculateProvincialSocialSecurity(
   applicable: boolean,
   grossSalary: number,
-  jurisdiction: string = 'FEDERAL',
-  effectiveDate?: string
+  jurisdiction: string = 'FEDERAL'
 ): SocialSecurityResult {
   if (!applicable || grossSalary <= 0) return { employee: 0, employer: 0, total: 0 };
-  const ceiling = getJurisdictionalMinimumWage(jurisdiction, effectiveDate);
+  const ceiling = getProvincialSocialSecurityCeiling(jurisdiction);
   const applicableWage = Math.min(grossSalary, ceiling);
   const employer = Math.round(applicableWage * 0.06);
   return { employee: 0, employer, total: employer };

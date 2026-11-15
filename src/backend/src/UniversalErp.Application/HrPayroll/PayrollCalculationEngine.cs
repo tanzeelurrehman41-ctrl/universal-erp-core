@@ -123,13 +123,94 @@ public class PayrollCalculationEngine
     }
 
     /// <summary>
+    /// Resolves official statutory minimum wage for a specific Pakistani jurisdiction and skill category.
+    /// Supports current TY2027 rates and historical intervals:
+    /// - 2024-07-01: Federal/ICT 37,000; Punjab 37,000; Sindh 37,000; KP 36,000; Balochistan 37,000
+    /// - 2025-07-01: Punjab 40,000; Sindh 40,000; KP 40,000; Federal/ICT 37,000; Balochistan 37,000
+    /// - 2026-07-01: ICT/Federal 40,700; Sindh 43,000 (unskilled) / 44,484 / 53,350 / 55,626; Punjab 40,000; KP 40,000; Balochistan 37,000
+    /// </summary>
+    public static decimal GetJurisdictionalMinimumWage(string jurisdiction = "FEDERAL", string skillCategory = "unskilled", DateOnly? effectiveDate = null)
+    {
+        var jur = (jurisdiction ?? "FEDERAL").Trim().ToUpperInvariant();
+        var skill = (skillCategory ?? "unskilled").Trim().ToLowerInvariant();
+        var date = effectiveDate ?? new DateOnly(2026, 7, 1);
+
+        // Historical Period 1: 2024-07-01 to 2025-06-30
+        if (date < new DateOnly(2025, 7, 1))
+        {
+            return jur switch
+            {
+                "KPK" or "KP" => 36_000m,
+                _ => 37_000m // Federal, ICT, Punjab, Sindh, Balochistan
+            };
+        }
+
+        // Historical Period 2: 2025-07-01 to 2026-06-30
+        if (date < new DateOnly(2026, 7, 1))
+        {
+            return jur switch
+            {
+                "PUNJAB" => 40_000m,
+                "SINDH" => 40_000m,
+                "KPK" or "KP" => 40_000m,
+                _ => 37_000m // Federal, ICT, Balochistan
+            };
+        }
+
+        // Current TY2027 Period: 2026-07-01 onwards
+        if (jur == "SINDH")
+        {
+            return skill switch
+            {
+                "semi_skilled" or "semiskilled" => 44_484m,
+                "skilled" => 53_350m,
+                "highly_skilled" or "highlyskilled" => 55_626m,
+                _ => 43_000m // Unskilled default
+            };
+        }
+
+        return jur switch
+        {
+            "FEDERAL" => 40_700m,
+            "ICT" => 40_700m,
+            "PUNJAB" => 40_000m,
+            "KPK" or "KP" => 40_000m,
+            "BALOCHISTAN" => 37_000m,
+            _ => 40_700m
+        };
+    }
+
+    /// <summary>
+    /// Resolves official Provincial Social Security wage ceilings:
+    /// - PESSI (Punjab): PKR 40,000
+    /// - SESSI (Sindh): PKR 43,000
+    /// - KP ESSI (KP): PKR 40,000
+    /// - BESSI (Balochistan): PKR 37,000
+    /// - Federal / ICT: PKR 40,700
+    /// </summary>
+    public static decimal GetProvincialSocialSecurityCeiling(string jurisdiction = "FEDERAL")
+    {
+        var norm = (jurisdiction ?? "FEDERAL").Trim().ToUpperInvariant();
+        return norm switch
+        {
+            "PUNJAB" => 40_000m,
+            "SINDH" => 43_000m,
+            "KPK" or "KP" => 40_000m,
+            "BALOCHISTAN" => 37_000m,
+            "ICT" => 40_700m,
+            "FEDERAL" => 40_700m,
+            _ => 40_700m
+        };
+    }
+
+    /// <summary>
     /// Computes Provincial Social Security (PESSI / SESSI / KP ESSI / BESSI) contributions.
     /// Under provincial labour laws: Employer pays 6% of wages up to the provincial statutory ceiling; Employee pays 0%.
     /// </summary>
     public static (decimal EmployeeShare, decimal EmployerShare) CalculateSocialSecurity(
         bool isApplicable,
         decimal grossSalary,
-        decimal wageCeiling = 37_000m)
+        decimal wageCeiling = 40_700m)
     {
         if (!isApplicable || grossSalary <= 0 || wageCeiling <= 0) return (0m, 0m);
 
@@ -202,9 +283,10 @@ public class PayrollCalculationEngine
         decimal loanInstallment,
         decimal otherDeductions,
         IReadOnlyList<TaxSlabDto>? taxSlabs = null,
-        decimal statutoryMinWage = 37_000m,
+        decimal statutoryMinWage = 40_700m,
         decimal pfRatePercentage = 8.33m,
-        decimal overtimeMultiplier = 2.0m)
+        decimal overtimeMultiplier = 2.0m,
+        decimal eobiContributionBase = 37_000m)
     {
         var lines = new List<ComputedPayLine>();
         var comp = employee.CurrentCompensation;
@@ -248,8 +330,8 @@ public class PayrollCalculationEngine
         decimal incomeTax = CalculateMonthlyIncomeTax(grossPay, taxSlabs);
         if (incomeTax > 0) lines.Add(new ComputedPayLine("deduction", "tax", "Income Tax (FBR Withholding)", incomeTax));
 
-        // 2. EOBI
-        var (eobiEmp, eobiEmplr) = CalculateEobi(employee.IsEobiApplicable, statutoryMinWage);
+        // 2. EOBI (Decoupled from Provincial Minimum Wage)
+        var (eobiEmp, eobiEmplr) = CalculateEobi(employee.IsEobiApplicable, eobiContributionBase);
         if (eobiEmp > 0) lines.Add(new ComputedPayLine("deduction", "eobi", "EOBI (Employee Share 1%)", eobiEmp));
         if (eobiEmplr > 0) lines.Add(new ComputedPayLine("employer_contribution", "eobi_employer", "EOBI (Employer Share 5%)", eobiEmplr));
 

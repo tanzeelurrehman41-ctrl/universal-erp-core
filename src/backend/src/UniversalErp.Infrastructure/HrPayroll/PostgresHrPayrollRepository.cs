@@ -216,13 +216,15 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 tenant_id, company_id, employee_code, first_name, last_name, email, phone,
                 cnic_or_national_id, date_of_birth, gender, hire_date, status, employment_type,
                 department_id, designation_id, manager_id, user_id, bank_name, bank_account_title,
-                bank_account_number, bank_iban, tax_identification_number, is_eobi_applicable, is_pf_applicable
+                bank_account_number, bank_iban, tax_identification_number, is_eobi_applicable, is_pf_applicable,
+                work_jurisdiction, skill_category
             )
             VALUES (
                 @tenantId, @companyId, @code, @fn, @ln, @email, @phone,
                 @cnic, @dob, @gender, @hire, @status, @empType,
                 @deptId, @desigId, @mgrId, @userId, @bankName, @bankTitle,
-                @bankAcc, @iban, @ntn, @eobi, @pf
+                @bankAcc, @iban, @ntn, @eobi, @pf,
+                @workJur, @skillCat
             )
             RETURNING id, created_at;";
 
@@ -251,6 +253,8 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
         cmd.Parameters.AddWithValue("ntn", (object?)request.TaxIdentificationNumber?.Trim() ?? DBNull.Value);
         cmd.Parameters.AddWithValue("eobi", request.IsEobiApplicable);
         cmd.Parameters.AddWithValue("pf", request.IsPfApplicable);
+        cmd.Parameters.AddWithValue("workJur", string.IsNullOrWhiteSpace(request.WorkJurisdiction) ? "FEDERAL" : request.WorkJurisdiction.Trim().ToUpperInvariant());
+        cmd.Parameters.AddWithValue("skillCat", string.IsNullOrWhiteSpace(request.SkillCategory) ? "unskilled" : request.SkillCategory.Trim().ToLowerInvariant());
 
         Guid employeeId;
         DateTimeOffset createdAt;
@@ -347,7 +351,9 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             request.IsEobiApplicable,
             request.IsPfApplicable,
             comp,
-            createdAt
+            createdAt,
+            string.IsNullOrWhiteSpace(request.WorkJurisdiction) ? "FEDERAL" : request.WorkJurisdiction.Trim().ToUpperInvariant(),
+            string.IsNullOrWhiteSpace(request.SkillCategory) ? "unskilled" : request.SkillCategory.Trim().ToLowerInvariant()
         );
     }
 
@@ -371,7 +377,8 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                    c.id as comp_id, c.effective_date, c.base_salary_pkr, c.house_rent_allowance_pkr,
                    c.utility_allowance_pkr, c.conveyance_allowance_pkr, c.medical_allowance_pkr,
                    c.special_allowance_pkr, c.gross_salary_pkr, c.payment_frequency, c.currency_code,
-                   c.created_at as comp_created_at, e.created_at
+                   c.created_at as comp_created_at, e.created_at,
+                   COALESCE(e.work_jurisdiction, 'FEDERAL'), COALESCE(e.skill_category, 'unskilled')
             FROM hr.employees e
             LEFT JOIN hr.departments dept ON dept.id = e.department_id
             LEFT JOIN hr.designations desig ON desig.id = e.designation_id
@@ -450,7 +457,9 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 reader.GetBoolean(25),
                 reader.GetBoolean(26),
                 comp,
-                ToDateTimeOffset(reader.GetValue(39))
+                ToDateTimeOffset(reader.GetValue(39)),
+                reader.IsDBNull(40) ? "FEDERAL" : reader.GetString(40),
+                reader.IsDBNull(41) ? "unskilled" : reader.GetString(41)
             ));
         }
         return list;
@@ -475,7 +484,9 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 bank_iban = COALESCE(@iban, bank_iban),
                 tax_identification_number = COALESCE(@ntn, tax_identification_number),
                 is_eobi_applicable = COALESCE(@eobi, is_eobi_applicable),
-                is_pf_applicable = COALESCE(@pf, is_pf_applicable)
+                is_pf_applicable = COALESCE(@pf, is_pf_applicable),
+                work_jurisdiction = COALESCE(@workJur, work_jurisdiction),
+                skill_category = COALESCE(@skillCat, skill_category)
             WHERE tenant_id = @tenantId AND company_id = @companyId AND id = @empId;";
 
         await using var cmd = new NpgsqlCommand(sql, conn);
@@ -497,6 +508,8 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
         cmd.Parameters.AddWithValue("ntn", (object?)request.TaxIdentificationNumber?.Trim() ?? DBNull.Value);
         cmd.Parameters.AddWithValue("eobi", (object?)request.IsEobiApplicable ?? DBNull.Value);
         cmd.Parameters.AddWithValue("pf", (object?)request.IsPfApplicable ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("workJur", (object?)request.WorkJurisdiction?.Trim().ToUpperInvariant() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("skillCat", (object?)request.SkillCategory?.Trim().ToLowerInvariant() ?? DBNull.Value);
 
         await cmd.ExecuteNonQueryAsync(ct);
         var updated = await GetEmployeeByIdAsync(tenantId, companyId, employeeId, ct);
@@ -1684,7 +1697,10 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             .Where(c => c.EffectiveFrom <= endDate && (c.EffectiveTo == null || c.EffectiveTo >= startDate))
             .ToList();
 
-        var eobiConfig = activeStatConfigs.FirstOrDefault(c => c.ConfigKey.StartsWith("eobi_contribution_base") || c.ConfigKey.StartsWith("eobi_min_wage"));
+        // Decoupled EOBI statutory contribution base
+        var eobiConfig = activeStatConfigs.FirstOrDefault(c => c.ConfigKey == "eobi_contribution_base_2027")
+            ?? activeStatConfigs.FirstOrDefault(c => c.ConfigKey.StartsWith("eobi_contribution_base"))
+            ?? activeStatConfigs.FirstOrDefault(c => c.ConfigKey.StartsWith("eobi_min_wage"));
         decimal defaultEobiBase = eobiConfig?.ThresholdAmountPkr ?? 37_000m;
 
         var pfConfig = activeStatConfigs.FirstOrDefault(c => c.ConfigKey == "provident_fund_policy");
@@ -1709,10 +1725,17 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 loanDeduction = Math.Min(empLoan.MonthlyInstallmentPkr, empLoan.RemainingBalancePkr);
             }
 
-            string jurKey = $"min_wage_{(emp.WorkJurisdiction ?? "FEDERAL").ToLowerInvariant()}";
-            var wageConfig = activeStatConfigs.FirstOrDefault(c => c.ConfigKey == jurKey)
+            // Resolve jurisdiction and skill-specific statutory minimum wage
+            string jur = (emp.WorkJurisdiction ?? "FEDERAL").Trim().ToLowerInvariant();
+            string skill = (emp.SkillCategory ?? "unskilled").Trim().ToLowerInvariant();
+            string jurSkillKey = $"min_wage_{jur}_{skill}";
+
+            var wageConfig = activeStatConfigs.FirstOrDefault(c => c.ConfigKey == jurSkillKey)
+                ?? activeStatConfigs.FirstOrDefault(c => c.ConfigKey == $"min_wage_{jur}")
                 ?? activeStatConfigs.FirstOrDefault(c => c.ConfigKey == "min_wage_federal");
-            decimal empMinWage = wageConfig?.ThresholdAmountPkr ?? defaultEobiBase;
+
+            decimal empMinWage = wageConfig?.ThresholdAmountPkr
+                ?? PayrollCalculationEngine.GetJurisdictionalMinimumWage(emp.WorkJurisdiction, emp.SkillCategory, startDate);
 
             var computed = PayrollCalculationEngine.CalculateEmployeePayroll(
                 emp,
@@ -1726,7 +1749,8 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 otherDeductions: 0,
                 taxSlabs: effectiveTaxSlabs,
                 statutoryMinWage: empMinWage,
-                pfRatePercentage: companyPfRate
+                pfRatePercentage: companyPfRate,
+                eobiContributionBase: defaultEobiBase
             );
 
             totalPeriodGross += computed.GrossPay;

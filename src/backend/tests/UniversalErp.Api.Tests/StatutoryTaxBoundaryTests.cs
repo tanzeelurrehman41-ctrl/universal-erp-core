@@ -99,20 +99,109 @@ public class StatutoryTaxBoundaryTests
     }
 
     [Fact]
+    public void JurisdictionalMinimumWage_CurrentTY2027_ResolvesAccurateStatutoryBenchmarks()
+    {
+        // Federal civil employee minimum gross: PKR 40,700 (Finance Division OM)
+        Assert.Equal(40_700m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("FEDERAL"));
+
+        // ICT industrial/commercial unskilled: PKR 40,700 (Notification ADLW 8(20)-ICT/2024-934)
+        Assert.Equal(40_700m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("ICT"));
+
+        // Punjab: PKR 40,000 from 2025-07-01 (Retained legal rate under PMWB Gazette)
+        Assert.Equal(40_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("PUNJAB"));
+
+        // Sindh Skill Categories (Sindh Minimum Wages Board Gazette 2026)
+        Assert.Equal(43_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("SINDH", "unskilled"));
+        Assert.Equal(44_484m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("SINDH", "semi_skilled"));
+        Assert.Equal(53_350m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("SINDH", "skilled"));
+        Assert.Equal(55_626m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("SINDH", "highly_skilled"));
+
+        // KP: PKR 40,000 from 2025-07-01 (Retained legal rate under KPMWB Notification)
+        Assert.Equal(40_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("KPK"));
+        Assert.Equal(40_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("KP"));
+
+        // Balochistan: PKR 37,000 (Retained benchmark)
+        Assert.Equal(37_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("BALOCHISTAN"));
+    }
+
+    [Fact]
+    public void JurisdictionalMinimumWage_HistoricalIntervals_ResolvesPriorGazettedRates()
+    {
+        var date2024 = new DateOnly(2024, 7, 1);
+        var date2025 = new DateOnly(2025, 7, 1);
+
+        // 2024-07-01 to 2025-06-30 Interval:
+        // Federal/ICT PKR 37,000; Punjab PKR 37,000; Sindh PKR 37,000; KP PKR 36,000; Balochistan PKR 37,000
+        Assert.Equal(37_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("FEDERAL", "unskilled", date2024));
+        Assert.Equal(37_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("ICT", "unskilled", date2024));
+        Assert.Equal(37_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("PUNJAB", "unskilled", date2024));
+        Assert.Equal(37_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("SINDH", "unskilled", date2024));
+        Assert.Equal(36_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("KPK", "unskilled", date2024));
+        Assert.Equal(37_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("BALOCHISTAN", "unskilled", date2024));
+
+        // 2025-07-01 to 2026-06-30 Interval:
+        // Punjab PKR 40,000; Sindh PKR 40,000; KP PKR 40,000; Federal/ICT PKR 37,000; Balochistan PKR 37,000
+        Assert.Equal(40_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("PUNJAB", "unskilled", date2025));
+        Assert.Equal(40_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("SINDH", "unskilled", date2025));
+        Assert.Equal(40_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("KPK", "unskilled", date2025));
+        Assert.Equal(37_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("FEDERAL", "unskilled", date2025));
+        Assert.Equal(37_000m, PayrollCalculationEngine.GetJurisdictionalMinimumWage("BALOCHISTAN", "unskilled", date2025));
+    }
+
+    [Fact]
+    public void ProvincialSocialSecurity_DecoupledCeilings_SixPercentEmployerOnly()
+    {
+        // Punjab (PESSI) ceiling 40,000 -> 40,000 * 6% = 2,400 ER, 0 EE
+        decimal pessiCeiling = PayrollCalculationEngine.GetProvincialSocialSecurityCeiling("PUNJAB");
+        Assert.Equal(40_000m, pessiCeiling);
+        var (pEe, pEr) = PayrollCalculationEngine.CalculateSocialSecurity(true, 60_000m, pessiCeiling);
+        Assert.Equal(0m, pEe);
+        Assert.Equal(2400m, pEr);
+
+        // Sindh (SESSI) ceiling 43,000 -> 43,000 * 6% = 2,580 ER, 0 EE
+        decimal sessiCeiling = PayrollCalculationEngine.GetProvincialSocialSecurityCeiling("SINDH");
+        Assert.Equal(43_000m, sessiCeiling);
+        var (sEe, sEr) = PayrollCalculationEngine.CalculateSocialSecurity(true, 60_000m, sessiCeiling);
+        Assert.Equal(0m, sEe);
+        Assert.Equal(2580m, sEr);
+
+        // KP ESSI ceiling 40,000 -> 40,000 * 6% = 2,400 ER, 0 EE
+        decimal kpCeiling = PayrollCalculationEngine.GetProvincialSocialSecurityCeiling("KPK");
+        Assert.Equal(40_000m, kpCeiling);
+        var (kpEe, kpEr) = PayrollCalculationEngine.CalculateSocialSecurity(true, 60_000m, kpCeiling);
+        Assert.Equal(0m, kpEe);
+        Assert.Equal(2400m, kpEr);
+
+        // Balochistan (BESSI) ceiling 37,000 -> 37,000 * 6% = 2,220 ER, 0 EE
+        decimal bessiCeiling = PayrollCalculationEngine.GetProvincialSocialSecurityCeiling("BALOCHISTAN");
+        Assert.Equal(37_000m, bessiCeiling);
+        var (bEe, bEr) = PayrollCalculationEngine.CalculateSocialSecurity(true, 60_000m, bessiCeiling);
+        Assert.Equal(0m, bEe);
+        Assert.Equal(2220m, bEr);
+
+        // Federal / ICT ceiling 40,700 -> 40,700 * 6% = 2,442 ER, 0 EE
+        decimal fedCeiling = PayrollCalculationEngine.GetProvincialSocialSecurityCeiling("FEDERAL");
+        Assert.Equal(40_700m, fedCeiling);
+        var (fedEe, fedEr) = PayrollCalculationEngine.CalculateSocialSecurity(true, 60_000m, fedCeiling);
+        Assert.Equal(0m, fedEe);
+        Assert.Equal(2442m, fedEr);
+    }
+
+    [Fact]
     public void ProvincialSocialSecurity_SixPercentEmployerOnlyUpToWageCeiling()
     {
-        // Punjab gross 50,000 with 37,000 ceiling -> 37,000 * 6% = 2,220 ER, 0 EE
-        var (ee, er) = PayrollCalculationEngine.CalculateSocialSecurity(true, 50_000m, 37_000m);
+        // Gross 50,000 with 40,000 ceiling -> 40,000 * 6% = 2,400 ER, 0 EE
+        var (ee, er) = PayrollCalculationEngine.CalculateSocialSecurity(true, 50_000m, 40_000m);
         Assert.Equal(0m, ee);
-        Assert.Equal(2220m, er);
+        Assert.Equal(2400m, er);
 
-        // KPK gross 50,000 with 36,000 ceiling -> 36,000 * 6% = 2,160 ER, 0 EE
-        var (kpEe, kpEr) = PayrollCalculationEngine.CalculateSocialSecurity(true, 50_000m, 36_000m);
+        // KPK gross 50,000 with 40,000 ceiling -> 40,000 * 6% = 2,400 ER, 0 EE
+        var (kpEe, kpEr) = PayrollCalculationEngine.CalculateSocialSecurity(true, 50_000m, 40_000m);
         Assert.Equal(0m, kpEe);
-        Assert.Equal(2160m, kpEr);
+        Assert.Equal(2400m, kpEr);
 
         // Disabled social security
-        var (disEe, disEr) = PayrollCalculationEngine.CalculateSocialSecurity(false, 50_000m, 37_000m);
+        var (disEe, disEr) = PayrollCalculationEngine.CalculateSocialSecurity(false, 50_000m, 40_000m);
         Assert.Equal(0m, disEe);
         Assert.Equal(0m, disEr);
     }

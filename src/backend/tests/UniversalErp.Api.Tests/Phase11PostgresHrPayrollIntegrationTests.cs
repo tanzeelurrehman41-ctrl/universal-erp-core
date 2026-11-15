@@ -140,15 +140,15 @@ public class Phase11PostgresHrPayrollIntegrationTests
         Assert.Equal(2.0m, updatedAlloc.UsedDays);
         Assert.Equal(12.0m, updatedAlloc.RemainingDays);
 
-        // 6. Tax Slabs & Statutory Configuration
+        // 6. Tax Slabs & Statutory Configuration (Finance Act 2026 / FBR TY2027 Salaried Slabs)
         await service.CreateTaxSlabAsync(tenantId, companyId, new CreateTaxSlabRequest(
-            2026, new DateOnly(2026, 7, 1), 1, 0m, 600_000m, 0m, 0m, "Up to 600k 0%"
+            2027, new DateOnly(2026, 7, 1), 1, 0m, 600_000m, 0m, 0m, "Up to 600k 0%"
         ), ct);
         await service.CreateTaxSlabAsync(tenantId, companyId, new CreateTaxSlabRequest(
-            2026, new DateOnly(2026, 7, 1), 2, 600_000m, 1_200_000m, 0m, 5.0m, "600k to 1.2M 5%"
+            2027, new DateOnly(2026, 7, 1), 2, 600_000m, 1_200_000m, 0m, 1.0m, "600k to 1.2M 1%"
         ), ct);
         await service.CreateTaxSlabAsync(tenantId, companyId, new CreateTaxSlabRequest(
-            2026, new DateOnly(2026, 7, 1), 3, 1_200_000m, 2_200_000m, 30_000m, 15.0m, "1.2M to 2.2M 15%"
+            2027, new DateOnly(2026, 7, 1), 3, 1_200_000m, 2_200_000m, 6_000m, 11.0m, "1.2M to 2.2M 11%"
         ), ct);
 
         await service.SetStatutoryConfigAsync(tenantId, companyId, new SetStatutoryConfigRequest(
@@ -176,11 +176,11 @@ public class Phase11PostgresHrPayrollIntegrationTests
         Assert.Single(payslips);
         var slip = payslips[0];
         Assert.Equal(150_000m, slip.GrossPayPkr);
-        Assert.Equal(10_000m, slip.TaxDeductionPkr);
+        Assert.Equal(6000m, slip.TaxDeductionPkr);
         Assert.Equal(370m, slip.EobiEmployeePkr);
         Assert.Equal(8330m, slip.PfEmployeePkr);
         Assert.Equal(5000m, slip.LoanDeductionPkr);
-        Assert.Equal(126_300m, slip.NetPayPkr);
+        Assert.Equal(130_300m, slip.NetPayPkr);
         Assert.Equal(1850m, slip.EobiEmployerPkr);
         Assert.Equal(8330m, slip.PfEmployerPkr);
 

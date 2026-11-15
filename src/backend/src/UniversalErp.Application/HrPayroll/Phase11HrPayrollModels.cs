@@ -77,7 +77,8 @@ public record EmployeeDto(
     bool IsPfApplicable,
     CompensationStructureDto? CurrentCompensation,
     DateTimeOffset CreatedAt,
-    string WorkJurisdiction = "FEDERAL"
+    string WorkJurisdiction = "FEDERAL",
+    string SkillCategory = "unskilled"
 );
 
 public record CreateEmployeeRequest(
@@ -104,6 +105,7 @@ public record CreateEmployeeRequest(
     bool IsEobiApplicable = true,
     bool IsPfApplicable = true,
     string WorkJurisdiction = "FEDERAL",
+    string SkillCategory = "unskilled",
     decimal BaseSalaryPkr = 0,
     decimal HouseRentAllowancePkr = 0,
     decimal UtilityAllowancePkr = 0,
@@ -128,7 +130,8 @@ public record UpdateEmployeeRequest(
     string? TaxIdentificationNumber = null,
     bool? IsEobiApplicable = null,
     bool? IsPfApplicable = null,
-    string? WorkJurisdiction = null
+    string? WorkJurisdiction = null,
+    string? SkillCategory = null
 );
 
 public record CompensationStructureDto(

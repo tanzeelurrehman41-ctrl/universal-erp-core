@@ -87,31 +87,77 @@ test('calculateMonthlyIncomeTaxPkr divides annual tax evenly across 12 months', 
   assert.equal(calculateMonthlyIncomeTaxPkr(0), 0);
 });
 
-test('getJurisdictionalMinimumWage resolves provincial and historical rates', () => {
-  assert.equal(getJurisdictionalMinimumWage('FEDERAL'), 37000);
-  assert.equal(getJurisdictionalMinimumWage('PUNJAB'), 37000);
-  assert.equal(getJurisdictionalMinimumWage('SINDH'), 37000);
-  assert.equal(getJurisdictionalMinimumWage('BALOCHISTAN'), 37000);
-  assert.equal(getJurisdictionalMinimumWage('KPK'), 36000);
-  assert.equal(getJurisdictionalMinimumWage('KP'), 36000);
+test('getJurisdictionalMinimumWage resolves official TY2027 benchmarks and skill tiers', () => {
+  // Federal & ICT
+  assert.equal(getJurisdictionalMinimumWage('FEDERAL'), 40700);
+  assert.equal(getJurisdictionalMinimumWage('ICT'), 40700);
 
-  // Historical prior period check (< 2026-07-01)
-  assert.equal(getJurisdictionalMinimumWage('PUNJAB', '2025-06-30'), 32000);
-  assert.equal(getJurisdictionalMinimumWage('KPK', '2025-06-30'), 30000);
+  // Punjab (Legal PKR 40,000 retained)
+  assert.equal(getJurisdictionalMinimumWage('PUNJAB'), 40000);
+
+  // Sindh Skill Categories
+  assert.equal(getJurisdictionalMinimumWage('SINDH', 'unskilled'), 43000);
+  assert.equal(getJurisdictionalMinimumWage('SINDH', 'semi_skilled'), 44484);
+  assert.equal(getJurisdictionalMinimumWage('SINDH', 'skilled'), 53350);
+  assert.equal(getJurisdictionalMinimumWage('SINDH', 'highly_skilled'), 55626);
+
+  // KP (Legal PKR 40,000 retained)
+  assert.equal(getJurisdictionalMinimumWage('KPK'), 40000);
+  assert.equal(getJurisdictionalMinimumWage('KP'), 40000);
+
+  // Balochistan (Retained benchmark)
+  assert.equal(getJurisdictionalMinimumWage('BALOCHISTAN'), 37000);
 });
 
-test('calculateProvincialSocialSecurity computes 6% employer contribution up to wage ceiling', () => {
-  // Punjab gross 50,000 -> capped at 37,000 ceiling * 6% = 2,220 ER, 0 EE
+test('getJurisdictionalMinimumWage resolves historical intervals accurately', () => {
+  // 2024-07-01 Interval:
+  // Federal/ICT 37,000; Punjab 37,000; Sindh 37,000; KP 36,000; Balochistan 37,000
+  assert.equal(getJurisdictionalMinimumWage('FEDERAL', 'unskilled', '2024-07-01'), 37000);
+  assert.equal(getJurisdictionalMinimumWage('ICT', 'unskilled', '2024-07-01'), 37000);
+  assert.equal(getJurisdictionalMinimumWage('PUNJAB', 'unskilled', '2024-07-01'), 37000);
+  assert.equal(getJurisdictionalMinimumWage('SINDH', 'unskilled', '2024-07-01'), 37000);
+  assert.equal(getJurisdictionalMinimumWage('KPK', 'unskilled', '2024-07-01'), 36000);
+  assert.equal(getJurisdictionalMinimumWage('BALOCHISTAN', 'unskilled', '2024-07-01'), 37000);
+
+  // 2025-07-01 Interval:
+  // Punjab 40,000; Sindh 40,000; KP 40,000; Federal/ICT 37,000; Balochistan 37,000
+  assert.equal(getJurisdictionalMinimumWage('PUNJAB', 'unskilled', '2025-07-01'), 40000);
+  assert.equal(getJurisdictionalMinimumWage('SINDH', 'unskilled', '2025-07-01'), 40000);
+  assert.equal(getJurisdictionalMinimumWage('KPK', 'unskilled', '2025-07-01'), 40000);
+  assert.equal(getJurisdictionalMinimumWage('FEDERAL', 'unskilled', '2025-07-01'), 37000);
+  assert.equal(getJurisdictionalMinimumWage('BALOCHISTAN', 'unskilled', '2025-07-01'), 37000);
+});
+
+test('calculateProvincialSocialSecurity computes 6% employer contribution up to decoupled wage ceilings', () => {
+  // Punjab gross 50,000 -> capped at 40,000 ceiling * 6% = 2,400 ER, 0 EE
   const punjab = calculateProvincialSocialSecurity(true, 50000, 'PUNJAB');
   assert.equal(punjab.employee, 0);
-  assert.equal(punjab.employer, 2220);
-  assert.equal(punjab.total, 2220);
+  assert.equal(punjab.employer, 2400);
+  assert.equal(punjab.total, 2400);
 
-  // KP gross 50,000 -> capped at 36,000 ceiling * 6% = 2,160 ER, 0 EE
+  // Sindh gross 50,000 -> capped at 43,000 ceiling * 6% = 2,580 ER, 0 EE
+  const sindh = calculateProvincialSocialSecurity(true, 50000, 'SINDH');
+  assert.equal(sindh.employee, 0);
+  assert.equal(sindh.employer, 2580);
+  assert.equal(sindh.total, 2580);
+
+  // KP gross 50,000 -> capped at 40,000 ceiling * 6% = 2,400 ER, 0 EE
   const kp = calculateProvincialSocialSecurity(true, 50000, 'KPK');
   assert.equal(kp.employee, 0);
-  assert.equal(kp.employer, 2160);
-  assert.equal(kp.total, 2160);
+  assert.equal(kp.employer, 2400);
+  assert.equal(kp.total, 2400);
+
+  // Balochistan gross 50,000 -> capped at 37,000 ceiling * 6% = 2,220 ER, 0 EE
+  const bal = calculateProvincialSocialSecurity(true, 50000, 'BALOCHISTAN');
+  assert.equal(bal.employee, 0);
+  assert.equal(bal.employer, 2220);
+  assert.equal(bal.total, 2220);
+
+  // Federal / ICT gross 50,000 -> capped at 40,700 ceiling * 6% = 2,442 ER, 0 EE
+  const fed = calculateProvincialSocialSecurity(true, 50000, 'FEDERAL');
+  assert.equal(fed.employee, 0);
+  assert.equal(fed.employer, 2442);
+  assert.equal(fed.total, 2442);
 
   // Disabled social security
   const disabled = calculateProvincialSocialSecurity(false, 50000, 'PUNJAB');
