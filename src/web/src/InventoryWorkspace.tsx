@@ -13,6 +13,7 @@ import {
   type ReceiptQueueScope,
 } from "./offlineReceiptQueue";
 import { getTransferSourceStock, validateStockTransfer } from "./transferHelpers";
+import { calculateAtp, validateReservation, validateCountLine } from "./reservationHelpers";
 
 type Props = {
   enabled: boolean;
@@ -28,9 +29,160 @@ type Unit = { unitOfMeasureId: string; code: string; name: string; dimension: st
 type Variant = { variantId: string; productId: string; productCode: string; productName: string; sku: string; baseUnitOfMeasureId: string; baseUnitCode: string; trackingMode: string; isActive: boolean };
 type Warehouse = { warehouseId: string; code: string; name: string; isActive: boolean };
 type Bin = { binId: string; warehouseId: string; code: string; binType: string; isActive: boolean };
-type Balance = { variantId: string; warehouseId: string; binId: string; stockStatus: string; onHandQuantity: number; unitOfMeasureId: string };
+type Balance = { variantId: string; warehouseId: string; binId: string; stockStatus: string; onHandQuantity: number; unitOfMeasureId: string; valuedQuantity?: number };
 type Data = { products: Product[]; units: Unit[]; variants: Variant[]; warehouses: Warehouse[]; bins: Bin[]; balances: Balance[] };
 type ChangeFeedPage = { nextCursor: string; hasMore: boolean; changes: unknown[] };
+
+// ── Phase 5 Types ──────────────────────────────────────────────────────────────────
+type StockReservation = {
+  reservationId: string;
+  clientTransactionId: string;
+  variantId: string;
+  sku: string;
+  warehouseId: string;
+  warehouseCode: string;
+  binId: string | null;
+  binCode: string | null;
+  quantity: number;
+  fulfilledQty: number;
+  remainingReservedQty: number;
+  reservationStatus: string;
+  sourceDocumentType: string;
+  sourceDocumentId: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  releasedAt: string | null;
+  note: string | null;
+};
+
+type AtpItem = {
+  variantId: string;
+  sku: string;
+  warehouseId: string;
+  warehouseCode: string;
+  binId: string | null;
+  binCode: string | null;
+  physicalOnHand: number;
+  activeReservedQty: number;
+  availableToPromiseQty: number;
+  valuedQty: number;
+  sellableAtpQty: number;
+};
+
+type PickLine = {
+  pickLineId: string;
+  pickListId: string;
+  reservationId: string | null;
+  variantId: string;
+  sku: string;
+  binId: string;
+  binCode: string;
+  requestedQty: number;
+  pickedQty: number;
+  status: string;
+  note: string | null;
+};
+
+type PickList = {
+  pickListId: string;
+  pickListNo: string;
+  warehouseId: string;
+  warehouseCode: string;
+  sourceDocumentType: string;
+  sourceDocumentId: string | null;
+  status: string;
+  assignedTo: string | null;
+  note: string | null;
+  createdAt: string;
+  dispatchedAt: string | null;
+  lines: PickLine[];
+};
+
+type CountLine = {
+  lineId: string;
+  sessionId: string;
+  variantId: string;
+  sku: string;
+  binId: string;
+  binCode: string;
+  snapshotQty: number;
+  countedQty: number | null;
+  varianceQty: number | null;
+  unitCost: number;
+  varianceExtendedCost: number | null;
+  isReconciled: boolean;
+};
+
+type CountSession = {
+  sessionId: string;
+  countNumber: string;
+  warehouseId: string;
+  warehouseCode: string;
+  countType: string;
+  status: string;
+  initiatedBy: string;
+  approvedBy: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  approvedAt: string | null;
+  note: string | null;
+  lines: CountLine[];
+};
+
+type ReturnLine = {
+  lineId: string;
+  variantId: string;
+  sku: string;
+  binId: string;
+  binCode: string;
+  quantity: number;
+  unitCost: number;
+  extendedCost: number;
+  disposition: string;
+};
+
+type StockReturn = {
+  returnId: string;
+  returnNumber: string;
+  returnType: string;
+  sourceDocumentType: string;
+  sourceDocumentId: string | null;
+  warehouseId: string;
+  warehouseCode: string;
+  status: string;
+  createdAt: string;
+  processedAt: string | null;
+  note: string | null;
+  lines: ReturnLine[];
+};
+
+type ValuationLayer = {
+  layerId: string;
+  sku: string;
+  warehouseCode: string;
+  binCode: string;
+  sourceDocumentType: string;
+  receivedAt: string;
+  originalQty: number;
+  remainingQty: number;
+  unitCost: number;
+  extendedValuation: number;
+  currencyCode: string;
+  statusCode: string;
+};
+
+type ValuationReport = {
+  generatedAt: string;
+  totalActiveLayers: number;
+  totalPhysicalStock: number;
+  totalValuedStock: number;
+  totalUnvaluedStock: number;
+  totalValuationPkr: number;
+  generalLedger1200BalancePkr: number;
+  reconciliationVariancePkr: number;
+  isReconciled: boolean;
+  layers: ValuationLayer[];
+};
 
 const emptyData: Data = { products: [], units: [], variants: [], warehouses: [], bins: [], balances: [] };
 
@@ -95,6 +247,7 @@ async function readChangeCursors(
 }
 
 export default function InventoryWorkspace({ enabled, canQueue, persistentStorageGranted, workspace, queueScope, storageScope }: Props) {
+  const [activeTab, setActiveTab] = useState<"core" | "reservations" | "picking" | "counts" | "returns" | "valuation">("core");
   const [data, setData] = useState<Data>(emptyData);
   const [isUsingCachedData, setIsUsingCachedData] = useState(false);
   const [receiptOperations, setReceiptOperations] = useState<OfflineReceiptOperation[]>([]);
@@ -102,6 +255,8 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState("");
+
+  // Masters State
   const [productId, setProductId] = useState("");
   const [sku, setSku] = useState("");
   const [unitId, setUnitId] = useState("");
@@ -114,12 +269,15 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
   const [warehouseName, setWarehouseName] = useState("");
   const [binCode, setBinCode] = useState("");
   const [binType, setBinType] = useState("storage");
+
+  // Receipts State
   const [receiptVariantId, setReceiptVariantId] = useState("");
   const [receiptWarehouseId, setReceiptWarehouseId] = useState("");
   const [receiptBinId, setReceiptBinId] = useState("");
   const [receiptQuantity, setReceiptQuantity] = useState("");
   const [receiptNote, setReceiptNote] = useState("");
 
+  // Transfer State
   const [transferVariantId, setTransferVariantId] = useState("");
   const [transferSourceWarehouseId, setTransferSourceWarehouseId] = useState("");
   const [transferSourceBinId, setTransferSourceBinId] = useState("");
@@ -128,12 +286,53 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
   const [transferQuantity, setTransferQuantity] = useState("");
   const [transferNote, setTransferNote] = useState("");
 
+  // Adjustment State
   const [adjustVariantId, setAdjustVariantId] = useState("");
   const [adjustWarehouseId, setAdjustWarehouseId] = useState("");
   const [adjustBinId, setAdjustBinId] = useState("");
   const [adjustQuantityDelta, setAdjustQuantityDelta] = useState("");
   const [adjustReasonCode, setAdjustReasonCode] = useState("cycle_count");
   const [adjustNote, setAdjustNote] = useState("");
+
+  // ── Phase 5 State ─────────────────────────────────────────────────────────────────
+  // Reservations & ATP
+  const [atpList, setAtpList] = useState<AtpItem[]>([]);
+  const [reservations, setReservations] = useState<StockReservation[]>([]);
+  const [resVariantId, setResVariantId] = useState("");
+  const [resWarehouseId, setResWarehouseId] = useState("");
+  const [resBinId, setResBinId] = useState("");
+  const [resQuantity, setResQuantity] = useState("");
+  const [resSourceType, setResSourceType] = useState("sales_order");
+  const [resNote, setResNote] = useState("");
+
+  // Picking & Dispatch
+  const [pickLists, setPickLists] = useState<PickList[]>([]);
+  const [pickWarehouseId, setPickWarehouseId] = useState("");
+  const [pickVariantId, setPickVariantId] = useState("");
+  const [pickBinId, setPickBinId] = useState("");
+  const [pickReqQty, setPickReqQty] = useState("");
+  const [pickRecordedMap, setPickRecordedMap] = useState<Record<string, string>>({});
+
+  // Cycle Counts
+  const [countSessions, setCountSessions] = useState<CountSession[]>([]);
+  const [countWarehouseId, setCountWarehouseId] = useState("");
+  const [countType, setCountType] = useState("cycle");
+  const [countInputMap, setCountInputMap] = useState<Record<string, string>>({});
+
+  // Returns
+  const [stockReturns, setStockReturns] = useState<StockReturn[]>([]);
+  const [returnType, setReturnType] = useState("customer_return");
+  const [returnWarehouseId, setReturnWarehouseId] = useState("");
+  const [returnVariantId, setReturnVariantId] = useState("");
+  const [returnBinId, setReturnBinId] = useState("");
+  const [returnQty, setReturnQty] = useState("");
+  const [returnCost, setReturnCost] = useState("45");
+  const [returnDisposition, setReturnDisposition] = useState("available");
+
+  // Valuation
+  const [valuationReport, setValuationReport] = useState<ValuationReport | null>(null);
+
+  // Load Master & Core Data
   useEffect(() => {
     let mounted = true;
     if (!enabled) {
@@ -165,7 +364,7 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
         try {
           cursors = await loadInventoryChangeCursors(storageScope);
         } catch {
-          // The live snapshot can still be shown if local cursor storage is unavailable.
+          // Live snapshot fallback
         }
       }
 
@@ -190,21 +389,21 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
       }
       if (!mounted) return;
 
-      setProductId((current) => products.some((item) => item.productId === current && item.isActive && item.productType === "stock")
-        ? current
-        : products.find((item) => item.isActive && item.productType === "stock")?.productId ?? "");
-      setUnitId((current) => units.some((item) => item.unitOfMeasureId === current)
-        ? current
-        : units[0]?.unitOfMeasureId ?? "");
-      setWarehouseId((current) => warehouses.some((item) => item.warehouseId === current && item.isActive)
-        ? current
-        : warehouses.find((item) => item.isActive)?.warehouseId ?? "");
-      setReceiptVariantId((current) => variants.some((item) => item.variantId === current && item.isActive)
-        ? current
-        : variants.find((item) => item.isActive)?.variantId ?? "");
-      setReceiptWarehouseId((current) => warehouses.some((item) => item.warehouseId === current && item.isActive)
-        ? current
-        : warehouses.find((item) => item.isActive)?.warehouseId ?? "");
+      setProductId((c) => products.some((p) => p.productId === c && p.isActive && p.productType === "stock") ? c : products.find((p) => p.isActive && p.productType === "stock")?.productId ?? "");
+      setUnitId((c) => units.some((u) => u.unitOfMeasureId === c) ? c : units[0]?.unitOfMeasureId ?? "");
+      setWarehouseId((c) => warehouses.some((w) => w.warehouseId === c && w.isActive) ? c : warehouses.find((w) => w.isActive)?.warehouseId ?? "");
+      setReceiptVariantId((c) => variants.some((v) => v.variantId === c && v.isActive) ? c : variants.find((v) => v.isActive)?.variantId ?? "");
+      setReceiptWarehouseId((c) => warehouses.some((w) => w.warehouseId === c && w.isActive) ? c : warehouses.find((w) => w.isActive)?.warehouseId ?? "");
+
+      // Default phase 5 form selectors
+      setResVariantId((c) => c || variants[0]?.variantId || "");
+      setResWarehouseId((c) => c || warehouses[0]?.warehouseId || "");
+      setPickWarehouseId((c) => c || warehouses[0]?.warehouseId || "");
+      setPickVariantId((c) => c || variants[0]?.variantId || "");
+      setCountWarehouseId((c) => c || warehouses[0]?.warehouseId || "");
+      setReturnWarehouseId((c) => c || warehouses[0]?.warehouseId || "");
+      setReturnVariantId((c) => c || variants[0]?.variantId || "");
+
       setMessage(!snapshotSaved
         ? "Inventory loaded, but this browser could not save the encrypted snapshot and change cursors."
         : !feedCaughtUp
@@ -219,282 +418,83 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
           setIsUsingCachedData(true);
           setMessage("The live inventory request failed. Showing the last saved snapshot; balances may be stale.");
         } else {
-          setMessage(error instanceof Error ? error.message : "Inventory information could not be loaded.");
+          setData(emptyData);
+          setIsUsingCachedData(false);
+          setMessage(error instanceof Error ? error.message : "Inventory could not be loaded.");
         }
-      }).catch(() => {
-        if (mounted) setMessage(error instanceof Error ? error.message : "Inventory information could not be loaded.");
       });
     }).finally(() => {
       if (mounted) setIsLoading(false);
     });
+
     return () => { mounted = false; };
   }, [enabled, storageScope, workspace?.tenantId, workspace?.companyId, reloadVersion]);
 
+  // Load Phase 5 Specific Tab Data
   useEffect(() => {
     if (!enabled) return;
     let mounted = true;
-    let checking = false;
-    const checkChanges = async () => {
-      if (checking) return;
-      checking = true;
-      try {
-        const cursors = await loadInventoryChangeCursors(storageScope);
-        const [products, inventory] = await Promise.all([
-          readChangePage("products", cursors.products, workspace),
-          readChangePage("inventory", cursors.inventory, workspace),
-        ]);
-        if (mounted && (products.changes.length > 0 || products.hasMore || inventory.changes.length > 0 || inventory.hasMore)) {
-          setReloadVersion((value) => value + 1);
-        }
-      } catch {
-        // A failed feed read does not move the durable cursor; the next poll retries it.
-      } finally {
-        checking = false;
-      }
-    };
 
-    const intervalId = window.setInterval(() => void checkChanges(), 15000);
-    return () => {
-      mounted = false;
-      window.clearInterval(intervalId);
-    };
-  }, [enabled, storageScope, workspace?.tenantId, workspace?.companyId]);
-
-  useEffect(() => {
-    let mounted = true;
-    let syncing = false;
-    const refreshQueue = async (shouldSync: boolean) => {
-      if (syncing) return;
-      syncing = true;
-      try {
-        const before = await loadReceiptOperations(storageScope);
-        if (!mounted) return;
-        setReceiptOperations(before);
-        if (!shouldSync) return;
-        const after = await syncPendingReceiptOperations(storageScope, workspace);
-        if (!mounted) return;
-        setReceiptOperations(after);
-        const confirmedNewReceipt = after.some((operation) => operation.status === "accepted" &&
-          !before.some((previous) => previous.operationId === operation.operationId && previous.status === "accepted"));
-        if (confirmedNewReceipt) setReloadVersion((value) => value + 1);
-      } catch {
-        if (mounted) setMessage("The encrypted receipt journal could not be opened or synced. Saved operations remain on this device.");
-      } finally {
-        syncing = false;
-      }
-    };
-
-    void refreshQueue(enabled);
-    if (!enabled) return () => { mounted = false; };
-    const intervalId = window.setInterval(() => void refreshQueue(true), 15000);
-    const handleOnline = () => void refreshQueue(true);
-    window.addEventListener("online", handleOnline);
-    return () => {
-      mounted = false;
-      window.clearInterval(intervalId);
-      window.removeEventListener("online", handleOnline);
-    };
-  }, [enabled, storageScope, workspace?.tenantId, workspace?.companyId]);
-
-  useEffect(() => {
-    const availableBins = data.bins.filter((bin) => bin.warehouseId === receiptWarehouseId && bin.isActive && ["storage", "receiving"].includes(bin.binType));
-    if (!availableBins.some((bin) => bin.binId === receiptBinId)) setReceiptBinId(availableBins[0]?.binId ?? "");
-  }, [data.bins, receiptWarehouseId, receiptBinId]);
-
-  const submitMaster = async (event: FormEvent<HTMLFormElement>, path: string, body: object, successMessage: string) => {
-    event.preventDefault();
-    setIsSaving(true);
-    setMessage("");
-    try {
-      await readResponse<unknown>(path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }, workspace);
-      setMessage(successMessage);
-      setReloadVersion((value) => value + 1);
-      return true;
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "The change could not be saved.");
-      return false;
-    } finally {
-      setIsSaving(false);
+    if (activeTab === "reservations") {
+      Promise.all([
+        readResponse<AtpItem[]>("/api/v1/inventory/atp", undefined, workspace),
+        readResponse<StockReservation[]>("/api/v1/inventory/reservations", undefined, workspace),
+      ]).then(([atp, res]) => {
+        if (mounted) { setAtpList(atp); setReservations(res); }
+      }).catch((e: unknown) => {
+        if (mounted) setMessage(e instanceof Error ? e.message : "Failed to load ATP data.");
+      });
+    } else if (activeTab === "picking") {
+      readResponse<PickList[]>("/api/v1/inventory/pick-lists", undefined, workspace).then((lists) => {
+        if (mounted) setPickLists(lists);
+      }).catch((e: unknown) => {
+        if (mounted) setMessage(e instanceof Error ? e.message : "Failed to load pick lists.");
+      });
+    } else if (activeTab === "counts") {
+      readResponse<CountSession[]>("/api/v1/inventory/counts", undefined, workspace).then((counts) => {
+        if (mounted) setCountSessions(counts);
+      }).catch((e: unknown) => {
+        if (mounted) setMessage(e instanceof Error ? e.message : "Failed to load counts.");
+      });
+    } else if (activeTab === "returns") {
+      readResponse<StockReturn[]>("/api/v1/inventory/returns", undefined, workspace).then((rets) => {
+        if (mounted) setStockReturns(rets);
+      }).catch((e: unknown) => {
+        if (mounted) setMessage(e instanceof Error ? e.message : "Failed to load stock returns.");
+      });
+    } else if (activeTab === "valuation") {
+      readResponse<ValuationReport>("/api/v1/inventory/valuation-report", undefined, workspace).then((rep) => {
+        if (mounted) setValuationReport(rep);
+      }).catch((e: unknown) => {
+        if (mounted) setMessage(e instanceof Error ? e.message : "Failed to load valuation report.");
+      });
     }
-  };
 
-  const postReceipt = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const variant = data.variants.find((item) => item.variantId === receiptVariantId);
-    if (!variant || !receiptWarehouseId || !receiptBinId || Number(receiptQuantity) <= 0) {
-      setMessage("Choose a supported stock item, warehouse, bin, and positive quantity.");
-      return;
-    }
-    const body = {
-      variantId: receiptVariantId,
-      warehouseId: receiptWarehouseId,
-      binId: receiptBinId,
-      quantity: Number(receiptQuantity),
-      unitOfMeasureId: variant.baseUnitOfMeasureId,
-      sourceDocumentType: null,
-      sourceDocumentId: null,
-      note: receiptNote.trim() || null,
-    };
-    if (!canQueue) {
-      setMessage("Sign in and select a company before saving an offline receipt.");
-      return;
-    }
-    setIsSaving(true);
-    setMessage("");
-    try {
-      const queued = await enqueueReceiptOperation(body, queueScope ?? {}, storageScope);
-      setReceiptOperations(await loadReceiptOperations(storageScope));
-      setReceiptQuantity("");
-      setReceiptNote("");
-      setMessage(`Receipt saved securely on this device (item ${queued.deviceSequence}); waiting for server confirmation.`);
-      if (enabled) {
-        const operations = await syncPendingReceiptOperations(storageScope, workspace);
-        setReceiptOperations(operations);
-        const savedOperation = operations.find((operation) => operation.operationId === queued.operationId);
-        if (savedOperation?.status === "accepted") {
-          setMessage("Receipt confirmed by the server. Its stock movement and balance were saved together; the local journal copy is retained.");
-          setReloadVersion((value) => value + 1);
-        } else if (savedOperation?.status === "conflict") {
-          setMessage("The server found a conflict. Your receipt remains saved locally for review.");
-        } else if (savedOperation?.status === "rejected") {
-          setMessage(`The server rejected this receipt: ${savedOperation.message ?? "review the saved details"}. The local record is retained.`);
-        } else {
-          setMessage("Receipt is saved on this device and will retry with the same ID when the server is available.");
-        }
-      }
-    } catch (error) {
-      setMessage(error instanceof Error
-        ? `Could not save the receipt to encrypted browser storage, so it was not submitted. ${error.message}`
-        : "Could not save the receipt to encrypted browser storage, so it was not submitted.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
+    return () => { mounted = false; };
+  }, [enabled, activeTab, reloadVersion, workspace?.tenantId, workspace?.companyId]);
 
-  const copyReceiptToForm = (operation: OfflineReceiptOperation) => {
-    setReceiptVariantId(operation.payload.variantId);
-    setReceiptWarehouseId(operation.payload.warehouseId);
-    setReceiptBinId(operation.payload.binId);
-    setReceiptQuantity(operation.payload.quantity.toString());
-    setReceiptNote(operation.payload.note ?? "");
-    setMessage(`Receipt details copied to form from entry #${operation.deviceSequence}. Review and save.`);
-  };
+  // Maps for lookups
+  const unitsById = new Map(data.units.map((u) => [u.unitOfMeasureId, u.code]));
+  const variantsById = new Map(data.variants.map((v) => [v.variantId, v]));
+  const warehousesById = new Map(data.warehouses.map((w) => [w.warehouseId, w]));
+  const binsById = new Map(data.bins.map((b) => [b.binId, b]));
 
-  const retryUnresolvedReceipt = async (operationId: string) => {
-    try {
-      setIsSaving(true);
-      await requeueReceiptOperation(operationId, storageScope);
-      const updated = await syncPendingReceiptOperations(storageScope, workspace);
-      setReceiptOperations(updated);
-      setMessage("Synchronization retried for unresolved receipt.");
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Retry failed.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
+  // Selected ATP for reservation form
+  const selectedAtpItem = atpList.find((a) =>
+    a.variantId === resVariantId &&
+    a.warehouseId === resWarehouseId &&
+    (!resBinId || a.binId === resBinId));
+  const currentAtpQty = selectedAtpItem?.availableToPromiseQty ?? 0;
+  const resValidation = validateReservation({
+    variantId: resVariantId,
+    warehouseId: resWarehouseId,
+    quantity: resQuantity,
+    atp: currentAtpQty,
+    enabled,
+    isSaving,
+  });
 
-  const postTransfer = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const variant = data.variants.find((item) => item.variantId === transferVariantId);
-    if (!variant || !transferSourceWarehouseId || !transferSourceBinId ||
-        !transferDestWarehouseId || !transferDestBinId || Number(transferQuantity) <= 0) {
-      setMessage("Choose variant, source/destination warehouse and bins, and a positive quantity.");
-      return;
-    }
-    if (transferSourceBinId === transferDestBinId) {
-      setMessage("Source and destination bins must differ.");
-      return;
-    }
-    const availableStock = getTransferSourceStock(data.balances, transferVariantId, transferSourceWarehouseId, transferSourceBinId);
-    if (Number(transferQuantity) > availableStock) {
-      setMessage(`Cannot transfer: requested quantity (${transferQuantity}) exceeds available stock in source bin (${availableStock}).`);
-      return;
-    }
-    setIsSaving(true);
-    setMessage("");
-    try {
-      await readResponse<unknown>("/api/v1/inventory/transfers", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": crypto.randomUUID(),
-        },
-        body: JSON.stringify({
-          variantId: transferVariantId,
-          sourceWarehouseId: transferSourceWarehouseId,
-          sourceBinId: transferSourceBinId,
-          destinationWarehouseId: transferDestWarehouseId,
-          destinationBinId: transferDestBinId,
-          quantity: Number(transferQuantity),
-          unitOfMeasureId: variant.baseUnitOfMeasureId,
-          note: transferNote.trim() || null,
-        }),
-      }, workspace);
-      setTransferQuantity("");
-      setTransferNote("");
-      setMessage("Stock transfer posted successfully.");
-      setReloadVersion((v) => v + 1);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Transfer failed.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const postAdjustment = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const variant = data.variants.find((item) => item.variantId === adjustVariantId);
-    const delta = Number(adjustQuantityDelta);
-    if (!variant || !adjustWarehouseId || !adjustBinId || delta === 0) {
-      setMessage("Choose variant, warehouse, bin, and a non-zero adjustment delta.");
-      return;
-    }
-    setIsSaving(true);
-    setMessage("");
-    try {
-      await readResponse<unknown>("/api/v1/inventory/adjustments", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": crypto.randomUUID(),
-        },
-        body: JSON.stringify({
-          variantId: adjustVariantId,
-          warehouseId: adjustWarehouseId,
-          binId: adjustBinId,
-          quantityDelta: delta,
-          unitOfMeasureId: variant.baseUnitOfMeasureId,
-          reasonCode: adjustReasonCode,
-          note: adjustNote.trim() || null,
-        }),
-      }, workspace);
-      setAdjustQuantityDelta("");
-      setAdjustNote("");
-      setMessage(`Stock adjustment of ${delta > 0 ? "+" : ""}${delta} posted successfully.`);
-      setReloadVersion((v) => v + 1);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Adjustment failed.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const binsForSelectedWarehouse = data.bins.filter((bin) => bin.warehouseId === receiptWarehouseId && bin.isActive && ["storage", "receiving"].includes(bin.binType));
-  const binsForTransferSource = data.bins.filter((bin) => bin.warehouseId === transferSourceWarehouseId && bin.isActive);
-  const binsForTransferDest = data.bins.filter((bin) => bin.warehouseId === transferDestWarehouseId && bin.isActive);
-  const binsForAdjust = data.bins.filter((bin) => bin.warehouseId === adjustWarehouseId && bin.isActive);
-  const unitsById = new Map(data.units.map((unit) => [unit.unitOfMeasureId, unit.code]));
-  const variantsById = new Map(data.variants.map((variant) => [variant.variantId, variant]));
-  const warehousesById = new Map(data.warehouses.map((warehouse) => [warehouse.warehouseId, warehouse]));
-  const binsById = new Map(data.bins.map((bin) => [bin.binId, bin]));
-  const unresolvedReceipts = receiptOperations.filter((operation) => operation.status !== "accepted");
-  const confirmedReceipts = receiptOperations.filter((operation) => operation.status === "accepted");
-
+  // Transfer helpers
   const transferVariant = variantsById.get(transferVariantId);
   const transferValidation = validateStockTransfer({
     variantId: transferVariantId,
@@ -508,235 +508,974 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
     isSaving,
   });
 
+  const binsForTransferSource = data.bins.filter((b) => b.warehouseId === transferSourceWarehouseId && b.isActive);
+  const binsForTransferDest = data.bins.filter((b) => b.warehouseId === transferDestWarehouseId && b.isActive && b.binId !== transferSourceBinId);
+  const binsForAdjust = data.bins.filter((b) => b.warehouseId === adjustWarehouseId && b.isActive);
+  const binsForReceipt = data.bins.filter((b) => b.warehouseId === receiptWarehouseId && b.isActive);
+  const binsForRes = data.bins.filter((b) => b.warehouseId === resWarehouseId && b.isActive);
+  const binsForPick = data.bins.filter((b) => b.warehouseId === pickWarehouseId && b.isActive);
+  const binsForReturn = data.bins.filter((b) => b.warehouseId === returnWarehouseId && b.isActive);
+
+  // Handlers
+  async function submitMaster(event: FormEvent, path: string, payload: unknown, successText: string) {
+    event.preventDefault();
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }, workspace);
+      setReloadVersion((v) => v + 1);
+      setMessage(successText);
+      return true;
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Failed to save master record.");
+      return false;
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function postReceipt(event: FormEvent) {
+    event.preventDefault();
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse("/api/v1/inventory/receipts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          variantId: receiptVariantId,
+          warehouseId: receiptWarehouseId,
+          binId: receiptBinId,
+          quantity: Number(receiptQuantity),
+          unitOfMeasureId: variantsById.get(receiptVariantId)?.baseUnitOfMeasureId,
+          sourceDocumentType: "purchase_order",
+          sourceDocumentId: crypto.randomUUID(),
+          occurredAt: new Date().toISOString(),
+          note: receiptNote || null,
+        }),
+      }, workspace);
+      setReceiptQuantity("");
+      setReceiptNote("");
+      setReloadVersion((v) => v + 1);
+      setMessage("Stock receipt posted successfully.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Receipt failed.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function postTransfer(event: FormEvent) {
+    event.preventDefault();
+    if (!transferValidation.isValid) return;
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse("/api/v1/inventory/transfers", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          variantId: transferVariantId,
+          sourceWarehouseId: transferSourceWarehouseId,
+          sourceBinId: transferSourceBinId,
+          destinationWarehouseId: transferDestWarehouseId,
+          destinationBinId: transferDestBinId,
+          quantity: Number(transferQuantity),
+          unitOfMeasureId: transferVariant?.baseUnitOfMeasureId,
+          note: transferNote || null,
+        }),
+      }, workspace);
+      setTransferQuantity("");
+      setTransferNote("");
+      setReloadVersion((v) => v + 1);
+      setMessage("Stock transferred successfully.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Transfer failed.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function postAdjustment(event: FormEvent) {
+    event.preventDefault();
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse("/api/v1/inventory/adjustments", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          variantId: adjustVariantId,
+          warehouseId: adjustWarehouseId,
+          binId: adjustBinId,
+          quantityDelta: Number(adjustQuantityDelta),
+          unitOfMeasureId: variantsById.get(adjustVariantId)?.baseUnitOfMeasureId,
+          reasonCode: adjustReasonCode,
+          note: adjustNote || null,
+        }),
+      }, workspace);
+      setAdjustQuantityDelta("");
+      setAdjustNote("");
+      setReloadVersion((v) => v + 1);
+      setMessage("Stock adjustment posted successfully.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Adjustment failed.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function postReservation(event: FormEvent) {
+    event.preventDefault();
+    if (!resValidation.isValid) return;
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse("/api/v1/inventory/reservations", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          variantId: resVariantId,
+          warehouseId: resWarehouseId,
+          binId: resBinId || null,
+          quantity: Number(resQuantity),
+          sourceDocumentType: resSourceType,
+          sourceDocumentId: crypto.randomUUID(),
+          note: resNote || null,
+        }),
+      }, workspace);
+      setResQuantity("");
+      setResNote("");
+      setReloadVersion((v) => v + 1);
+      setMessage("Stock reservation created successfully.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Reservation failed.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function releaseReservation(reservationId: string) {
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse(`/api/v1/inventory/reservations/${reservationId}/release`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Manual release from workspace" }),
+      }, workspace);
+      setReloadVersion((v) => v + 1);
+      setMessage("Reservation released.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Release failed.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function postPickList(event: FormEvent) {
+    event.preventDefault();
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse("/api/v1/inventory/pick-lists", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          warehouseId: pickWarehouseId,
+          sourceDocumentType: "sales_order",
+          lines: [{
+            variantId: pickVariantId,
+            binId: pickBinId,
+            requestedQty: Number(pickReqQty),
+            note: "Standard order pick",
+          }],
+          note: "Generated pick list",
+        }),
+      }, workspace);
+      setPickReqQty("");
+      setReloadVersion((v) => v + 1);
+      setMessage("Pick list created.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Failed to create pick list.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function recordPickLines(pickListId: string, lines: PickLine[]) {
+    setIsSaving(true);
+    setMessage("");
+    try {
+      const payload = lines.map((l) => ({
+        pickLineId: l.pickLineId,
+        pickedQty: Number(pickRecordedMap[l.pickLineId] ?? l.requestedQty),
+        note: "Confirmed pick",
+      }));
+      await readResponse(`/api/v1/inventory/pick-lists/${pickListId}/pick`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }, workspace);
+      setReloadVersion((v) => v + 1);
+      setMessage("Picks recorded.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Failed to record picks.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function dispatchPickList(pickListId: string) {
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse(`/api/v1/inventory/pick-lists/${pickListId}/dispatch`, {
+        method: "POST",
+      }, workspace);
+      setReloadVersion((v) => v + 1);
+      setMessage("Pick list dispatched successfully (FIFO layers consumed).");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Dispatch failed.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function postCountSession(event: FormEvent) {
+    event.preventDefault();
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse("/api/v1/inventory/counts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          warehouseId: countWarehouseId,
+          countType,
+          note: `Physical count session (${countType})`,
+        }),
+      }, workspace);
+      setReloadVersion((v) => v + 1);
+      setMessage("Count session initiated.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Failed to initiate count.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function recordCountLines(sessionId: string, lines: CountLine[]) {
+    setIsSaving(true);
+    setMessage("");
+    try {
+      const payload = lines.map((l) => ({
+        variantId: l.variantId,
+        binId: l.binId,
+        countedQty: Number(countInputMap[l.lineId] ?? l.snapshotQty),
+        note: "Physical count entry",
+      }));
+      await readResponse(`/api/v1/inventory/counts/${sessionId}/lines`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }, workspace);
+      setReloadVersion((v) => v + 1);
+      setMessage("Counts recorded.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Failed to record counts.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function approveCountSession(sessionId: string) {
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse(`/api/v1/inventory/counts/${sessionId}/approve`, {
+        method: "POST",
+      }, workspace);
+      setReloadVersion((v) => v + 1);
+      setMessage("Count session approved & reconciled.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Approval failed.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function postReturn(event: FormEvent) {
+    event.preventDefault();
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse("/api/v1/inventory/returns", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          returnType,
+          sourceDocumentType: returnType === "customer_return" ? "sales_invoice" : "purchase_order",
+          warehouseId: returnWarehouseId,
+          lines: [{
+            variantId: returnVariantId,
+            binId: returnBinId,
+            quantity: Number(returnQty),
+            unitCost: Number(returnCost),
+            disposition: returnDisposition,
+            note: "Return request",
+          }],
+          note: "Workspace return",
+        }),
+      }, workspace);
+      setReturnQty("");
+      setReloadVersion((v) => v + 1);
+      setMessage("Stock return created.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Failed to create return.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function processReturn(returnId: string) {
+    setIsSaving(true);
+    setMessage("");
+    try {
+      await readResponse(`/api/v1/inventory/returns/${returnId}/process`, {
+        method: "POST",
+      }, workspace);
+      setReloadVersion((v) => v + 1);
+      setMessage("Return processed & inventory movements posted.");
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : "Process failed.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   return (
-    <section className="inventory-workspace" aria-labelledby="inventory-workflow-title">
-      <div className="catalog-heading">
+    <section className="inventory-workspace" aria-label="Inventory management workspace">
+      <header className="catalog-header">
         <div>
-          <p className="eyebrow">INVENTORY WORKFLOW</p>
-          <h2 id="inventory-workflow-title">Stock setup and receiving</h2>
+          <h2>Inventory Management</h2>
+          <p>Phase 5 complete inventory operations, reservations, picking/dispatch, cycle counts, returns, and valuation audit.</p>
         </div>
-        <button className="secondary-button" disabled={!enabled || isLoading} onClick={() => setReloadVersion((value) => value + 1)} type="button">
-          {isLoading ? "Loading…" : "Refresh"}
-        </button>
-      </div>
-      <p className="catalog-note">
-        Create stock variants and storage locations. Receipts are saved in an encrypted local journal first, then sent with the same ID until the server confirms them.
-      </p>
-      {!enabled && <p className="catalog-storage-note">API is offline or sign-in is unavailable. Setup changes are paused; receipts can be queued against the last saved inventory snapshot.</p>}
-      {isUsingCachedData && <p className="catalog-storage-note" role="status">Showing the last saved inventory snapshot. Stock balances may have changed while this device was offline.</p>}
-      {persistentStorageGranted === false && <p className="catalog-storage-note" role="status">This browser did not grant persistent storage. Keep the device available and reconnect so queued receipts reach the server.</p>}
+        {isLoading && <span className="catalog-tag">Refreshing…</span>}
+      </header>
+
       {message && <p className="catalog-message" role="status">{message}</p>}
 
-      <div className="inventory-grid">
-        <article className="inventory-card">
-          <h3>Units and stock variants</h3>
-          <form className="inventory-form" onSubmit={(event) => {
-            void submitMaster(event, "/api/v1/inventory/units-of-measure", {
+      {/* Navigation Pills */}
+      <nav className="inventory-nav-tabs" aria-label="Inventory Sections">
+        <button type="button" className={`inventory-nav-tab ${activeTab === "core" ? "inventory-nav-tab-active" : ""}`} onClick={() => setActiveTab("core")}>Masters & Transfers</button>
+        <button type="button" className={`inventory-nav-tab ${activeTab === "reservations" ? "inventory-nav-tab-active" : ""}`} onClick={() => setActiveTab("reservations")}>Reservations & ATP</button>
+        <button type="button" className={`inventory-nav-tab ${activeTab === "picking" ? "inventory-nav-tab-active" : ""}`} onClick={() => setActiveTab("picking")}>Pick Lists & Dispatch</button>
+        <button type="button" className={`inventory-nav-tab ${activeTab === "counts" ? "inventory-nav-tab-active" : ""}`} onClick={() => setActiveTab("counts")}>Cycle Counts</button>
+        <button type="button" className={`inventory-nav-tab ${activeTab === "returns" ? "inventory-nav-tab-active" : ""}`} onClick={() => setActiveTab("returns")}>Stock Returns</button>
+        <button type="button" className={`inventory-nav-tab ${activeTab === "valuation" ? "inventory-nav-tab-active" : ""}`} onClick={() => setActiveTab("valuation")}>Valuation & GL Audit</button>
+      </nav>
+
+      {/* ── TAB 1: CORE MASTERS & TRANSFERS ── */}
+      {activeTab === "core" && (
+        <div className="inventory-grid">
+          <article className="inventory-card">
+            <h3>Units and stock variants</h3>
+            <form className="inventory-form" onSubmit={(e) => void submitMaster(e, "/api/v1/inventory/units-of-measure", {
               code: unitCode, name: unitName, dimension: unitDimension, decimalPlaces: Number(unitDecimalPlaces),
-            }, "Unit of measure created.").then((saved) => {
-              if (saved) { setUnitCode(""); setUnitName(""); }
-            });
-          }}>
-            <label>Unit code<input maxLength={64} required value={unitCode} onChange={(event) => setUnitCode(event.target.value)} placeholder="e.g. KG" /></label>
-            <label>Unit name<input maxLength={100} required value={unitName} onChange={(event) => setUnitName(event.target.value)} placeholder="Kilogram" /></label>
-            <label>Dimension<select value={unitDimension} onChange={(event) => setUnitDimension(event.target.value)}><option value="count">Count</option><option value="length">Length</option><option value="mass">Mass</option><option value="volume">Volume</option><option value="time">Time</option><option value="area">Area</option><option value="other">Other</option></select></label>
-            <label>Decimal places<input max="9" min="0" required type="number" value={unitDecimalPlaces} onChange={(event) => setUnitDecimalPlaces(event.target.value)} /></label>
-            <button disabled={!enabled || isSaving} type="submit">Create unit</button>
-          </form>
-          <div className="inventory-form-divider">
-            <h4 className="inventory-subheading">New stock variant</h4>
-          <form className="inventory-form" onSubmit={(event) => void submitMaster(event, `/api/v1/products/${productId}/variants`, {
-            productId, sku, variantName: null, baseUnitOfMeasureId: unitId, trackingMode: "none", costingMethod: "fifo",
-          }, "Stock variant created.")}>
-            <label>Stock product<select required value={productId} onChange={(event) => setProductId(event.target.value)}>
-              <option value="">Choose a product</option>
-              {data.products.filter((product) => product.isActive && product.productType === "stock").map((product) => <option key={product.productId} value={product.productId}>{product.productCode} · {product.name}</option>)}
-            </select></label>
-            <label>SKU<input maxLength={64} required value={sku} onChange={(event) => setSku(event.target.value)} placeholder="e.g. ITEM-001-A" /></label>
-            <label>Base unit<select required value={unitId} onChange={(event) => setUnitId(event.target.value)}>
-              {data.units.map((unit) => <option key={unit.unitOfMeasureId} value={unit.unitOfMeasureId}>{unit.code} · {unit.name}</option>)}
-            </select></label>
-            <button disabled={!enabled || isSaving || !productId || !unitId} type="submit">Create variant</button>
-          </form>
-          </div>
-          {data.variants.length === 0 && <p className="inventory-empty">No variants created yet.</p>}
-          {data.variants.map((variant) => <div className="inventory-list-row" key={variant.variantId}><strong>{variant.sku}</strong><span>{variant.productName} · {variant.baseUnitCode}</span></div>)}
-        </article>
-
-        <article className="inventory-card">
-          <h3>Warehouse and bin</h3>
-          <form className="inventory-form" onSubmit={(event) => {
-            void submitMaster(event, "/api/v1/inventory/warehouses", { code: warehouseCode, name: warehouseName }, "Warehouse created.")
-              .then((saved) => { if (saved) { setWarehouseCode(""); setWarehouseName(""); } });
-          }}>
-            <label>Warehouse code<input maxLength={64} required value={warehouseCode} onChange={(event) => setWarehouseCode(event.target.value)} placeholder="e.g. MAIN" /></label>
-            <label>Warehouse name<input maxLength={160} required value={warehouseName} onChange={(event) => setWarehouseName(event.target.value)} placeholder="Main warehouse" /></label>
-            <button disabled={!enabled || isSaving} type="submit">Create warehouse</button>
-          </form>
-          <form className="inventory-form inventory-form-divider" onSubmit={(event) => {
-            void submitMaster(event, `/api/v1/inventory/warehouses/${warehouseId}/bins`, { code: binCode, binType }, "Storage bin created.")
-              .then((saved) => { if (saved) setBinCode(""); });
-          }}>
-            <label>Warehouse<select required value={warehouseId} onChange={(event) => setWarehouseId(event.target.value)}>
-              <option value="">Choose a warehouse</option>
-              {data.warehouses.filter((warehouse) => warehouse.isActive).map((warehouse) => <option key={warehouse.warehouseId} value={warehouse.warehouseId}>{warehouse.code} · {warehouse.name}</option>)}
-            </select></label>
-            <label>Bin code<input maxLength={64} required value={binCode} onChange={(event) => setBinCode(event.target.value)} placeholder="e.g. A-01" /></label>
-            <label>Bin use<select value={binType} onChange={(event) => setBinType(event.target.value)}><option value="storage">Storage</option><option value="receiving">Receiving</option></select></label>
-            <button disabled={!enabled || isSaving || !warehouseId} type="submit">Create bin</button>
-          </form>
-          {data.warehouses.length === 0 && <p className="inventory-empty">No warehouses created yet.</p>}
-          {data.warehouses.map((warehouse) => <div className="inventory-list-row" key={warehouse.warehouseId}><strong>{warehouse.code}</strong><span>{warehouse.name} · {data.bins.filter((bin) => bin.warehouseId === warehouse.warehouseId).length} bins</span></div>)}
-        </article>
-
-        <article className="inventory-card inventory-receipt-card">
-          <h3>Receive stock</h3>
-          <form className="inventory-form" onSubmit={postReceipt}>
-            <label>Variant<select required value={receiptVariantId} onChange={(event) => setReceiptVariantId(event.target.value)}>
-              <option value="">Choose a variant</option>
-              {data.variants.filter((variant) => variant.isActive && variant.trackingMode === "none").map((variant) => <option key={variant.variantId} value={variant.variantId}>{variant.sku} · {variant.productName}</option>)}
-            </select></label>
-            <label>Warehouse<select required value={receiptWarehouseId} onChange={(event) => setReceiptWarehouseId(event.target.value)}>
-              <option value="">Choose a warehouse</option>
-              {data.warehouses.filter((warehouse) => warehouse.isActive).map((warehouse) => <option key={warehouse.warehouseId} value={warehouse.warehouseId}>{warehouse.code} · {warehouse.name}</option>)}
-            </select></label>
-            <label>Receiving bin<select required value={receiptBinId} onChange={(event) => setReceiptBinId(event.target.value)}>
-              <option value="">Choose a bin</option>
-              {binsForSelectedWarehouse.map((bin) => <option key={bin.binId} value={bin.binId}>{bin.code} · {bin.binType}</option>)}
-            </select></label>
-            <label>Quantity<input inputMode="decimal" min="0.000000001" step="0.000000001" required type="number" value={receiptQuantity} onChange={(event) => setReceiptQuantity(event.target.value)} /></label>
-            <label>Note<input maxLength={2000} value={receiptNote} onChange={(event) => setReceiptNote(event.target.value)} placeholder="Optional" /></label>
-            <button disabled={!canQueue || isSaving || !receiptVariantId || !receiptWarehouseId || !receiptBinId} type="submit">{isSaving ? "Saving…" : enabled ? "Save and post receipt" : "Save receipt offline"}</button>
-          </form>
-          <p className="inventory-footnote">Only untracked stock variants are enabled for this first receipt workflow. Each confirmed receipt is an immutable movement; corrections need a separate adjustment workflow.</p>
-
-          {unresolvedReceipts.length > 0 && (
-            <div className="receipt-unresolved-card" aria-label="Unresolved offline receipts">
-              <h4>Unresolved offline receipts ({unresolvedReceipts.length})</h4>
-              <p className="inventory-footnote">These offline receipts could not be fully confirmed by the server. They are preserved securely in your encrypted device journal.</p>
-              {unresolvedReceipts.map((operation) => {
-                const variant = variantsById.get(operation.payload.variantId);
-                const warehouse = warehousesById.get(operation.payload.warehouseId);
-                const bin = binsById.get(operation.payload.binId);
-                return (
-                  <div className="receipt-unresolved-row" key={operation.operationId}>
-                    <div className="receipt-unresolved-header">
-                      <strong>#{operation.deviceSequence} · {operation.payload.quantity} {unitsById.get(operation.payload.unitOfMeasureId) ?? "units"}</strong>
-                      <span className={`receipt-status receipt-status-${operation.status}`}>
-                        {operation.status === "conflict" ? "Conflict (Needs Review)" : operation.status === "rejected" ? "Needs Correction" : operation.status === "syncing" ? "Syncing" : "Waiting to Sync"}
-                      </span>
-                    </div>
-                    <span className="receipt-unresolved-meta">
-                      {variant ? `${variant.sku} (${variant.productName})` : "Variant"} · {warehouse ? warehouse.name : "Warehouse"} · Bin {bin ? bin.code : operation.payload.binId}
-                    </span>
-                    {operation.payload.note && <span className="receipt-unresolved-meta">Note: {operation.payload.note}</span>}
-                    {operation.message && <small className="receipt-error-detail">{operation.message}</small>}
-                    <div className="receipt-unresolved-actions">
-                      <button type="button" className="receipt-action-btn" onClick={() => copyReceiptToForm(operation)}>
-                        Copy to form
-                      </button>
-                      {(operation.status === "conflict" || operation.status === "rejected") && (
-                        <button type="button" className="receipt-action-btn receipt-retry-btn" disabled={isSaving} onClick={() => retryUnresolvedReceipt(operation.operationId)}>
-                          Retry sync
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+            }, "Unit created.").then((s) => { if (s) { setUnitCode(""); setUnitName(""); } })}>
+              <label>Unit code<input maxLength={64} required value={unitCode} onChange={(e) => setUnitCode(e.target.value)} placeholder="e.g. EA" /></label>
+              <label>Unit name<input maxLength={100} required value={unitName} onChange={(e) => setUnitName(e.target.value)} placeholder="Each" /></label>
+              <label>Dimension<select value={unitDimension} onChange={(e) => setUnitDimension(e.target.value)}><option value="count">Count</option><option value="mass">Mass</option><option value="volume">Volume</option></select></label>
+              <label>Decimal places<input max="9" min="0" required type="number" value={unitDecimalPlaces} onChange={(e) => setUnitDecimalPlaces(e.target.value)} /></label>
+              <button disabled={!enabled || isSaving} type="submit">Create unit</button>
+            </form>
+            <div className="inventory-form-divider">
+              <h4 className="inventory-subheading">New stock variant</h4>
+              <form className="inventory-form" onSubmit={(e) => void submitMaster(e, `/api/v1/products/${productId}/variants`, {
+                productId, sku, variantName: null, baseUnitOfMeasureId: unitId, trackingMode: "none", costingMethod: "fifo",
+              }, "Stock variant created.")}>
+                <label>Stock product<select required value={productId} onChange={(e) => setProductId(e.target.value)}>
+                  <option value="">Choose a product</option>
+                  {data.products.filter((p) => p.isActive && p.productType === "stock").map((p) => <option key={p.productId} value={p.productId}>{p.productCode} · {p.name}</option>)}
+                </select></label>
+                <label>SKU<input maxLength={64} required value={sku} onChange={(e) => setSku(e.target.value)} placeholder="e.g. ITEM-001" /></label>
+                <label>Base unit<select required value={unitId} onChange={(e) => setUnitId(e.target.value)}>
+                  {data.units.map((u) => <option key={u.unitOfMeasureId} value={u.unitOfMeasureId}>{u.code} · {u.name}</option>)}
+                </select></label>
+                <button disabled={!enabled || isSaving || !productId || !unitId} type="submit">Create variant</button>
+              </form>
             </div>
-          )}
+          </article>
 
-          {confirmedReceipts.length > 0 && (
-            <div className="receipt-journal" aria-label="Receipt sync journal">
-              <h4>Confirmed receipts ({confirmedReceipts.length} total)</h4>
-              {confirmedReceipts.slice(-8).reverse().map((operation) => (
-                <div className="receipt-journal-row" key={operation.operationId}>
-                  <strong>#{operation.deviceSequence} · {operation.payload.quantity} {unitsById.get(operation.payload.unitOfMeasureId) ?? "units"}</strong>
-                  <span className="receipt-status receipt-status-accepted">Confirmed</span>
-                  {operation.serverReceipt && <small>Movement ID: {operation.serverReceipt.movementId}</small>}
-                </div>
-              ))}
-            </div>
-          )}
-        </article>
+          <article className="inventory-card">
+            <h3>Warehouse & bin setup</h3>
+            <form className="inventory-form" onSubmit={(e) => void submitMaster(e, "/api/v1/inventory/warehouses", { code: warehouseCode, name: warehouseName }, "Warehouse created.").then((s) => { if (s) { setWarehouseCode(""); setWarehouseName(""); } })}>
+              <label>Warehouse code<input maxLength={64} required value={warehouseCode} onChange={(e) => setWarehouseCode(e.target.value)} placeholder="e.g. MAIN-W1" /></label>
+              <label>Warehouse name<input maxLength={160} required value={warehouseName} onChange={(e) => setWarehouseName(e.target.value)} placeholder="Main Warehouse" /></label>
+              <button disabled={!enabled || isSaving} type="submit">Create warehouse</button>
+            </form>
+            <form className="inventory-form inventory-form-divider" onSubmit={(e) => void submitMaster(e, `/api/v1/inventory/warehouses/${warehouseId}/bins`, { code: binCode, binType }, "Storage bin created.").then((s) => { if (s) setBinCode(""); })}>
+              <label>Warehouse<select required value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
+                <option value="">Choose warehouse</option>
+                {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
+              </select></label>
+              <label>Bin code<input maxLength={64} required value={binCode} onChange={(e) => setBinCode(e.target.value)} placeholder="e.g. PICK-01" /></label>
+              <label>Bin use<select value={binType} onChange={(e) => setBinType(e.target.value)}><option value="storage">Storage</option><option value="receiving">Receiving</option></select></label>
+              <button disabled={!enabled || isSaving || !warehouseId} type="submit">Create bin</button>
+            </form>
+          </article>
 
-        <article className="inventory-card">
-          <h3>Transfer stock</h3>
-          <form className="inventory-form" onSubmit={postTransfer}>
-            <label>Variant<select required value={transferVariantId} onChange={(e) => setTransferVariantId(e.target.value)}>
-              <option value="">Choose a variant</option>
-              {data.variants.filter((v) => v.isActive).map((v) => <option key={v.variantId} value={v.variantId}>{v.sku} · {v.productName}</option>)}
-            </select></label>
+          <article className="inventory-card inventory-receipt-card">
+            <h3>Receive stock</h3>
+            <form className="inventory-form" onSubmit={postReceipt}>
+              <label>Variant<select required value={receiptVariantId} onChange={(e) => setReceiptVariantId(e.target.value)}>
+                <option value="">Choose variant</option>
+                {data.variants.filter((v) => v.isActive).map((v) => <option key={v.variantId} value={v.variantId}>{v.sku} · {v.productName}</option>)}
+              </select></label>
+              <label>Warehouse<select required value={receiptWarehouseId} onChange={(e) => { setReceiptWarehouseId(e.target.value); setReceiptBinId(""); }}>
+                <option value="">Choose warehouse</option>
+                {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
+              </select></label>
+              <label>Bin<select required value={receiptBinId} onChange={(e) => setReceiptBinId(e.target.value)}>
+                <option value="">Choose bin</option>
+                {binsForReceipt.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
+              </select></label>
+              <label>Quantity<input min="0.000000001" step="0.000000001" required type="number" value={receiptQuantity} onChange={(e) => setReceiptQuantity(e.target.value)} /></label>
+              <label>Note<input maxLength={2000} value={receiptNote} onChange={(e) => setReceiptNote(e.target.value)} placeholder="e.g. PO Receipt" /></label>
+              <button disabled={!enabled || isSaving || !receiptVariantId || !receiptWarehouseId || !receiptBinId || !receiptQuantity} type="submit">{isSaving ? "Posting…" : "Post receipt"}</button>
+            </form>
+          </article>
 
-            <label>Source warehouse<select required value={transferSourceWarehouseId} onChange={(e) => { setTransferSourceWarehouseId(e.target.value); setTransferSourceBinId(""); }}>
-              <option value="">Choose warehouse</option>
-              {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
-            </select></label>
-            <label>
-              Source bin
-              <select required value={transferSourceBinId} onChange={(e) => setTransferSourceBinId(e.target.value)}>
+          <article className="inventory-card">
+            <h3>Transfer stock</h3>
+            <form className="inventory-form" onSubmit={postTransfer}>
+              <label>Variant<select required value={transferVariantId} onChange={(e) => setTransferVariantId(e.target.value)}>
+                <option value="">Choose variant</option>
+                {data.variants.filter((v) => v.isActive).map((v) => <option key={v.variantId} value={v.variantId}>{v.sku} · {v.productName}</option>)}
+              </select></label>
+              <label>Source warehouse<select required value={transferSourceWarehouseId} onChange={(e) => { setTransferSourceWarehouseId(e.target.value); setTransferSourceBinId(""); }}>
+                <option value="">Choose warehouse</option>
+                {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
+              </select></label>
+              <label>Source bin<select required value={transferSourceBinId} onChange={(e) => setTransferSourceBinId(e.target.value)}>
                 <option value="">Choose bin</option>
                 {binsForTransferSource.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
-              </select>
-              {transferVariantId && transferSourceBinId && (
-                <span className={transferValidation.availableStock > 0 ? "transfer-stock-hint" : "transfer-stock-hint transfer-stock-hint-warn"}>
-                  Available: {transferValidation.availableStock} {unitsById.get(transferVariant?.baseUnitOfMeasureId ?? "") ?? "units"}
-                </span>
-              )}
-            </label>
+              </select></label>
+              <label>Destination warehouse<select required value={transferDestWarehouseId} onChange={(e) => { setTransferDestWarehouseId(e.target.value); setTransferDestBinId(""); }}>
+                <option value="">Choose warehouse</option>
+                {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
+              </select></label>
+              <label>Destination bin<select required value={transferDestBinId} onChange={(e) => setTransferDestBinId(e.target.value)}>
+                <option value="">Choose bin</option>
+                {binsForTransferDest.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
+              </select></label>
+              <label>Quantity<input min="0.000000001" step="0.000000001" required type="number" value={transferQuantity} onChange={(e) => setTransferQuantity(e.target.value)} /></label>
+              {transferValidation.validationError && <p className="transfer-stock-alert" role="alert">{transferValidation.validationError}</p>}
+              <button disabled={!transferValidation.isValid} type="submit">{isSaving ? "Transferring…" : "Post transfer"}</button>
+            </form>
+          </article>
 
-            <label>Destination warehouse<select required value={transferDestWarehouseId} onChange={(e) => { setTransferDestWarehouseId(e.target.value); setTransferDestBinId(""); }}>
-              <option value="">Choose warehouse</option>
-              {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
-            </select></label>
-            <label>Destination bin<select required value={transferDestBinId} onChange={(e) => setTransferDestBinId(e.target.value)}>
-              <option value="">Choose bin</option>
-              {binsForTransferDest.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
-            </select></label>
+          <article className="inventory-card">
+            <h3>Stock adjustment</h3>
+            <form className="inventory-form" onSubmit={postAdjustment}>
+              <label>Variant<select required value={adjustVariantId} onChange={(e) => setAdjustVariantId(e.target.value)}>
+                <option value="">Choose variant</option>
+                {data.variants.filter((v) => v.isActive).map((v) => <option key={v.variantId} value={v.variantId}>{v.sku} · {v.productName}</option>)}
+              </select></label>
+              <label>Warehouse<select required value={adjustWarehouseId} onChange={(e) => { setAdjustWarehouseId(e.target.value); setAdjustBinId(""); }}>
+                <option value="">Choose warehouse</option>
+                {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
+              </select></label>
+              <label>Bin<select required value={adjustBinId} onChange={(e) => setAdjustBinId(e.target.value)}>
+                <option value="">Choose bin</option>
+                {binsForAdjust.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
+              </select></label>
+              <label>Delta (+/-)<input step="0.000000001" required type="number" value={adjustQuantityDelta} onChange={(e) => setAdjustQuantityDelta(e.target.value)} placeholder="e.g. +5 or -2" /></label>
+              <label>Reason<select value={adjustReasonCode} onChange={(e) => setAdjustReasonCode(e.target.value)}>
+                <option value="cycle_count">Cycle count discrepancy</option>
+                <option value="damaged_goods">Damaged write-off</option>
+                <option value="correction">Data correction</option>
+              </select></label>
+              <button disabled={!enabled || isSaving || !adjustVariantId || !adjustWarehouseId || !adjustBinId || !adjustQuantityDelta} type="submit">Post adjustment</button>
+            </form>
+          </article>
+        </div>
+      )}
 
-            <label>Quantity<input min="0.000000001" step="0.000000001" required type="number" value={transferQuantity} onChange={(e) => setTransferQuantity(e.target.value)} /></label>
-            <label>Note<input maxLength={2000} value={transferNote} onChange={(e) => setTransferNote(e.target.value)} placeholder="e.g. Relocation" /></label>
-            {transferValidation.validationError && (
-              <p className="transfer-stock-alert" role="alert">{transferValidation.validationError}</p>
+      {/* ── TAB 2: RESERVATIONS & ATP ── */}
+      {activeTab === "reservations" && (
+        <div className="inventory-grid">
+          <article className="inventory-card inventory-receipt-card">
+            <h3>Reserve stock (Against confirmed sales demand)</h3>
+            <form className="inventory-form" onSubmit={postReservation}>
+              <label>Variant<select required value={resVariantId} onChange={(e) => setResVariantId(e.target.value)}>
+                <option value="">Choose variant</option>
+                {data.variants.filter((v) => v.isActive).map((v) => <option key={v.variantId} value={v.variantId}>{v.sku} · {v.productName}</option>)}
+              </select></label>
+              <label>Warehouse<select required value={resWarehouseId} onChange={(e) => { setResWarehouseId(e.target.value); setResBinId(""); }}>
+                <option value="">Choose warehouse</option>
+                {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
+              </select></label>
+              <label>Bin (Optional)<select value={resBinId} onChange={(e) => setResBinId(e.target.value)}>
+                <option value="">Any storage bin</option>
+                {binsForRes.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
+              </select></label>
+              <label>
+                Quantity
+                <input min="0.000000001" step="0.000000001" required type="number" value={resQuantity} onChange={(e) => setResQuantity(e.target.value)} />
+                <span className="transfer-stock-hint">Available-To-Promise (ATP): <strong>{currentAtpQty}</strong></span>
+              </label>
+              <label>Source Document<select value={resSourceType} onChange={(e) => setResSourceType(e.target.value)}>
+                <option value="sales_order">Sales Order</option>
+                <option value="pos_hold">POS Order Hold</option>
+              </select></label>
+              <label>Note<input maxLength={2000} value={resNote} onChange={(e) => setResNote(e.target.value)} placeholder="Customer/Order reference" /></label>
+              {resValidation.validationError && <p className="transfer-stock-alert" role="alert">{resValidation.validationError}</p>}
+              <button disabled={!resValidation.isValid} type="submit">{isSaving ? "Reserving…" : "Reserve stock"}</button>
+            </form>
+          </article>
+
+          <article className="inventory-card inventory-receipt-card">
+            <h3>Available-To-Promise (ATP) Summary</h3>
+            {atpList.length === 0 ? <p className="inventory-empty">No stock records found for ATP.</p> : (
+              <div className="table-responsive">
+                <table className="erp-table">
+                  <thead>
+                    <tr>
+                      <th>SKU</th>
+                      <th>Location</th>
+                      <th>Physical On-Hand</th>
+                      <th>Active Reserved</th>
+                      <th>Available-To-Promise</th>
+                      <th>Valued Stock</th>
+                      <th>Sellable ATP</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {atpList.map((item, idx) => (
+                      <tr key={idx}>
+                        <td><strong>{item.sku}</strong></td>
+                        <td>{item.warehouseCode} / {item.binCode ?? "All Bins"}</td>
+                        <td>{item.physicalOnHand}</td>
+                        <td>{item.activeReservedQty}</td>
+                        <td><span className="atp-pill">{item.availableToPromiseQty}</span></td>
+                        <td>{item.valuedQty}</td>
+                        <td><strong style={{ color: item.sellableAtpQty > 0 ? "#16a34a" : "#dc2626" }}>{item.sellableAtpQty}</strong></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
-            <button disabled={!transferValidation.isValid} type="submit">{isSaving ? "Transferring…" : "Post transfer"}</button>
-          </form>
-        </article>
+          </article>
 
-        <article className="inventory-card">
-          <h3>Stock adjustment</h3>
-          <form className="inventory-form" onSubmit={postAdjustment}>
-            <label>Variant<select required value={adjustVariantId} onChange={(e) => setAdjustVariantId(e.target.value)}>
-              <option value="">Choose a variant</option>
-              {data.variants.filter((v) => v.isActive).map((v) => <option key={v.variantId} value={v.variantId}>{v.sku} · {v.productName}</option>)}
-            </select></label>
+          <article className="inventory-card inventory-receipt-card">
+            <h3>Active Stock Reservations</h3>
+            {reservations.length === 0 ? <p className="inventory-empty">No active reservations.</p> : (
+              <div className="table-responsive">
+                <table className="erp-table">
+                  <thead>
+                    <tr>
+                      <th>SKU</th>
+                      <th>Warehouse</th>
+                      <th>Reserved Qty</th>
+                      <th>Fulfilled Qty</th>
+                      <th>Remaining</th>
+                      <th>Status</th>
+                      <th>Created</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reservations.map((r) => (
+                      <tr key={r.reservationId}>
+                        <td><strong>{r.sku}</strong></td>
+                        <td>{r.warehouseCode}</td>
+                        <td>{r.quantity}</td>
+                        <td>{r.fulfilledQty}</td>
+                        <td>{r.remainingReservedQty}</td>
+                        <td><span className="receipt-status receipt-status-accepted">{r.reservationStatus}</span></td>
+                        <td>{new Date(r.createdAt).toLocaleDateString()}</td>
+                        <td>
+                          {r.reservationStatus === "active" && (
+                            <button type="button" className="receipt-action-btn" onClick={() => void releaseReservation(r.reservationId)}>Release</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </article>
+        </div>
+      )}
 
-            <label>Warehouse<select required value={adjustWarehouseId} onChange={(e) => { setAdjustWarehouseId(e.target.value); setAdjustBinId(""); }}>
-              <option value="">Choose warehouse</option>
-              {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
-            </select></label>
-            <label>Bin<select required value={adjustBinId} onChange={(e) => setAdjustBinId(e.target.value)}>
-              <option value="">Choose bin</option>
-              {binsForAdjust.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
-            </select></label>
+      {/* ── TAB 3: PICKING & DISPATCH ── */}
+      {activeTab === "picking" && (
+        <div className="inventory-grid">
+          <article className="inventory-card inventory-receipt-card">
+            <h3>Generate Pick List</h3>
+            <form className="inventory-form" onSubmit={postPickList}>
+              <label>Warehouse<select required value={pickWarehouseId} onChange={(e) => { setPickWarehouseId(e.target.value); setPickBinId(""); }}>
+                <option value="">Choose warehouse</option>
+                {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
+              </select></label>
+              <label>Variant<select required value={pickVariantId} onChange={(e) => setPickVariantId(e.target.value)}>
+                <option value="">Choose variant</option>
+                {data.variants.filter((v) => v.isActive).map((v) => <option key={v.variantId} value={v.variantId}>{v.sku} · {v.productName}</option>)}
+              </select></label>
+              <label>Bin<select required value={pickBinId} onChange={(e) => setPickBinId(e.target.value)}>
+                <option value="">Choose bin</option>
+                {binsForPick.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
+              </select></label>
+              <label>Requested Qty<input min="0.000000001" step="0.000000001" required type="number" value={pickReqQty} onChange={(e) => setPickReqQty(e.target.value)} /></label>
+              <button disabled={!enabled || isSaving || !pickWarehouseId || !pickVariantId || !pickBinId || !pickReqQty} type="submit">Create Pick List</button>
+            </form>
+          </article>
 
-            <label>Adjustment delta (+/-)<input step="0.000000001" required type="number" value={adjustQuantityDelta} onChange={(e) => setAdjustQuantityDelta(e.target.value)} placeholder="e.g. +5 or -2" /></label>
-            <label>Reason<select value={adjustReasonCode} onChange={(e) => setAdjustReasonCode(e.target.value)}>
-              <option value="cycle_count">Cycle count discrepancy</option>
-              <option value="damaged_goods">Damaged goods write-off</option>
-              <option value="theft_or_loss">Theft / unexplainable loss</option>
-              <option value="correction">Data correction</option>
-            </select></label>
-            <label>Note<input maxLength={2000} value={adjustNote} onChange={(e) => setAdjustNote(e.target.value)} placeholder="Reason details" /></label>
-            <button disabled={!enabled || isSaving || !adjustVariantId || !adjustWarehouseId || !adjustBinId || !adjustQuantityDelta} type="submit">{isSaving ? "Adjusting…" : "Post adjustment"}</button>
-          </form>
-        </article>
-      </div>
+          <article className="inventory-card inventory-receipt-card">
+            <h3>Pick Lists & Dispatch</h3>
+            {pickLists.length === 0 ? <p className="inventory-empty">No pick lists created yet.</p> : (
+              <div className="table-responsive">
+                <table className="erp-table">
+                  <thead>
+                    <tr>
+                      <th>Pick List #</th>
+                      <th>Warehouse</th>
+                      <th>Lines</th>
+                      <th>Status</th>
+                      <th>Created</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pickLists.map((p) => (
+                      <tr key={p.pickListId}>
+                        <td><strong>{p.pickListNo}</strong></td>
+                        <td>{p.warehouseCode}</td>
+                        <td>
+                          {p.lines.map((l) => (
+                            <div key={l.pickLineId} style={{ marginBottom: 4 }}>
+                              {l.sku} in {l.binCode}: Req: {l.requestedQty}, Picked: {l.pickedQty} ({l.status})
+                              {p.status !== "dispatched" && (
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.000000001"
+                                  style={{ width: 80, marginLeft: 8 }}
+                                  placeholder={String(l.requestedQty)}
+                                  onChange={(e) => setPickRecordedMap((prev) => ({ ...prev, [l.pickLineId]: e.target.value }))}
+                                />
+                              )}
+                            </div>
+                          ))}
+                        </td>
+                        <td><span className={`receipt-status ${p.status === "dispatched" ? "receipt-status-accepted" : ""}`}>{p.status}</span></td>
+                        <td>{new Date(p.createdAt).toLocaleDateString()}</td>
+                        <td>
+                          {p.status !== "dispatched" && (
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <button type="button" className="receipt-action-btn" onClick={() => void recordPickLines(p.pickListId, p.lines)}>Save Picks</button>
+                              <button type="button" className="receipt-action-btn receipt-retry-btn" onClick={() => void dispatchPickList(p.pickListId)}>Dispatch (FIFO)</button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </article>
+        </div>
+      )}
 
+      {/* ── TAB 4: CYCLE COUNTS ── */}
+      {activeTab === "counts" && (
+        <div className="inventory-grid">
+          <article className="inventory-card inventory-receipt-card">
+            <h3>Initiate Stock Count Session</h3>
+            <form className="inventory-form" onSubmit={postCountSession}>
+              <label>Warehouse<select required value={countWarehouseId} onChange={(e) => setCountWarehouseId(e.target.value)}>
+                <option value="">Choose warehouse</option>
+                {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
+              </select></label>
+              <label>Count Type<select value={countType} onChange={(e) => setCountType(e.target.value)}>
+                <option value="cycle">Cycle Count</option>
+                <option value="full">Full Physical Count</option>
+                <option value="spot">Spot Check</option>
+              </select></label>
+              <button disabled={!enabled || isSaving || !countWarehouseId} type="submit">Start Count Session</button>
+            </form>
+          </article>
+
+          <article className="inventory-card inventory-receipt-card">
+            <h3>Physical Count Sessions</h3>
+            {countSessions.length === 0 ? <p className="inventory-empty">No count sessions active.</p> : (
+              <div className="table-responsive">
+                <table className="erp-table">
+                  <thead>
+                    <tr>
+                      <th>Count #</th>
+                      <th>Type</th>
+                      <th>Status</th>
+                      <th>Lines & Variances</th>
+                      <th>Created</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {countSessions.map((s) => (
+                      <tr key={s.sessionId}>
+                        <td><strong>{s.countNumber}</strong></td>
+                        <td>{s.countType}</td>
+                        <td><span className={`receipt-status ${s.status === "approved" ? "receipt-status-accepted" : ""}`}>{s.status}</span></td>
+                        <td>
+                          {s.lines.map((l) => {
+                            const countedStr = countInputMap[l.lineId] ?? (l.countedQty !== null ? String(l.countedQty) : "");
+                            const countedNum = Number(countedStr);
+                            const variance = countedStr !== "" && !Number.isNaN(countedNum) ? countedNum - l.snapshotQty : (l.varianceQty ?? 0);
+                            return (
+                              <div key={l.lineId} style={{ marginBottom: 4 }}>
+                                <strong>{l.sku}</strong> ({l.binCode}) · Snapshot: {l.snapshotQty} ·
+                                {s.status !== "approved" ? (
+                                  <>
+                                    {" "}Counted: <input
+                                      type="number"
+                                      min="0"
+                                      step="0.000000001"
+                                      style={{ width: 80, marginLeft: 4 }}
+                                      value={countedStr}
+                                      onChange={(e) => setCountInputMap((prev) => ({ ...prev, [l.lineId]: e.target.value }))}
+                                    />
+                                    {" "}Variance: <strong style={{ color: variance >= 0 ? "#16a34a" : "#dc2626" }}>{variance >= 0 ? `+${variance}` : variance}</strong>
+                                  </>
+                                ) : (
+                                  <> Counted: {l.countedQty} · Variance: {l.varianceQty}</>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </td>
+                        <td>{new Date(s.createdAt).toLocaleDateString()}</td>
+                        <td>
+                          {s.status !== "approved" && (
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <button type="button" className="receipt-action-btn" onClick={() => void recordCountLines(s.sessionId, s.lines)}>Save Counts</button>
+                              <button type="button" className="receipt-action-btn receipt-retry-btn" onClick={() => void approveCountSession(s.sessionId)}>Approve & Reconcile</button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </article>
+        </div>
+      )}
+
+      {/* ── TAB 5: RETURNS ── */}
+      {activeTab === "returns" && (
+        <div className="inventory-grid">
+          <article className="inventory-card inventory-receipt-card">
+            <h3>Initiate Stock Return (Customer or Supplier)</h3>
+            <form className="inventory-form" onSubmit={postReturn}>
+              <label>Return Type<select value={returnType} onChange={(e) => setReturnType(e.target.value)}>
+                <option value="customer_return">Customer Return (Receipt)</option>
+                <option value="supplier_return">Supplier Return (Issue)</option>
+              </select></label>
+              <label>Warehouse<select required value={returnWarehouseId} onChange={(e) => { setReturnWarehouseId(e.target.value); setReturnBinId(""); }}>
+                <option value="">Choose warehouse</option>
+                {data.warehouses.filter((w) => w.isActive).map((w) => <option key={w.warehouseId} value={w.warehouseId}>{w.code} · {w.name}</option>)}
+              </select></label>
+              <label>Variant<select required value={returnVariantId} onChange={(e) => setReturnVariantId(e.target.value)}>
+                <option value="">Choose variant</option>
+                {data.variants.filter((v) => v.isActive).map((v) => <option key={v.variantId} value={v.variantId}>{v.sku} · {v.productName}</option>)}
+              </select></label>
+              <label>Bin<select required value={returnBinId} onChange={(e) => setReturnBinId(e.target.value)}>
+                <option value="">Choose bin</option>
+                {binsForReturn.map((b) => <option key={b.binId} value={b.binId}>{b.code} · {b.binType}</option>)}
+              </select></label>
+              <label>Quantity<input min="0.000000001" step="0.000000001" required type="number" value={returnQty} onChange={(e) => setReturnQty(e.target.value)} /></label>
+              <label>Unit Cost (PKR)<input min="0" step="0.01" required type="number" value={returnCost} onChange={(e) => setReturnCost(e.target.value)} /></label>
+              <label>Disposition<select value={returnDisposition} onChange={(e) => setReturnDisposition(e.target.value)}>
+                <option value="available">Available (Restore to sellable)</option>
+                <option value="quarantine">Quarantine (Inspection hold)</option>
+                <option value="scrap">Scrap (Non-commercial write-off)</option>
+              </select></label>
+              <button disabled={!enabled || isSaving || !returnWarehouseId || !returnVariantId || !returnBinId || !returnQty} type="submit">Create Return</button>
+            </form>
+          </article>
+
+          <article className="inventory-card inventory-receipt-card">
+            <h3>Return Authorizations</h3>
+            {stockReturns.length === 0 ? <p className="inventory-empty">No return authorizations recorded.</p> : (
+              <div className="table-responsive">
+                <table className="erp-table">
+                  <thead>
+                    <tr>
+                      <th>Return #</th>
+                      <th>Type</th>
+                      <th>Warehouse</th>
+                      <th>Lines</th>
+                      <th>Status</th>
+                      <th>Created</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stockReturns.map((r) => (
+                      <tr key={r.returnId}>
+                        <td><strong>{r.returnNumber}</strong></td>
+                        <td>{r.returnType}</td>
+                        <td>{r.warehouseCode}</td>
+                        <td>
+                          {r.lines.map((l) => (
+                            <div key={l.lineId}>
+                              {l.sku} ({l.binCode}) · {l.quantity} @ PKR {l.unitCost} [{l.disposition}]
+                            </div>
+                          ))}
+                        </td>
+                        <td><span className={`receipt-status ${r.status === "processed" ? "receipt-status-accepted" : ""}`}>{r.status}</span></td>
+                        <td>{new Date(r.createdAt).toLocaleDateString()}</td>
+                        <td>
+                          {r.status !== "processed" && (
+                            <button type="button" className="receipt-action-btn receipt-retry-btn" onClick={() => void processReturn(r.returnId)}>Process & Post</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </article>
+        </div>
+      )}
+
+      {/* ── TAB 6: VALUATION & GL AUDIT ── */}
+      {activeTab === "valuation" && (
+        <div className="inventory-grid">
+          {valuationReport ? (
+            <>
+              <article className="inventory-card inventory-receipt-card">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <h3>Real-Time Inventory Valuation & GL Reconciliation Audit</h3>
+                  <span className={valuationReport.isReconciled ? "badge-reconciled" : "badge-unreconciled"}>
+                    {valuationReport.isReconciled ? "RECONCILED (ZERO VARIANCE)" : "VARIANCE DETECTED"}
+                  </span>
+                </div>
+                <div className="atp-grid">
+                  <div className="atp-card">
+                    <h4>Active FIFO Layers</h4>
+                    <div className="atp-metric-val">{valuationReport.totalActiveLayers} layers</div>
+                  </div>
+                  <div className="atp-card">
+                    <h4>Physical Stock</h4>
+                    <div className="atp-metric-val">{valuationReport.totalPhysicalStock} EA</div>
+                  </div>
+                  <div className="atp-card">
+                    <h4>Valued Stock</h4>
+                    <div className="atp-metric-val">{valuationReport.totalValuedStock} EA</div>
+                  </div>
+                  <div className="atp-card">
+                    <h4>Unvalued Stock</h4>
+                    <div className="atp-metric-val" style={{ color: valuationReport.totalUnvaluedStock > 0 ? "#dc2626" : "#16a34a" }}>
+                      {valuationReport.totalUnvaluedStock} EA
+                    </div>
+                  </div>
+                  <div className="atp-card">
+                    <h4>FIFO Valuation</h4>
+                    <div className="atp-metric-val">PKR {valuationReport.totalValuationPkr.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                  </div>
+                  <div className="atp-card">
+                    <h4>GL Account 1200</h4>
+                    <div className="atp-metric-val">PKR {valuationReport.generalLedger1200BalancePkr.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                  </div>
+                  <div className="atp-card">
+                    <h4>Reconciliation Variance</h4>
+                    <div className="atp-metric-val" style={{ color: valuationReport.reconciliationVariancePkr === 0 ? "#16a34a" : "#dc2626" }}>
+                      PKR {valuationReport.reconciliationVariancePkr.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    </div>
+                  </div>
+                </div>
+              </article>
+
+              <article className="inventory-card inventory-receipt-card">
+                <h3>Active FIFO Valuation Layers</h3>
+                <div className="table-responsive">
+                  <table className="erp-table">
+                    <thead>
+                      <tr>
+                        <th>Layer ID</th>
+                        <th>SKU</th>
+                        <th>Location</th>
+                        <th>Source</th>
+                        <th>Received At</th>
+                        <th>Original Qty</th>
+                        <th>Remaining Qty</th>
+                        <th>Unit Cost</th>
+                        <th>Extended Valuation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {valuationReport.layers.map((l) => (
+                        <tr key={l.layerId}>
+                          <td><code>{l.layerId.substring(0, 8)}…</code></td>
+                          <td><strong>{l.sku}</strong></td>
+                          <td>{l.warehouseCode} / {l.binCode}</td>
+                          <td>{l.sourceDocumentType}</td>
+                          <td>{new Date(l.receivedAt).toLocaleString()}</td>
+                          <td>{l.originalQty}</td>
+                          <td><strong>{l.remainingQty}</strong></td>
+                          <td>PKR {l.unitCost.toFixed(2)}</td>
+                          <td><strong>PKR {l.extendedValuation.toFixed(2)}</strong></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </article>
+            </>
+          ) : (
+            <p className="inventory-empty">Valuation report loading or unavailable.</p>
+          )}
+        </div>
+      )}
+
+      {/* On-hand stock summary always visible at bottom */}
       <article className="inventory-card availability-card">
-        <h3>On-hand stock</h3>
-        {data.balances.length === 0 ? <p className="inventory-empty">No stock receipts have been posted yet.</p> : (
+        <h3>On-hand stock overview</h3>
+        {data.balances.length === 0 ? <p className="inventory-empty">No stock balances posted yet.</p> : (
           <div className="availability-list">
             {data.balances.map((balance, index) => {
               const variant = variantsById.get(balance.variantId);

@@ -8,7 +8,7 @@ using UniversalErp.Infrastructure.Sync;
 
 namespace UniversalErp.Infrastructure.Inventory;
 
-public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSource)
+public sealed partial class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSource)
     : IInventoryWorkflowRepository
 {
     public async Task<IReadOnlyList<ProductCategorySummary>> ListCategoriesAsync(
