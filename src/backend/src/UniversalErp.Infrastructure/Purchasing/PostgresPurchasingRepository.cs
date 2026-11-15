@@ -11,7 +11,7 @@ namespace UniversalErp.Infrastructure.Purchasing;
 ///   SET LOCAL app.tenant_id = '…'; SET LOCAL app.company_id = '…';
 /// No tenant/company parameter is passed explicitly.
 /// </summary>
-public sealed class PostgresPurchasingRepository(
+public sealed partial class PostgresPurchasingRepository(
     NpgsqlDataSource dataSource,
     ITenantContextAccessor tenantContext) : IPurchasingRepository
 {
