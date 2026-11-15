@@ -8,7 +8,7 @@ using UniversalErp.Infrastructure.Sync;
 
 namespace UniversalErp.Infrastructure.Sales;
 
-public sealed class PostgresSalesRepository(
+public sealed partial class PostgresSalesRepository(
     NpgsqlDataSource dataSource,
     ITenantContextAccessor tenantContext) : ISalesRepository
 {
@@ -358,7 +358,7 @@ public sealed class PostgresSalesRepository(
         cmd.CommandText = """
             UPDATE erp_sales.sales_order
             SET order_status = 'confirmed', updated_at = now()
-            WHERE tenant_id = @tid AND company_id = @cid AND order_id = @id AND order_status = 'draft';
+            WHERE tenant_id = @tid AND company_id = @cid AND order_id = @id AND order_status IN ('draft', 'approved');
             """;
         cmd.Parameters.AddWithValue("tid", Ctx.TenantId);
         cmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
@@ -381,7 +381,8 @@ public sealed class PostgresSalesRepository(
             SELECT i.invoice_id, i.invoice_number, i.client_transaction_id, i.order_id,
                    i.customer_id, c.name, i.payment_method, i.invoice_status,
                    i.invoice_date, i.subtotal_amount, i.tax_amount, i.discount_amount,
-                   i.total_amount, i.paid_amount, i.note, i.posted_at
+                   i.total_amount, i.paid_amount, i.note, i.posted_at,
+                   i.dispatch_id, i.due_date, i.gl_journal_id
             FROM erp_sales.sales_invoice i
             JOIN erp_sales.customer c
               ON c.tenant_id = i.tenant_id AND c.company_id = i.company_id AND c.customer_id = i.customer_id
@@ -410,7 +411,10 @@ public sealed class PostgresSalesRepository(
                     reader.GetDecimal(13),
                     reader.IsDBNull(14) ? null : reader.GetString(14),
                     reader.GetFieldValue<DateTimeOffset>(15),
-                    []), reader.GetGuid(0)));
+                    [],
+                    reader.IsDBNull(16) ? null : reader.GetGuid(16),
+                    reader.IsDBNull(17) ? null : DateOnly.FromDateTime(reader.GetDateTime(17)),
+                    reader.IsDBNull(18) ? null : reader.GetGuid(18)), reader.GetGuid(0)));
             }
             await reader.CloseAsync();
         }

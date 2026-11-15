@@ -331,6 +331,13 @@ else
             "sales.customer.view", "sales.customer.create",
             "sales.order.view", "sales.order.create", "sales.order.confirm",
             "sales.invoice.view", "sales.invoice.post",
+            "sales.quotation.create", "sales.quotation.approve",
+            "sales.order.approve",
+            "sales.dispatch.create", "sales.dispatch.confirm",
+            "sales.receipt.create", "sales.receipt.allocate",
+            "sales.return.create", "sales.return.approve",
+            "sales.creditnote.create", "sales.creditnote.approve",
+            "sales.receivable.view",
         })
         {
             options.AddPolicy(permissionCode, policy => policy
