@@ -7,6 +7,7 @@ import TenancyWorkspace from "./TenancyWorkspace";
 import FinanceWorkspace from "./FinanceWorkspace";
 import ManufacturingWorkspace from "./ManufacturingWorkspace";
 import FoundationWorkspace from "./FoundationWorkspace";
+import HRWorkspace from "./HRWorkspace";
 import {
   apiFetch,
   apiUrl,
@@ -102,7 +103,18 @@ export default function App() {
   });
   const activeWorkspace = workspaces.find((workspace) => workspaceKey(workspace) === activeWorkspaceKey) ?? null;
   const queueOwnerKey = ownerKeyForUser(authUser);
-  const [activeNavTab, setActiveNavTab] = useState<"inventory" | "warehouse" | "purchasing" | "sales" | "finance" | "manufacturing" | "foundation" | "saas" | "all">("inventory");
+  const [activeNavTab, setActiveNavTab] = useState<
+    | "inventory"
+    | "warehouse"
+    | "purchasing"
+    | "sales"
+    | "finance"
+    | "manufacturing"
+    | "foundation"
+    | "hr"
+    | "saas"
+    | "all"
+  >("inventory");
 
   useEffect(() => {
     if (!oidcConfigured) return;
@@ -748,6 +760,23 @@ export default function App() {
         </button>
         <button
           type="button"
+          onClick={() => setActiveNavTab("hr")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "hr" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "hr" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "hr" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          👥 HR & Payroll
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveNavTab("saas")}
           style={{
             padding: "8px 14px",
@@ -948,6 +977,13 @@ export default function App() {
 
       {(activeNavTab === "foundation" || activeNavTab === "all") && (
         <FoundationWorkspace
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
+      )}
+
+      {(activeNavTab === "hr" || activeNavTab === "all") && (
+        <HRWorkspace
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />

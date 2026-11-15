@@ -15,6 +15,7 @@ using UniversalErp.Api.Inventory;
 using UniversalErp.Api.Finance;
 using UniversalErp.Api.Manufacturing;
 using UniversalErp.Api.Warehouse;
+using UniversalErp.Api.HrPayroll;
 using UniversalErp.Api.Purchasing;
 using UniversalErp.Api.Sales;
 using UniversalErp.Api.Security;
@@ -26,6 +27,7 @@ using UniversalErp.Application.Foundation;
 using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Manufacturing;
 using UniversalErp.Application.Warehouse;
+using UniversalErp.Application.HrPayroll;
 using UniversalErp.Application.Purchasing;
 using UniversalErp.Application.Sales;
 using UniversalErp.Application.Sync;
@@ -35,6 +37,7 @@ using UniversalErp.Infrastructure.Foundation;
 using UniversalErp.Infrastructure.Inventory;
 using UniversalErp.Infrastructure.Manufacturing;
 using UniversalErp.Infrastructure.Warehouse;
+using UniversalErp.Infrastructure.HrPayroll;
 using UniversalErp.Infrastructure.Purchasing;
 using UniversalErp.Infrastructure.Sales;
 using UniversalErp.Infrastructure.Sync;
@@ -103,6 +106,8 @@ builder.Services.AddScoped<IManufacturingRepository, PostgresManufacturingReposi
 builder.Services.AddScoped<ManufacturingService>();
 builder.Services.AddScoped<IWarehouseRepository, PostgresWarehouseRepository>();
 builder.Services.AddScoped<WarehouseService>();
+builder.Services.AddScoped<IHrPayrollRepository, PostgresHrPayrollRepository>();
+builder.Services.AddScoped<HrPayrollService>();
 builder.Services.AddScoped<ISupplyChainOutboxRepository, PostgresSupplyChainOutboxRepository>();
 builder.Services.AddScoped<SupplyChainOutboxService>();
 builder.Services.AddScoped<ISalesRepository, PostgresSalesRepository>();
@@ -368,6 +373,13 @@ else
             "warehouse.replenishment.manage", "warehouse.replenishment.execute",
             "warehouse.transfer.execute", "warehouse.quarantine.manage",
             "warehouse.reports.view",
+            "hr.employee.read", "hr.employee.manage",
+            "hr.department.manage",
+            "hr.attendance.read", "hr.attendance.manage",
+            "hr.leave.read", "hr.leave.apply", "hr.leave.approve",
+            "payroll.period.manage", "payroll.process", "payroll.approve",
+            "payroll.post_gl", "payroll.reverse", "payroll.salary.view",
+            "payroll.loan.manage", "hr.reports.view",
         })
         {
             options.AddPolicy(permissionCode, policy => policy
@@ -401,6 +413,7 @@ var moduleCatalog = new[]
     new { id = "finance", name = "Finance", status = "Active", description = "Chart of Accounts, General Ledger, Treasury, Bank Reconciliation, Fixed Assets, Tax, and Period Close." },
     new { id = "manufacturing", name = "Manufacturing", status = "Active", description = "Bill of Materials, Multi-Level Components, Routings, Work Centers, Work Orders, FIFO Material Issues, WIP Accounting, and Quality Control." },
     new { id = "warehouse", name = "Warehouse & Logistics", status = "Active", description = "Zones, aisles, racks, shelf bins, GS1 barcode scanning, directed putaway, wave picking, cartonization packing, replenishment, transfers, and quarantine." },
+    new { id = "hr_payroll", name = "HR, Attendance & Payroll", status = "Active", description = "Employee directory, hierarchy, shifts, attendance, leaves, statutory tax slabs, EOBI, PF, loans, payslips, and GL integration." },
     new { id = "security", name = "Security and access", status = "In progress", description = "OIDC bearer validation and live membership/permission checks; user provisioning and client sign-in remain." },
     new { id = "offline", name = "Offline sync", status = "In progress", description = "Encrypted local journals, authenticated device grants, a durable receipt operation inbox, atomic snapshot cursors, and a paged change feed; event-level merge and product inbox processing remain." },
     new { id = "reporting", name = "Reporting", status = "Architecture only", description = "Approved datasets, dashboards, exports, and scheduled reports." },
@@ -568,6 +581,7 @@ app.MapTenantEndpoints(isDevelopment);
 app.MapFinanceEndpoints(isDevelopment);
 app.MapManufacturingEndpoints(isDevelopment);
 app.MapWarehouseEndpoints(isDevelopment);
+app.MapHrPayrollEndpoints(isDevelopment);
 productApi.MapFoundationEndpoints();
 
 app.MapGet("/", () => Results.Ok(new
