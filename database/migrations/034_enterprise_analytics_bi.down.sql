@@ -28,7 +28,16 @@ DROP SCHEMA IF EXISTS analytics CASCADE;
 DROP TABLE IF EXISTS hr.salary_audit_logs CASCADE;
 
 DELETE FROM hr.tax_slabs WHERE tax_year = 2027;
-DELETE FROM hr.statutory_configurations WHERE config_key IN ('min_wage_punjab', 'min_wage_sindh', 'min_wage_federal', 'eobi_min_wage_2027');
+DELETE FROM hr.statutory_configurations WHERE config_key IN (
+    'min_wage_federal', 'min_wage_ict', 'min_wage_punjab', 'min_wage_sindh',
+    'min_wage_kpk', 'min_wage_balochistan', 'eobi_contribution_base_2027',
+    'social_security_punjab', 'social_security_sindh', 'social_security_kpk',
+    'social_security_balochistan', 'social_security_federal', 'provident_fund_policy',
+    'eobi_contribution_base_2025_2026'
+);
+
+ALTER TABLE hr.employees
+    DROP COLUMN IF EXISTS work_jurisdiction;
 
 ALTER TABLE hr.tax_slabs
     DROP COLUMN IF EXISTS jurisdiction,

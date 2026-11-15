@@ -37,6 +37,21 @@ public class PayrollCalculationEngine
     /// Computes monthly income tax withholding according to Pakistan Income Tax Ordinance 2001 (Salaried Individual Slabs).
     /// Annualizes monthly taxable income, locates the bracket, calculates annual tax, and divides by 12.
     /// </summary>
+    /// <summary>
+    /// Computes monthly income tax withholding according to Pakistan Income Tax Ordinance 2001 (Salaried Individual Slabs).
+    /// Official FBR Tax Year 2027 Withholding Rate Card under Finance Act 2026.
+    /// Annualizes monthly taxable income, locates the bracket, calculates annual tax, and divides by 12.
+    /// Schedule (First Schedule, Part I, Division I - Salaried):
+    /// 1. Up to PKR 600,000: 0%
+    /// 2. PKR 600,001 - 1,200,000: 1% of amount exceeding PKR 600,000
+    /// 3. PKR 1,200,001 - 2,200,000: PKR 6,000 + 11% of amount exceeding PKR 1,200,000
+    /// 4. PKR 2,200,001 - 3,200,000: PKR 116,000 + 20% of amount exceeding PKR 2,200,000
+    /// 5. PKR 3,200,001 - 4,100,000: PKR 316,000 + 25% of amount exceeding PKR 3,200,000
+    /// 6. PKR 4,100,001 - 5,600,000: PKR 541,000 + 29% of amount exceeding PKR 4,100,000
+    /// 7. PKR 5,600,001 - 7,000,000: PKR 976,000 + 32% of amount exceeding PKR 5,600,000
+    /// 8. Exceeding PKR 7,000,000: PKR 1,424,000 + 35% of amount exceeding PKR 7,000,000
+    /// Note: Obsolete 10% salary surcharge above PKR 10 million is removed per Finance Act 2026 rules.
+    /// </summary>
     public static decimal CalculateMonthlyIncomeTax(decimal monthlyTaxableIncome, IReadOnlyList<TaxSlabDto>? customSlabs = null)
     {
         if (monthlyTaxableIncome <= 0) return 0m;
@@ -53,56 +68,74 @@ public class PayrollCalculationEngine
                 {
                     decimal excess = annualIncome - slab.MinAnnualIncomePkr;
                     decimal annualTax = slab.FixedTaxAmountPkr + (excess * (slab.MarginalTaxRatePercentage / 100m));
-                    // Surcharge check for high earners
-                    if (slab.SurchargeRatePercentage > 0 && annualIncome > slab.SurchargeThresholdPkr)
-                    {
-                        annualTax += annualTax * (slab.SurchargeRatePercentage / 100m);
-                    }
                     return Math.Round(Math.Max(0, annualTax / 12m), 2);
                 }
             }
         }
 
-        // Standard Pakistan Income Tax Ordinance 2001 (Salaried Individuals) default fallback
+        // Standard Pakistan Income Tax Ordinance 2001 (Salaried Individuals) TY2027 default fallback
         // Slab 1: Up to 600,000 -> 0%
         if (annualIncome <= 600_000m)
         {
             return 0m;
         }
-        // Slab 2: 600,001 to 1,200,000 -> 5% of amount exceeding 600,000
+        // Slab 2: 600,001 to 1,200,000 -> 1% of amount exceeding 600,000
         if (annualIncome <= 1_200_000m)
         {
-            decimal annualTax = (annualIncome - 600_000m) * 0.05m;
+            decimal annualTax = (annualIncome - 600_000m) * 0.01m;
             return Math.Round(annualTax / 12m, 2);
         }
-        // Slab 3: 1,200,001 to 2,200,000 -> 30,000 + 15% of amount exceeding 1,200,000
+        // Slab 3: 1,200,001 to 2,200,000 -> 6,000 + 11% of amount exceeding 1,200,000
         if (annualIncome <= 2_200_000m)
         {
-            decimal annualTax = 30_000m + ((annualIncome - 1_200_000m) * 0.15m);
+            decimal annualTax = 6_000m + ((annualIncome - 1_200_000m) * 0.11m);
             return Math.Round(annualTax / 12m, 2);
         }
-        // Slab 4: 2,200,001 to 3,200,000 -> 180,000 + 25% of amount exceeding 2,200,000
+        // Slab 4: 2,200,001 to 3,200,000 -> 116,000 + 20% of amount exceeding 2,200,000
         if (annualIncome <= 3_200_000m)
         {
-            decimal annualTax = 180_000m + ((annualIncome - 2_200_000m) * 0.25m);
+            decimal annualTax = 116_000m + ((annualIncome - 2_200_000m) * 0.20m);
             return Math.Round(annualTax / 12m, 2);
         }
-        // Slab 5: 3,200,001 to 4,100,000 -> 430,000 + 30% of amount exceeding 3,200,000
+        // Slab 5: 3,200,001 to 4,100,000 -> 316,000 + 25% of amount exceeding 3,200,000
         if (annualIncome <= 4_100_000m)
         {
-            decimal annualTax = 430_000m + ((annualIncome - 3_200_000m) * 0.30m);
+            decimal annualTax = 316_000m + ((annualIncome - 3_200_000m) * 0.25m);
             return Math.Round(annualTax / 12m, 2);
         }
-        // Slab 6: Exceeding 4,100,000 -> 700,000 + 35% of amount exceeding 4,100,000
+        // Slab 6: 4,100,001 to 5,600,000 -> 541,000 + 29% of amount exceeding 4,100,000
+        if (annualIncome <= 5_600_000m)
         {
-            decimal annualTax = 700_000m + ((annualIncome - 4_100_000m) * 0.35m);
-            // Surcharge of 10% on annual income exceeding PKR 10 million (Finance Act 2024 / 2026)
-            if (annualIncome > 10_000_000m)
-            {
-                annualTax += annualTax * 0.10m;
-            }
+            decimal annualTax = 541_000m + ((annualIncome - 4_100_000m) * 0.29m);
             return Math.Round(annualTax / 12m, 2);
         }
+        // Slab 7: 5,600,001 to 7,000,000 -> 976,000 + 32% of amount exceeding 5,600,000
+        if (annualIncome <= 7_000_000m)
+        {
+            decimal annualTax = 976_000m + ((annualIncome - 5_600_000m) * 0.32m);
+            return Math.Round(annualTax / 12m, 2);
+        }
+        // Slab 8: Exceeding 7,000,000 -> 1,424,000 + 35% of amount exceeding 7,000,000
+        {
+            decimal annualTax = 1_424_000m + ((annualIncome - 7_000_000m) * 0.35m);
+            return Math.Round(annualTax / 12m, 2);
+        }
+    }
+
+    /// <summary>
+    /// Computes Provincial Social Security (PESSI / SESSI / KP ESSI / BESSI) contributions.
+    /// Under provincial labour laws: Employer pays 6% of wages up to the provincial statutory ceiling; Employee pays 0%.
+    /// </summary>
+    public static (decimal EmployeeShare, decimal EmployerShare) CalculateSocialSecurity(
+        bool isApplicable,
+        decimal grossSalary,
+        decimal wageCeiling = 37_000m)
+    {
+        if (!isApplicable || grossSalary <= 0 || wageCeiling <= 0) return (0m, 0m);
+
+        decimal applicableWage = Math.Min(grossSalary, wageCeiling);
+        decimal employer = Math.Round(applicableWage * 0.06m, 2);
+        return (0m, employer);
     }
 
     /// <summary>

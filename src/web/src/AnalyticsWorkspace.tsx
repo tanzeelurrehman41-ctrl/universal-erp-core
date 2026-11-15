@@ -703,12 +703,35 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
               </thead>
               <tbody>
                 <tr style={{ borderBottom: "1px solid #F3F4F6" }}>
-                  <td style={{ padding: "8px" }}><code>SKU-MODEL-A-01</code></td>
-                  <td style={{ padding: "8px" }}>Flange 50mm Standard Assembly</td>
-                  <td style={{ padding: "8px", fontWeight: "600" }}>50 EA</td>
+                  <td style={{ padding: "8px" }}><code>GRN-2024-01</code> (PICK-01)</td>
+                  <td style={{ padding: "8px" }}>Purchasing Receipt Layer 1</td>
+                  <td style={{ padding: "8px", fontWeight: "600" }}>18 EA</td>
                   <td style={{ padding: "8px" }}>PKR 45.00</td>
-                  <td style={{ padding: "8px", fontWeight: "600", color: "#059669" }}>PKR 2,250.00</td>
-                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>ACTIVE</span></td>
+                  <td style={{ padding: "8px", fontWeight: "600", color: "#059669" }}>PKR 810.00</td>
+                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>AVAILABLE</span></td>
+                </tr>
+                <tr style={{ borderBottom: "1px solid #F3F4F6" }}>
+                  <td style={{ padding: "8px" }}><code>GRN-2024-03</code> (RECEIVE-01)</td>
+                  <td style={{ padding: "8px" }}>Purchasing Receipt Layer 2</td>
+                  <td style={{ padding: "8px", fontWeight: "600" }}>29 EA</td>
+                  <td style={{ padding: "8px" }}>PKR 45.00</td>
+                  <td style={{ padding: "8px", fontWeight: "600", color: "#059669" }}>PKR 1,305.00</td>
+                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>AVAILABLE</span></td>
+                </tr>
+                <tr style={{ borderBottom: "1px solid #F3F4F6" }}>
+                  <td style={{ padding: "8px" }}><code>PROP-CAP-001</code> (PICK-01)</td>
+                  <td style={{ padding: "8px" }}>Opening Equity Capitalization</td>
+                  <td style={{ padding: "8px", fontWeight: "600" }}>3 EA</td>
+                  <td style={{ padding: "8px" }}>PKR 45.00</td>
+                  <td style={{ padding: "8px", fontWeight: "600", color: "#059669" }}>PKR 135.00</td>
+                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>AVAILABLE</span></td>
+                </tr>
+                <tr style={{ backgroundColor: "#F9FAFB", fontWeight: "bold" }}>
+                  <td style={{ padding: "8px" }} colSpan={2}>Canonical Model A Total Physical Valuation</td>
+                  <td style={{ padding: "8px" }}>50 EA</td>
+                  <td style={{ padding: "8px" }}>PKR 45.00</td>
+                  <td style={{ padding: "8px", color: "#059669" }}>PKR 2,250.00</td>
+                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>RECONCILED</span></td>
                 </tr>
               </tbody>
             </table>

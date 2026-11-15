@@ -76,7 +76,8 @@ public record EmployeeDto(
     bool IsEobiApplicable,
     bool IsPfApplicable,
     CompensationStructureDto? CurrentCompensation,
-    DateTimeOffset CreatedAt
+    DateTimeOffset CreatedAt,
+    string WorkJurisdiction = "FEDERAL"
 );
 
 public record CreateEmployeeRequest(
@@ -102,6 +103,7 @@ public record CreateEmployeeRequest(
     string? TaxIdentificationNumber = null,
     bool IsEobiApplicable = true,
     bool IsPfApplicable = true,
+    string WorkJurisdiction = "FEDERAL",
     decimal BaseSalaryPkr = 0,
     decimal HouseRentAllowancePkr = 0,
     decimal UtilityAllowancePkr = 0,
@@ -125,7 +127,8 @@ public record UpdateEmployeeRequest(
     string? BankIban = null,
     string? TaxIdentificationNumber = null,
     bool? IsEobiApplicable = null,
-    bool? IsPfApplicable = null
+    bool? IsPfApplicable = null,
+    string? WorkJurisdiction = null
 );
 
 public record CompensationStructureDto(

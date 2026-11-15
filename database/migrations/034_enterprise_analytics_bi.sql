@@ -14,12 +14,15 @@
 
 -- ── 1. Enhance HR Statutory Tables ──────────────────────────────────────────
 
+ALTER TABLE hr.employees
+    ADD COLUMN IF NOT EXISTS work_jurisdiction TEXT NOT NULL DEFAULT 'FEDERAL';
+
 ALTER TABLE hr.tax_slabs 
     ADD COLUMN IF NOT EXISTS jurisdiction TEXT NOT NULL DEFAULT 'FEDERAL',
     ADD COLUMN IF NOT EXISTS authoritative_source TEXT NOT NULL DEFAULT 'Income Tax Ordinance, 2001 / Finance Act 2026',
     ADD COLUMN IF NOT EXISTS approval_reference TEXT NOT NULL DEFAULT 'FBR-CIRCULAR-2026-SALARIED',
     ADD COLUMN IF NOT EXISTS surcharge_rate_percentage NUMERIC(8,4) NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS surcharge_threshold_pkr NUMERIC(14,4) DEFAULT 10000000;
+    ADD COLUMN IF NOT EXISTS surcharge_threshold_pkr NUMERIC(14,4) DEFAULT NULL;
 
 ALTER TABLE hr.statutory_configurations
     ADD COLUMN IF NOT EXISTS jurisdiction TEXT NOT NULL DEFAULT 'FEDERAL',
@@ -221,6 +224,7 @@ BEGIN
         ON CONFLICT (tenant_id, company_id, code) DO NOTHING;
 
         -- Seed Tax Year 2027 statutory tax slabs (Finance Act 2026, Effective 2026-07-01 to 2027-06-30)
+        -- 8 progressive brackets per official FBR Withholding Rate Card (First Schedule, Part I, Division I - Salaried)
         INSERT INTO hr.tax_slabs (
             tenant_id, company_id, tax_year, effective_from, effective_to, slab_order,
             min_annual_income_pkr, max_annual_income_pkr, fixed_tax_amount_pkr,
@@ -228,35 +232,63 @@ BEGIN
             jurisdiction, authoritative_source, approval_reference, description
         )
         VALUES
-            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 1, 0, 600000, 0, 0.0, 0, 10000000, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'Up to PKR 600,000 (0%)'),
-            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 2, 600000, 1200000, 0, 5.0, 0, 10000000, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'PKR 600,001 to 1,200,000 (5% exceeding 600k)'),
-            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 3, 1200000, 2200000, 30000, 15.0, 0, 10000000, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'PKR 1,200,001 to 2,200,000 (PKR 30k + 15%)'),
-            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 4, 2200000, 3200000, 180000, 25.0, 0, 10000000, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'PKR 2,200,001 to 3,200,000 (PKR 180k + 25%)'),
-            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 5, 3200000, 4100000, 430000, 30.0, 0, 10000000, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'PKR 3,200,001 to 4,100,000 (PKR 430k + 30%)'),
-            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 6, 4100000, NULL, 700000, 35.0, 10.0, 10000000, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'Exceeding PKR 4,100,000 (PKR 700k + 35% + 10% surcharge on >10M)')
+            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 1, 0, 600000, 0, 0.0, 0, NULL, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'Up to PKR 600,000 (0%)'),
+            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 2, 600000, 1200000, 0, 1.0, 0, NULL, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'PKR 600,001 to 1,200,000 (1% exceeding 600k)'),
+            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 3, 1200000, 2200000, 6000, 11.0, 0, NULL, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'PKR 1,200,001 to 2,200,000 (PKR 6k + 11%)'),
+            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 4, 2200000, 3200000, 116000, 20.0, 0, NULL, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'PKR 2,200,001 to 3,200,000 (PKR 116k + 20%)'),
+            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 5, 3200000, 4100000, 316000, 25.0, 0, NULL, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'PKR 3,200,001 to 4,100,000 (PKR 316k + 25%)'),
+            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 6, 4100000, 5600000, 541000, 29.0, 0, NULL, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'PKR 4,100,001 to 5,600,000 (PKR 541k + 29%)'),
+            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 7, 5600000, 7000000, 976000, 32.0, 0, NULL, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'PKR 5,600,001 to 7,000,000 (PKR 976k + 32%)'),
+            (r.tenant_id, r.company_id, 2027, '2026-07-01', '2027-06-30', 8, 7000000, NULL, 1424000, 35.0, 0, NULL, 'FEDERAL', 'Finance Act 2026 / First Schedule Part I Div I', 'FBR-TY2027-SALARIED', 'Exceeding PKR 7,000,000 (PKR 1,424k + 35%)')
         ON CONFLICT (tenant_id, company_id, tax_year, slab_order) DO UPDATE
-            SET jurisdiction = EXCLUDED.jurisdiction,
+            SET min_annual_income_pkr = EXCLUDED.min_annual_income_pkr,
+                max_annual_income_pkr = EXCLUDED.max_annual_income_pkr,
+                fixed_tax_amount_pkr = EXCLUDED.fixed_tax_amount_pkr,
+                marginal_tax_rate_percentage = EXCLUDED.marginal_tax_rate_percentage,
+                jurisdiction = EXCLUDED.jurisdiction,
                 authoritative_source = EXCLUDED.authoritative_source,
                 approval_reference = EXCLUDED.approval_reference,
                 surcharge_rate_percentage = EXCLUDED.surcharge_rate_percentage,
-                surcharge_threshold_pkr = EXCLUDED.surcharge_threshold_pkr;
+                surcharge_threshold_pkr = EXCLUDED.surcharge_threshold_pkr,
+                description = EXCLUDED.description;
 
-        -- Seed provincial minimum wages in statutory_configurations
+        -- Seed effective-dated jurisdiction-specific minimum wages & statutory configurations
         INSERT INTO hr.statutory_configurations (
             tenant_id, company_id, config_key, config_name, effective_from, effective_to,
             rate_percentage, threshold_amount_pkr, employer_rate_percentage,
             jurisdiction, authoritative_source, approval_reference
         )
         VALUES
+            -- Current TY2027 Period (2026-07-01 onwards)
+            (r.tenant_id, r.company_id, 'min_wage_federal', 'Federal Minimum Wage Benchmark', '2026-07-01', NULL, NULL, 37000.0, NULL, 'FEDERAL', 'Ministry of Overseas Pakistanis Notification 2026', 'FED-MOP-2026'),
+            (r.tenant_id, r.company_id, 'min_wage_ict', 'ICT Minimum Wage Benchmark', '2026-07-01', NULL, NULL, 37000.0, NULL, 'ICT', 'ICT Administration Notification 2026', 'ICT-ADMIN-2026'),
             (r.tenant_id, r.company_id, 'min_wage_punjab', 'Punjab Minimum Wage Benchmark', '2026-07-01', NULL, NULL, 37000.0, NULL, 'PUNJAB', 'Punjab Minimum Wages Board Notification 2026', 'PMWB-NOTIF-2026'),
             (r.tenant_id, r.company_id, 'min_wage_sindh', 'Sindh Minimum Wage Benchmark', '2026-07-01', NULL, NULL, 37000.0, NULL, 'SINDH', 'Sindh Minimum Wages Board Gazette 2026', 'SMWB-GAZ-2026'),
-            (r.tenant_id, r.company_id, 'min_wage_federal', 'Federal Minimum Wage Benchmark', '2026-07-01', NULL, NULL, 37000.0, NULL, 'FEDERAL', 'Ministry of Overseas Pakistanis Notification 2026', 'FED-MOP-2026'),
-            (r.tenant_id, r.company_id, 'eobi_min_wage_2027', 'EOBI Statutory Contribution Base TY27', '2026-07-01', NULL, 1.0, 37000.0, 5.0, 'FEDERAL', 'EOBI Act 1976 / Statutory Notification 2026', 'EOBI-STAT-2026')
+            (r.tenant_id, r.company_id, 'min_wage_kpk', 'KP Minimum Wage Benchmark', '2026-07-01', NULL, NULL, 36000.0, NULL, 'KPK', 'KP Minimum Wages Board Notification 2026', 'KPMWB-NOTIF-2026'),
+            (r.tenant_id, r.company_id, 'min_wage_balochistan', 'Balochistan Minimum Wage Benchmark', '2026-07-01', NULL, NULL, 37000.0, NULL, 'BALOCHISTAN', 'Balochistan Labour Board Notification 2026', 'BLB-NOTIF-2026'),
+            (r.tenant_id, r.company_id, 'eobi_contribution_base_2027', 'EOBI Statutory Contribution Base TY27', '2026-07-01', NULL, 1.0, 37000.0, 5.0, 'FEDERAL', 'EOBI Act 1976 / Statutory Notification 2026', 'EOBI-STAT-2026'),
+            (r.tenant_id, r.company_id, 'social_security_punjab', 'Punjab PESSI Contribution', '2026-07-01', NULL, 0.0, 37000.0, 6.0, 'PUNJAB', 'PESSI Act 1965 / Notification 2026', 'PESSI-NOTIF-2026'),
+            (r.tenant_id, r.company_id, 'social_security_sindh', 'Sindh SESSI Contribution', '2026-07-01', NULL, 0.0, 37000.0, 6.0, 'SINDH', 'SESSI Act 2016 / Notification 2026', 'SESSI-NOTIF-2026'),
+            (r.tenant_id, r.company_id, 'social_security_kpk', 'KP ESSI Contribution', '2026-07-01', NULL, 0.0, 36000.0, 6.0, 'KPK', 'KP ESSI Act / Notification 2026', 'KPESSI-NOTIF-2026'),
+            (r.tenant_id, r.company_id, 'social_security_balochistan', 'Balochistan ESSI Contribution', '2026-07-01', NULL, 0.0, 37000.0, 6.0, 'BALOCHISTAN', 'BESSI Act / Notification 2026', 'BESSI-NOTIF-2026'),
+            (r.tenant_id, r.company_id, 'social_security_federal', 'Federal ICT Social Security', '2026-07-01', NULL, 0.0, 37000.0, 6.0, 'FEDERAL', 'Federal Labour Board Notification 2026', 'FED-SS-2026'),
+            (r.tenant_id, r.company_id, 'provident_fund_policy', 'Company Model Provident Fund Policy', '2026-07-01', NULL, 8.33, NULL, 8.33, 'COMPANY', 'Company HR Policy (Non-Statutory/Voluntary)', 'CO-PF-POLICY'),
+            -- Retained Historical Period (2024-07-01 to 2026-06-30)
+            (r.tenant_id, r.company_id, 'min_wage_federal', 'Federal Minimum Wage Benchmark (Prior)', '2024-07-01', '2026-06-30', NULL, 32000.0, NULL, 'FEDERAL', 'Ministry of Overseas Pakistanis Notification 2024', 'FED-MOP-2024'),
+            (r.tenant_id, r.company_id, 'min_wage_punjab', 'Punjab Minimum Wage Benchmark (Prior)', '2024-07-01', '2026-06-30', NULL, 32000.0, NULL, 'PUNJAB', 'Punjab Minimum Wages Board Gazette 2024', 'PMWB-NOTIF-2024'),
+            (r.tenant_id, r.company_id, 'min_wage_sindh', 'Sindh Minimum Wage Benchmark (Prior)', '2024-07-01', '2026-06-30', NULL, 32000.0, NULL, 'SINDH', 'Sindh Minimum Wages Board Gazette 2024', 'SMWB-GAZ-2024'),
+            (r.tenant_id, r.company_id, 'min_wage_kpk', 'KP Minimum Wage Benchmark (Prior)', '2024-07-01', '2026-06-30', NULL, 30000.0, NULL, 'KPK', 'KP Minimum Wages Board Gazette 2024', 'KPMWB-GAZ-2024'),
+            (r.tenant_id, r.company_id, 'min_wage_balochistan', 'Balochistan Minimum Wage Benchmark (Prior)', '2024-07-01', '2026-06-30', NULL, 32000.0, NULL, 'BALOCHISTAN', 'Balochistan Labour Gazette 2024', 'BLB-NOTIF-2024'),
+            (r.tenant_id, r.company_id, 'eobi_contribution_base_2025_2026', 'EOBI Contribution Base Prior Period', '2024-07-01', '2026-06-30', 1.0, 32000.0, 5.0, 'FEDERAL', 'EOBI Act 1976 / Statutory Notification 2024', 'EOBI-STAT-2024')
         ON CONFLICT (tenant_id, company_id, config_key, effective_from) DO UPDATE
             SET threshold_amount_pkr = EXCLUDED.threshold_amount_pkr,
+                rate_percentage = EXCLUDED.rate_percentage,
+                employer_rate_percentage = EXCLUDED.employer_rate_percentage,
+                effective_to = EXCLUDED.effective_to,
                 jurisdiction = EXCLUDED.jurisdiction,
                 authoritative_source = EXCLUDED.authoritative_source,
-                approval_reference = EXCLUDED.approval_reference;
+                approval_reference = EXCLUDED.approval_reference,
+                config_name = EXCLUDED.config_name;
     END LOOP;
 END $$;
 

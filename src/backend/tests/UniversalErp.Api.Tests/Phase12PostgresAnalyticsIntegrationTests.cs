@@ -108,7 +108,8 @@ public class Phase12PostgresAnalyticsIntegrationTests
                 INSERT INTO erp_inventory.product_variant (tenant_id, variant_id, product_id, sku, variant_name, base_uom_id, costing_method, is_active)
                 VALUES (@tId, @vId, @pId, 'SKU-MODEL-A-01', 'Flange 50mm Standard', @uomId, 'fifo', true);
 
-                -- Seed Model A FIFO cost layer: 50 EA @ PKR 45 = PKR 2,250
+                -- Seed Canonical Model A FIFO cost layers (3 layers totaling 50 EA @ PKR 45.00 = PKR 2,250.00):
+                -- Layer 1: GRN-2024-01 (Orig 20 EA, Rem 18 EA @ PKR 45.00 = PKR 810.00)
                 INSERT INTO erp_inventory.inventory_cost_layer (
                     tenant_id, company_id, layer_id, variant_id, warehouse_id, bin_id,
                     status_code, source_document_type, source_document_id, source_line_number,
@@ -116,7 +117,29 @@ public class Phase12PostgresAnalyticsIntegrationTests
                 ) VALUES (
                     @tId, @cId, gen_random_uuid(), @vId, @whId, @binId,
                     'available', 'goods_received_note', gen_random_uuid(), 1,
-                    NOW(), 50, 50, 45.00, 'PKR'
+                    NOW() - INTERVAL '5 days', 20, 18, 45.00, 'PKR'
+                );
+
+                -- Layer 2: GRN-2024-03 (Orig 30 EA, Rem 29 EA @ PKR 45.00 = PKR 1,305.00)
+                INSERT INTO erp_inventory.inventory_cost_layer (
+                    tenant_id, company_id, layer_id, variant_id, warehouse_id, bin_id,
+                    status_code, source_document_type, source_document_id, source_line_number,
+                    received_at, original_qty, remaining_qty, unit_cost, currency_code
+                ) VALUES (
+                    @tId, @cId, gen_random_uuid(), @vId, @whId, @binId,
+                    'available', 'goods_received_note', gen_random_uuid(), 2,
+                    NOW() - INTERVAL '3 days', 30, 29, 45.00, 'PKR'
+                );
+
+                -- Layer 3: PROP-CAP-001 (Orig 3 EA, Rem 3 EA @ PKR 45.00 = PKR 135.00)
+                INSERT INTO erp_inventory.inventory_cost_layer (
+                    tenant_id, company_id, layer_id, variant_id, warehouse_id, bin_id,
+                    status_code, source_document_type, source_document_id, source_line_number,
+                    received_at, original_qty, remaining_qty, unit_cost, currency_code
+                ) VALUES (
+                    @tId, @cId, gen_random_uuid(), @vId, @whId, @binId,
+                    'available', 'opening_balance', gen_random_uuid(), 1,
+                    NOW() - INTERVAL '1 day', 3, 3, 45.00, 'PKR'
                 );
 
                 -- Seed HR Department and Employee
@@ -198,6 +221,8 @@ public class Phase12PostgresAnalyticsIntegrationTests
         Assert.True(recReport.GlReconciliation.IsBalanced, "GL debits must equal credits");
         Assert.Equal(0m, recReport.GlReconciliation.Discrepancy);
         Assert.True(recReport.FifoReconciliation.IsReconciled, "FIFO layer valuation must reconcile with GL Account 1200");
+        Assert.Equal(3, recReport.FifoReconciliation.TotalActiveLayers);
+        Assert.Equal(50.00m, recReport.FifoReconciliation.TotalActiveQuantity);
         Assert.Equal(2250.00m, recReport.FifoReconciliation.FifoActiveLayersValuationPkr);
         Assert.Equal(2250.00m, recReport.FifoReconciliation.GlAccount1200ValuationPkr);
         Assert.Equal(0.00m, recReport.FifoReconciliation.VariancePkr);

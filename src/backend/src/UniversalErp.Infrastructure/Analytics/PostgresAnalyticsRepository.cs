@@ -735,7 +735,6 @@ public class PostgresAnalyticsRepository : IAnalyticsRepository
         decimal gl1200 = 0;
         var res1200 = await g1200Cmd.ExecuteScalarAsync(ct);
         if (res1200 != null && res1200 != DBNull.Value) gl1200 = (decimal)res1200;
-        if (gl1200 == 0 && fifoValue > 0) gl1200 = fifoValue; // Aligned baseline
 
         decimal fifoVariance = Math.Abs(fifoValue - gl1200);
         bool fifoReconciled = fifoVariance < 0.01m;

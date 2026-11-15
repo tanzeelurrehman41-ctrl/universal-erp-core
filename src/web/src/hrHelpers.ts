@@ -3,6 +3,12 @@
  * Statutory rules, Pakistani tax slabs, EOBI, Provident Fund, Overtime, and Leave Calculations
  */
 
+export interface SocialSecurityResult {
+  employee: number;
+  employer: number;
+  total: number;
+}
+
 export interface EobiResult {
   employee: number;
   employer: number;
@@ -32,37 +38,39 @@ export interface LeaveBalanceCheck {
 }
 
 /**
- * Calculates annual income tax under Pakistan Income Tax Ordinance, 2001 (First Schedule Part I Division I - Salaried)
- * Slabs (Tax Year 2024-2025):
+ * Calculates annual income tax under Pakistan Income Tax Ordinance, 2001
+ * Official FBR Tax Year 2027 Withholding Rate Card (Finance Act 2026 - Salaried Individuals)
+ * Schedule (First Schedule, Part I, Division I):
  * 1. Up to PKR 600,000: 0%
- * 2. PKR 600,001 - 1,200,000: 5% of amount exceeding PKR 600,000
- * 3. PKR 1,200,001 - 2,200,000: PKR 30,000 + 15% of amount exceeding PKR 1,200,000
- * 4. PKR 2,200,001 - 3,200,000: PKR 180,000 + 25% of amount exceeding PKR 2,200,000
- * 5. PKR 3,200,001 - 4,100,000: PKR 430,000 + 30% of amount exceeding PKR 3,200,000
- * 6. Exceeding PKR 4,100,000: PKR 700,000 + 35% of amount exceeding PKR 4,100,000
+ * 2. PKR 600,001 - 1,200,000: 1% of amount exceeding PKR 600,000
+ * 3. PKR 1,200,001 - 2,200,000: PKR 6,000 + 11% of amount exceeding PKR 1,200,000
+ * 4. PKR 2,200,001 - 3,200,000: PKR 116,000 + 20% of amount exceeding PKR 2,200,000
+ * 5. PKR 3,200,001 - 4,100,000: PKR 316,000 + 25% of amount exceeding PKR 3,200,000
+ * 6. PKR 4,100,001 - 5,600,000: PKR 541,000 + 29% of amount exceeding PKR 4,100,000
+ * 7. PKR 5,600,001 - 7,000,000: PKR 976,000 + 32% of amount exceeding PKR 5,600,000
+ * 8. Exceeding PKR 7,000,000: PKR 1,424,000 + 35% of amount exceeding PKR 7,000,000
  */
 export function calculateAnnualIncomeTaxPkr(annualTaxableIncome: number): number {
   if (annualTaxableIncome <= 600000) return 0;
-  let tax = 0;
   if (annualTaxableIncome <= 1200000) {
-    tax = Math.round((annualTaxableIncome - 600000) * 0.05);
-  } else if (annualTaxableIncome <= 2200000) {
-    tax = Math.round(30000 + (annualTaxableIncome - 1200000) * 0.15);
-  } else if (annualTaxableIncome <= 3200000) {
-    tax = Math.round(180000 + (annualTaxableIncome - 2200000) * 0.25);
-  } else if (annualTaxableIncome <= 4100000) {
-    tax = Math.round(430000 + (annualTaxableIncome - 3200000) * 0.30);
-  } else {
-    tax = Math.round(700000 + (annualTaxableIncome - 4100000) * 0.35);
+    return Math.round((annualTaxableIncome - 600000) * 0.01);
   }
-
-  // Pakistan Finance Act 2024 / 2026: 10% surcharge on taxable income exceeding PKR 10 million
-  if (annualTaxableIncome > 10000000) {
-    const surcharge = Math.round(tax * 0.10);
-    tax += surcharge;
+  if (annualTaxableIncome <= 2200000) {
+    return Math.round(6000 + (annualTaxableIncome - 1200000) * 0.11);
   }
-
-  return tax;
+  if (annualTaxableIncome <= 3200000) {
+    return Math.round(116000 + (annualTaxableIncome - 2200000) * 0.20);
+  }
+  if (annualTaxableIncome <= 4100000) {
+    return Math.round(316000 + (annualTaxableIncome - 3200000) * 0.25);
+  }
+  if (annualTaxableIncome <= 5600000) {
+    return Math.round(541000 + (annualTaxableIncome - 4100000) * 0.29);
+  }
+  if (annualTaxableIncome <= 7000000) {
+    return Math.round(976000 + (annualTaxableIncome - 5600000) * 0.32);
+  }
+  return Math.round(1424000 + (annualTaxableIncome - 7000000) * 0.35);
 }
 
 /**
@@ -75,24 +83,73 @@ export function calculateMonthlyIncomeTaxPkr(monthlyTaxableIncome: number): numb
 }
 
 /**
- * Calculates Employees' Old-Age Benefits Institution (EOBI) contributions.
- * Standard statutory rates: 1% Employee, 5% Employer on statutory minimum wage (PKR 37,000).
+ * Resolves effective statutory minimum wage for a specific Pakistani administrative jurisdiction.
+ * Supports current TY2027 rates and historical payroll periods (< 2026-07-01).
  */
-export function calculateEobiContributions(applicable: boolean, minWage: number = 37000): EobiResult {
-  if (!applicable || minWage <= 0) return { employee: 0, employer: 0, total: 0 };
-  const employee = Math.round(minWage * 0.01);
-  const employer = Math.round(minWage * 0.05);
+export function getJurisdictionalMinimumWage(jurisdiction: string = 'FEDERAL', effectiveDate?: string): number {
+  const norm = (jurisdiction || 'FEDERAL').trim().toUpperCase();
+  const isHistorical = effectiveDate ? effectiveDate < '2026-07-01' : false;
+
+  if (isHistorical) {
+    if (norm === 'KPK' || norm === 'KP') return 30000;
+    return 32000; // Historical Federal, Punjab, Sindh, Balochistan
+  }
+
+  switch (norm) {
+    case 'KPK':
+    case 'KP':
+      return 36000; // Official KP notification
+    case 'PUNJAB':
+    case 'SINDH':
+    case 'BALOCHISTAN':
+    case 'ICT':
+    case 'FEDERAL':
+    default:
+      return 37000; // Official Federal, Punjab, Sindh, Balochistan notification
+  }
+}
+
+/**
+ * Calculates Employees' Old-Age Benefits Institution (EOBI) contributions.
+ * Standard statutory rates under EOBI Act 1976:
+ * - Employee pays 1% of statutory contribution base
+ * - Employer pays 5% of statutory contribution base
+ */
+export function calculateEobiContributions(applicable: boolean, contributionBase: number = 37000): EobiResult {
+  if (!applicable || contributionBase <= 0) return { employee: 0, employer: 0, total: 0 };
+  const employee = Math.round(contributionBase * 0.01);
+  const employer = Math.round(contributionBase * 0.05);
   return { employee, employer, total: employee + employer };
 }
 
 /**
+ * Calculates Provincial Social Security (PESSI / SESSI / KP ESSI / BESSI) contributions.
+ * Under provincial labour statutes:
+ * - Employer pays 6% of wages up to the statutory provincial wage ceiling
+ * - Employee contribution is 0%
+ */
+export function calculateProvincialSocialSecurity(
+  applicable: boolean,
+  grossSalary: number,
+  jurisdiction: string = 'FEDERAL',
+  effectiveDate?: string
+): SocialSecurityResult {
+  if (!applicable || grossSalary <= 0) return { employee: 0, employer: 0, total: 0 };
+  const ceiling = getJurisdictionalMinimumWage(jurisdiction, effectiveDate);
+  const applicableWage = Math.min(grossSalary, ceiling);
+  const employer = Math.round(applicableWage * 0.06);
+  return { employee: 0, employer, total: employer };
+}
+
+/**
  * Calculates Provident Fund contributions (matching employee deduction and employer contribution).
- * Standard rate: 8.33% (or 10%) on base salary.
+ * Company-specific policy (not universal statutory mandate).
+ * Standard policy rate: 8.33% (or 10%) on base salary.
  */
 export function calculatePfContributions(applicable: boolean, baseSalary: number, ratePercent: number = 8.33): PfResult {
   if (!applicable || baseSalary <= 0 || ratePercent <= 0) return { employee: 0, employer: 0, total: 0 };
   const employee = Math.round(baseSalary * (ratePercent / 100));
-  const employer = employee; // Employer matching contribution
+  const employer = employee; // Employer matching contribution per company policy
   return { employee, employer, total: employee + employer };
 }
 

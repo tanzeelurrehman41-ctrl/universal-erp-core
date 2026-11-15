@@ -1678,13 +1678,17 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             .Where(s => s.EffectiveFrom <= endDate && (s.EffectiveTo == null || s.EffectiveTo >= startDate))
             .ToList();
 
-        // Resolve effective minimum wage and EOBI threshold
+        // Resolve effective statutory configurations for the pay period
         var statConfigs = await GetStatutoryConfigsAsync(tenantId, companyId, ct);
-        var minWageConfig = statConfigs.FirstOrDefault(c =>
-            (c.ConfigKey.StartsWith("min_wage") || c.ConfigKey.StartsWith("eobi_min_wage")) &&
-            c.EffectiveFrom <= endDate &&
-            (c.EffectiveTo == null || c.EffectiveTo >= startDate));
-        decimal statutoryMinWage = minWageConfig?.ThresholdAmountPkr ?? 37_000m;
+        var activeStatConfigs = statConfigs
+            .Where(c => c.EffectiveFrom <= endDate && (c.EffectiveTo == null || c.EffectiveTo >= startDate))
+            .ToList();
+
+        var eobiConfig = activeStatConfigs.FirstOrDefault(c => c.ConfigKey.StartsWith("eobi_contribution_base") || c.ConfigKey.StartsWith("eobi_min_wage"));
+        decimal defaultEobiBase = eobiConfig?.ThresholdAmountPkr ?? 37_000m;
+
+        var pfConfig = activeStatConfigs.FirstOrDefault(c => c.ConfigKey == "provident_fund_policy");
+        decimal companyPfRate = pfConfig?.RatePercentage ?? 8.33m;
 
         var activeLoans = await GetSalaryLoansAsync(tenantId, companyId, null, "active", ct);
 
@@ -1705,6 +1709,11 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 loanDeduction = Math.Min(empLoan.MonthlyInstallmentPkr, empLoan.RemainingBalancePkr);
             }
 
+            string jurKey = $"min_wage_{(emp.WorkJurisdiction ?? "FEDERAL").ToLowerInvariant()}";
+            var wageConfig = activeStatConfigs.FirstOrDefault(c => c.ConfigKey == jurKey)
+                ?? activeStatConfigs.FirstOrDefault(c => c.ConfigKey == "min_wage_federal");
+            decimal empMinWage = wageConfig?.ThresholdAmountPkr ?? defaultEobiBase;
+
             var computed = PayrollCalculationEngine.CalculateEmployeePayroll(
                 emp,
                 workingDays: workingDaysInPeriod,
@@ -1716,7 +1725,8 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 loanInstallment: loanDeduction,
                 otherDeductions: 0,
                 taxSlabs: effectiveTaxSlabs,
-                statutoryMinWage: statutoryMinWage
+                statutoryMinWage: empMinWage,
+                pfRatePercentage: companyPfRate
             );
 
             totalPeriodGross += computed.GrossPay;

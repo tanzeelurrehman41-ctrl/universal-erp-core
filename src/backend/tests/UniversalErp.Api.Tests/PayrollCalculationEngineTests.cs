@@ -14,25 +14,25 @@ public class PayrollCalculationEngineTests
         decimal taxAt50k = PayrollCalculationEngine.CalculateMonthlyIncomeTax(50_000m);
         Assert.Equal(0m, taxAt50k);
 
-        // Slab 2: 80,000/month -> 960,000 annual -> (960,000 - 600,000) * 5% = 18,000 annual -> 1,500/month
+        // Slab 2: 80,000/month -> 960,000 annual -> (960,000 - 600,000) * 1% = 3,600 annual -> 300/month
         decimal taxAt80k = PayrollCalculationEngine.CalculateMonthlyIncomeTax(80_000m);
-        Assert.Equal(1500m, taxAt80k);
+        Assert.Equal(300m, taxAt80k);
 
-        // Slab 3: 150,000/month -> 1,800,000 annual -> 30,000 + (1,800,000 - 1,200,000) * 15% = 30,000 + 90,000 = 120,000 annual -> 10,000/month
+        // Slab 3: 150,000/month -> 1,800,000 annual -> 6,000 + (1,800,000 - 1,200,000) * 11% = 6,000 + 66,000 = 72,000 annual -> 6,000/month
         decimal taxAt150k = PayrollCalculationEngine.CalculateMonthlyIncomeTax(150_000m);
-        Assert.Equal(10000m, taxAt150k);
+        Assert.Equal(6000m, taxAt150k);
 
-        // Slab 4: 220,000/month -> 2,640,000 annual -> 180,000 + (2,640,000 - 2,200,000) * 25% = 180,000 + 110,000 = 290,000 annual -> 24,166.67/month
+        // Slab 4: 220,000/month -> 2,640,000 annual -> 116,000 + (2,640,000 - 2,200,000) * 20% = 116,000 + 88,000 = 204,000 annual -> 17,000/month
         decimal taxAt220k = PayrollCalculationEngine.CalculateMonthlyIncomeTax(220_000m);
-        Assert.Equal(24166.67m, taxAt220k);
+        Assert.Equal(17000m, taxAt220k);
 
-        // Slab 5: 300,000/month -> 3,600,000 annual -> 430,000 + (3,600,000 - 3,200,000) * 30% = 430,000 + 120,000 = 550,000 annual -> 45,833.33/month
+        // Slab 5: 300,000/month -> 3,600,000 annual -> 316,000 + (3,600,000 - 3,200,000) * 25% = 316,000 + 100,000 = 416,000 annual -> 34,666.67/month
         decimal taxAt300k = PayrollCalculationEngine.CalculateMonthlyIncomeTax(300_000m);
-        Assert.Equal(45833.33m, taxAt300k);
+        Assert.Equal(34666.67m, taxAt300k);
 
-        // Slab 6: 400,000/month -> 4,800,000 annual -> 700,000 + (4,800,000 - 4,100,000) * 35% = 700,000 + 245,000 = 945,000 annual -> 78,750/month
+        // Slab 6: 400,000/month -> 4,800,000 annual -> 541,000 + (4,800,000 - 4,100,000) * 29% = 541,000 + 203,000 = 744,000 annual -> 62,000/month
         decimal taxAt400k = PayrollCalculationEngine.CalculateMonthlyIncomeTax(400_000m);
-        Assert.Equal(78750m, taxAt400k);
+        Assert.Equal(62000m, taxAt400k);
     }
 
     [Fact]
@@ -126,8 +126,8 @@ public class PayrollCalculationEngineTests
         // Gross = 100,000 + 40,000 + 10,000 = 150,000
         Assert.Equal(150_000m, result.GrossPay);
 
-        // Tax on 150k/mo = 10,000
-        Assert.Equal(10_000m, result.IncomeTax);
+        // Tax on 150k/mo = 6,000 under Finance Act 2026 / TY2027 (6,000 + 11% of 600k = 72k/yr -> 6k/mo)
+        Assert.Equal(6000m, result.IncomeTax);
 
         // EOBI = 370
         Assert.Equal(370m, result.EobiEmployee);
@@ -138,11 +138,11 @@ public class PayrollCalculationEngineTests
         // Loan deduction = 5,000
         Assert.Equal(5000m, result.LoanDeduction);
 
-        // Total deductions = 10,000 + 370 + 8,330 + 5,000 = 23,700
-        Assert.Equal(23700m, result.TotalDeductions);
+        // Total deductions = 6,000 + 370 + 8,330 + 5,000 = 19,700
+        Assert.Equal(19700m, result.TotalDeductions);
 
-        // Net Pay = 150,000 - 23,700 = 126,300
-        Assert.Equal(126300m, result.NetPay);
+        // Net Pay = 150,000 - 19,700 = 130,300
+        Assert.Equal(130300m, result.NetPay);
 
         // Employer contributions: EOBI 1,850 + PF 8,330
         Assert.Equal(1850m, result.EobiEmployer);
