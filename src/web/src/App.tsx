@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import InventoryWorkspace from "./InventoryWorkspace";
+import WarehouseWorkspace from "./WarehouseWorkspace";
 import PurchasingWorkspace from "./PurchasingWorkspace";
 import SalesWorkspace from "./SalesWorkspace";
 import TenancyWorkspace from "./TenancyWorkspace";
@@ -101,7 +102,7 @@ export default function App() {
   });
   const activeWorkspace = workspaces.find((workspace) => workspaceKey(workspace) === activeWorkspaceKey) ?? null;
   const queueOwnerKey = ownerKeyForUser(authUser);
-  const [activeNavTab, setActiveNavTab] = useState<"inventory" | "purchasing" | "sales" | "finance" | "manufacturing" | "foundation" | "saas" | "all">("inventory");
+  const [activeNavTab, setActiveNavTab] = useState<"inventory" | "warehouse" | "purchasing" | "sales" | "finance" | "manufacturing" | "foundation" | "saas" | "all">("inventory");
 
   useEffect(() => {
     if (!oidcConfigured) return;
@@ -645,6 +646,23 @@ export default function App() {
         </button>
         <button
           type="button"
+          onClick={() => setActiveNavTab("warehouse")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "warehouse" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "warehouse" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "warehouse" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          🏭 Warehouse & Barcode
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveNavTab("purchasing")}
           style={{
             padding: "8px 14px",
@@ -891,6 +909,13 @@ export default function App() {
             workspace={activeWorkspace}
           />
         </>
+      )}
+
+      {(activeNavTab === "warehouse" || activeNavTab === "all") && (
+        <WarehouseWorkspace
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
       )}
 
       {(activeNavTab === "purchasing" || activeNavTab === "all") && (
