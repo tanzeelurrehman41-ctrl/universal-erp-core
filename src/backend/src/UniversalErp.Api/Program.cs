@@ -338,6 +338,12 @@ else
             "sales.return.create", "sales.return.approve",
             "sales.creditnote.create", "sales.creditnote.approve",
             "sales.receivable.view",
+            "finance.account.view", "finance.account.manage",
+            "finance.journal.view", "finance.journal.post", "finance.journal.reverse",
+            "finance.period.manage", "finance.period.close", "finance.period.reopen",
+            "finance.bank.manage", "finance.bank.reconcile",
+            "finance.tax.manage", "finance.asset.manage", "finance.asset.depreciate",
+            "finance.reports.view",
         })
         {
             options.AddPolicy(permissionCode, policy => policy
@@ -368,7 +374,7 @@ var moduleCatalog = new[]
     new { id = "core", name = "Core application", status = "Starter", description = "API host and web, Windows, and Android application shells." },
     new { id = "inventory", name = "Inventory", status = "In progress", description = "Catalog, units, variants, warehouses, bins, and atomic untracked stock receipts; transfers, reservations, and valuation remain." },
     new { id = "purchasing", name = "Purchasing", status = "In progress", description = "Suppliers, purchase orders, goods received notes with idempotent posting and inventory outbox events; invoice matching and quality inspection remain." },
-    new { id = "finance", name = "Finance", status = "In progress", description = "Chart of Accounts, balanced general ledger journals, and real-time trial balance." },
+    new { id = "finance", name = "Finance", status = "Active", description = "Chart of Accounts, General Ledger, Treasury, Bank Reconciliation, Fixed Assets, Tax, and Period Close." },
     new { id = "security", name = "Security and access", status = "In progress", description = "OIDC bearer validation and live membership/permission checks; user provisioning and client sign-in remain." },
     new { id = "offline", name = "Offline sync", status = "In progress", description = "Encrypted local journals, authenticated device grants, a durable receipt operation inbox, atomic snapshot cursors, and a paged change feed; event-level merge and product inbox processing remain." },
     new { id = "reporting", name = "Reporting", status = "Architecture only", description = "Approved datasets, dashboards, exports, and scheduled reports." },

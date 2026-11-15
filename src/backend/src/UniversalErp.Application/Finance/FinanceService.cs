@@ -6,7 +6,7 @@ using UniversalErp.Domain.Common;
 
 namespace UniversalErp.Application.Finance;
 
-public sealed class FinanceService(
+public sealed partial class FinanceService(
     IFinanceRepository repository,
     ITenantContextAccessor tenantContext)
 {

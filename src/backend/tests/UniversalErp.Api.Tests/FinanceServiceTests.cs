@@ -141,6 +141,137 @@ public sealed class FinanceServiceTests
 
             return Task.FromResult(rows);
         }
+
+        // ── Phase 8 Stubs ────────────────────────────────────────────────────────
+        public Task<JournalSummary> ReverseJournalAsync(
+            Guid tenantId, Guid companyId, Guid userId, Guid journalId, string reason, CancellationToken cancellationToken)
+        {
+            var orig = Journals.FirstOrDefault(j => j.JournalId == journalId)
+                ?? throw new KeyNotFoundException("Journal not found");
+            var revLines = orig.Lines.Select((l, idx) => new JournalLineSummary(
+                idx + 1, l.AccountId, l.AccountCode, l.AccountName, "Reversal: " + l.Description,
+                l.TransactionCurrency, l.TransactionAmount, l.CreditFunctional, l.DebitFunctional)).ToList();
+            var rev = new JournalSummary(
+                Guid.NewGuid(), "REV-" + orig.JournalNo, DateOnly.FromDateTime(DateTime.UtcNow),
+                orig.FiscalPeriodId, "Reversal: " + reason, orig.FunctionalCurrency,
+                "general_ledger", "reversal", orig.JournalId.ToString(), "posted",
+                DateTimeOffset.UtcNow, orig.TotalCredit, orig.TotalDebit, revLines);
+            Journals.Add(rev);
+            return Task.FromResult(rev);
+        }
+
+        public Task<IReadOnlyList<BankAccountSummary>> ListBankAccountsAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<BankAccountSummary>>([]);
+
+        public Task<BankAccountSummary> CreateBankAccountAsync(Guid tenantId, Guid companyId, CreateBankAccountRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new BankAccountSummary(
+                Guid.NewGuid(), request.AccountNumber, request.AccountName, request.BankName,
+                request.BranchName, request.SwiftBic, request.Iban, request.CurrencyCode,
+                request.AccountType, request.GlAccountId, "1020", "Main Operating Account",
+                0m, true, DateTimeOffset.UtcNow));
+
+        public Task<BankAccountSummary?> GetBankAccountAsync(Guid tenantId, Guid companyId, Guid bankAccountId, CancellationToken cancellationToken) =>
+            Task.FromResult<BankAccountSummary?>(null);
+
+        public Task<BankStatementSummary> ImportBankStatementAsync(Guid tenantId, Guid companyId, ImportBankStatementRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new BankStatementSummary(
+                Guid.NewGuid(), request.BankAccountId, "Bank Account", request.StatementNumber,
+                request.StatementDate, request.OpeningBalance, request.ClosingBalance, "imported",
+                DateTimeOffset.UtcNow, null, null, []));
+
+        public Task<IReadOnlyList<BankStatementSummary>> ListBankStatementsAsync(Guid tenantId, Guid companyId, Guid? bankAccountId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<BankStatementSummary>>([]);
+
+        public Task<BankReconciliationResult> ReconcileBankStatementAsync(Guid tenantId, Guid companyId, Guid userId, Guid statementId, string? note, CancellationToken cancellationToken) =>
+            Task.FromResult(new BankReconciliationResult(statementId, "reconciled", 0, 0, 0m, 0m, 0m, 0m, true));
+
+        public Task<TreasuryPaymentSummary> CreateTreasuryPaymentAsync(Guid tenantId, Guid companyId, Guid userId, CreateTreasuryPaymentRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new TreasuryPaymentSummary(
+                Guid.NewGuid(), request.PaymentNumber, request.PaymentType, request.PaymentDate,
+                request.BankAccountId, "Bank Account", request.DestinationBankAccountId, request.Amount,
+                request.CurrencyCode, request.PaymentMethod, request.ReferenceNumber, request.PayeePayerName,
+                Guid.NewGuid(), "posted", userId, null, DateTimeOffset.UtcNow));
+
+        public Task<IReadOnlyList<TreasuryPaymentSummary>> ListTreasuryPaymentsAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<TreasuryPaymentSummary>>([]);
+
+        public Task<IReadOnlyList<TaxCodeSummary>> ListTaxCodesAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<TaxCodeSummary>>([]);
+
+        public Task<TaxCodeSummary> CreateTaxCodeAsync(Guid tenantId, Guid companyId, CreateTaxCodeRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new TaxCodeSummary(
+                Guid.NewGuid(), request.Code, request.Name, request.TaxType, request.RatePercent,
+                request.GlPayableAccountId, "2100", request.GlReceivableAccountId, true));
+
+        public Task<TaxLiabilitySummary> GetTaxLiabilitySummaryAsync(Guid tenantId, Guid companyId, DateOnly fromDate, DateOnly toDate, CancellationToken cancellationToken) =>
+            Task.FromResult(new TaxLiabilitySummary(0m, 0m, 0m, 0m, 0m));
+
+        public Task<TaxFilingSummary> CreateTaxFilingAsync(Guid tenantId, Guid companyId, Guid userId, CreateTaxFilingRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new TaxFilingSummary(
+                Guid.NewGuid(), request.FilingNumber, request.PeriodStart, request.PeriodEnd, request.TaxType,
+                0m, 0m, 0m, 0m, "filed", DateTimeOffset.UtcNow, null, request.Notes));
+
+        public Task<IReadOnlyList<TaxFilingSummary>> ListTaxFilingsAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<TaxFilingSummary>>([]);
+
+        public Task<TaxFilingSummary> SettleTaxFilingAsync(Guid tenantId, Guid companyId, Guid userId, Guid filingId, SettleTaxFilingRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new TaxFilingSummary(
+                filingId, "TAX-2026-11", new DateOnly(2026, 11, 1), new DateOnly(2026, 11, 30), "vat",
+                0m, 0m, 0m, 0m, "settled", DateTimeOffset.UtcNow, Guid.NewGuid(), "Settled"));
+
+        public Task<RecurringScheduleSummary> CreateRecurringScheduleAsync(Guid tenantId, Guid companyId, CreateRecurringScheduleRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new RecurringScheduleSummary(
+                Guid.NewGuid(), request.ScheduleName, request.ScheduleType, request.Frequency,
+                request.StartDate, request.EndDate, request.TotalAmount, request.PeriodAmount,
+                request.DebitAccountId, "1300", "Prepaid Expense", request.CreditAccountId,
+                "1020", "Bank Account", request.PeriodsCount, 0, request.StartDate,
+                request.AutoReverseAccrual, "active", request.DescriptionTemplate));
+
+        public Task<IReadOnlyList<RecurringScheduleSummary>> ListRecurringSchedulesAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<RecurringScheduleSummary>>([]);
+
+        public Task<JournalSummary> PostRecurringSchedulePeriodAsync(Guid tenantId, Guid companyId, Guid userId, Guid scheduleId, CancellationToken cancellationToken) =>
+            Task.FromResult(new JournalSummary(Guid.NewGuid(), "JRN-REC-001", DateOnly.FromDateTime(DateTime.UtcNow), Guid.NewGuid(), "Recurring", "PKR", "recurring", "schedule", scheduleId.ToString(), "posted", DateTimeOffset.UtcNow, 100m, 100m, []));
+
+        public Task<FixedAssetSummary> CreateFixedAssetAsync(Guid tenantId, Guid companyId, CreateFixedAssetRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new FixedAssetSummary(
+                Guid.NewGuid(), request.AssetCode, request.AssetName, request.AssetCategory,
+                request.AcquisitionDate, request.AcquisitionCost, request.SalvageValue,
+                request.UsefulLifeMonths, request.DepreciationMethod, request.AssetGlAccountId,
+                "1500", request.AccumulatedDeprAccountId, "1510", request.DepreciationExpenseAccountId,
+                "6050", request.AcquisitionCost, 0m, "active"));
+
+        public Task<IReadOnlyList<FixedAssetSummary>> ListFixedAssetsAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<FixedAssetSummary>>([]);
+
+        public Task<IReadOnlyList<AssetDepreciationRunSummary>> ExecuteDepreciationRunAsync(Guid tenantId, Guid companyId, Guid userId, ExecuteDepreciationRunRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<AssetDepreciationRunSummary>>([]);
+
+        public Task<bool> SoftCloseFiscalPeriodAsync(Guid tenantId, Guid companyId, Guid userId, Guid periodId, string? note, CancellationToken cancellationToken) =>
+            Task.FromResult(true);
+
+        public Task<bool> CloseFiscalPeriodAsync(Guid tenantId, Guid companyId, Guid userId, Guid periodId, string? note, CancellationToken cancellationToken) =>
+            Task.FromResult(true);
+
+        public Task<bool> ReopenFiscalPeriodAsync(Guid tenantId, Guid companyId, Guid userId, Guid periodId, string reason, CancellationToken cancellationToken) =>
+            Task.FromResult(true);
+
+        public Task<IReadOnlyList<PeriodCloseChecklistItemSummary>> GetPeriodCloseChecklistAsync(Guid tenantId, Guid companyId, Guid periodId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<PeriodCloseChecklistItemSummary>>([]);
+
+        public Task<bool> UpdatePeriodCloseChecklistItemAsync(Guid tenantId, Guid companyId, Guid userId, Guid itemId, bool isCompleted, string? notes, CancellationToken cancellationToken) =>
+            Task.FromResult(true);
+
+        public Task<YearEndCloseSummary> CloseFiscalYearAsync(Guid tenantId, Guid companyId, Guid userId, YearEndCloseRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new YearEndCloseSummary(
+                request.FiscalYearId, "FY2026", Guid.NewGuid(), "JRN-YE-001",
+                0m, 0m, 0m, DateTimeOffset.UtcNow));
+
+        public Task<FinanceControlDashboardSummary> GetControlDashboardAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken) =>
+            Task.FromResult(new FinanceControlDashboardSummary(10, 50000m, 50000m, 0m, true, 2, 25000m, 0, 1, 10000m, 1, 1, 0m));
+
+        public Task<IReadOnlyList<FinancialAuditLogSummary>> ListAuditLogsAsync(Guid tenantId, Guid companyId, int limit, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<FinancialAuditLogSummary>>([]);
     }
 
     [Fact]
