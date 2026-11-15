@@ -53,6 +53,11 @@ public class PayrollCalculationEngine
                 {
                     decimal excess = annualIncome - slab.MinAnnualIncomePkr;
                     decimal annualTax = slab.FixedTaxAmountPkr + (excess * (slab.MarginalTaxRatePercentage / 100m));
+                    // Surcharge check for high earners
+                    if (slab.SurchargeRatePercentage > 0 && annualIncome > slab.SurchargeThresholdPkr)
+                    {
+                        annualTax += annualTax * (slab.SurchargeRatePercentage / 100m);
+                    }
                     return Math.Round(Math.Max(0, annualTax / 12m), 2);
                 }
             }
@@ -91,6 +96,11 @@ public class PayrollCalculationEngine
         // Slab 6: Exceeding 4,100,000 -> 700,000 + 35% of amount exceeding 4,100,000
         {
             decimal annualTax = 700_000m + ((annualIncome - 4_100_000m) * 0.35m);
+            // Surcharge of 10% on annual income exceeding PKR 10 million (Finance Act 2024 / 2026)
+            if (annualIncome > 10_000_000m)
+            {
+                annualTax += annualTax * 0.10m;
+            }
             return Math.Round(annualTax / 12m, 2);
         }
     }

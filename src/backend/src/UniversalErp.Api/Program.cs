@@ -16,6 +16,7 @@ using UniversalErp.Api.Finance;
 using UniversalErp.Api.Manufacturing;
 using UniversalErp.Api.Warehouse;
 using UniversalErp.Api.HrPayroll;
+using UniversalErp.Api.Analytics;
 using UniversalErp.Api.Purchasing;
 using UniversalErp.Api.Sales;
 using UniversalErp.Api.Security;
@@ -28,6 +29,7 @@ using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Manufacturing;
 using UniversalErp.Application.Warehouse;
 using UniversalErp.Application.HrPayroll;
+using UniversalErp.Application.Analytics;
 using UniversalErp.Application.Purchasing;
 using UniversalErp.Application.Sales;
 using UniversalErp.Application.Sync;
@@ -38,6 +40,7 @@ using UniversalErp.Infrastructure.Inventory;
 using UniversalErp.Infrastructure.Manufacturing;
 using UniversalErp.Infrastructure.Warehouse;
 using UniversalErp.Infrastructure.HrPayroll;
+using UniversalErp.Infrastructure.Analytics;
 using UniversalErp.Infrastructure.Purchasing;
 using UniversalErp.Infrastructure.Sales;
 using UniversalErp.Infrastructure.Sync;
@@ -108,6 +111,8 @@ builder.Services.AddScoped<IWarehouseRepository, PostgresWarehouseRepository>();
 builder.Services.AddScoped<WarehouseService>();
 builder.Services.AddScoped<IHrPayrollRepository, PostgresHrPayrollRepository>();
 builder.Services.AddScoped<HrPayrollService>();
+builder.Services.AddScoped<IAnalyticsRepository, PostgresAnalyticsRepository>();
+builder.Services.AddScoped<AnalyticsService>();
 builder.Services.AddScoped<ISupplyChainOutboxRepository, PostgresSupplyChainOutboxRepository>();
 builder.Services.AddScoped<SupplyChainOutboxService>();
 builder.Services.AddScoped<ISalesRepository, PostgresSalesRepository>();
@@ -380,6 +385,9 @@ else
             "payroll.period.manage", "payroll.process", "payroll.approve",
             "payroll.post_gl", "payroll.reverse", "payroll.salary.view",
             "payroll.loan.manage", "hr.reports.view",
+            "analytics.dashboard.view", "analytics.financial.view",
+            "analytics.supply_chain.view", "analytics.workforce.view",
+            "analytics.kpi.manage", "analytics.export",
         })
         {
             options.AddPolicy(permissionCode, policy => policy
@@ -582,6 +590,7 @@ app.MapFinanceEndpoints(isDevelopment);
 app.MapManufacturingEndpoints(isDevelopment);
 app.MapWarehouseEndpoints(isDevelopment);
 app.MapHrPayrollEndpoints(isDevelopment);
+app.MapAnalyticsEndpoints(isDevelopment);
 productApi.MapFoundationEndpoints();
 
 app.MapGet("/", () => Results.Ok(new

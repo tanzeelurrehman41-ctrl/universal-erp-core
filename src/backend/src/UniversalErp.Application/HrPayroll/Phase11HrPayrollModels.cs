@@ -154,7 +154,9 @@ public record SetCompensationRequest(
     decimal ConveyanceAllowancePkr = 0,
     decimal MedicalAllowancePkr = 0,
     decimal SpecialAllowancePkr = 0,
-    string PaymentFrequency = "monthly"
+    string PaymentFrequency = "monthly",
+    Guid? ChangedBy = null,
+    string? ChangeReason = null
 );
 
 // ── Shifts & Attendance Models ───────────────────────────────────────────────
@@ -355,7 +357,10 @@ public record StatutoryConfigDto(
     decimal? EmployerFixedAmountPkr,
     decimal? EmployeeFixedAmountPkr,
     bool IsActive,
-    DateTimeOffset CreatedAt
+    DateTimeOffset CreatedAt,
+    string Jurisdiction = "FEDERAL",
+    string AuthoritativeSource = "EOBI Act 1976 / Provincial Labour Gazette",
+    string ApprovalReference = "STAT-REG-2026-01"
 );
 
 public record SetStatutoryConfigRequest(
@@ -367,7 +372,10 @@ public record SetStatutoryConfigRequest(
     decimal? ThresholdAmountPkr = null,
     decimal? EmployerRatePercentage = null,
     decimal? EmployerFixedAmountPkr = null,
-    decimal? EmployeeFixedAmountPkr = null
+    decimal? EmployeeFixedAmountPkr = null,
+    string Jurisdiction = "FEDERAL",
+    string AuthoritativeSource = "EOBI Act 1976 / Provincial Labour Gazette",
+    string ApprovalReference = "STAT-REG-2026-01"
 );
 
 public record TaxSlabDto(
@@ -383,7 +391,12 @@ public record TaxSlabDto(
     decimal FixedTaxAmountPkr,
     decimal MarginalTaxRatePercentage,
     string? Description,
-    DateTimeOffset CreatedAt
+    DateTimeOffset CreatedAt,
+    string Jurisdiction = "FEDERAL",
+    string AuthoritativeSource = "Income Tax Ordinance, 2001 / Finance Act 2026",
+    string ApprovalReference = "FBR-CIRCULAR-2026-SALARIED",
+    decimal SurchargeRatePercentage = 0m,
+    decimal SurchargeThresholdPkr = 10000000m
 );
 
 public record CreateTaxSlabRequest(
@@ -395,7 +408,25 @@ public record CreateTaxSlabRequest(
     decimal FixedTaxAmountPkr,
     decimal MarginalTaxRatePercentage,
     string? Description = null,
-    DateOnly? EffectiveTo = null
+    DateOnly? EffectiveTo = null,
+    string Jurisdiction = "FEDERAL",
+    string AuthoritativeSource = "Income Tax Ordinance, 2001 / Finance Act 2026",
+    string ApprovalReference = "FBR-CIRCULAR-2026-SALARIED",
+    decimal SurchargeRatePercentage = 0m,
+    decimal SurchargeThresholdPkr = 10000000m
+);
+
+public record SalaryAuditLogDto(
+    Guid Id,
+    Guid TenantId,
+    Guid CompanyId,
+    Guid EmployeeId,
+    string ActionType,
+    decimal? PreviousGrossSalaryPkr,
+    decimal NewGrossSalaryPkr,
+    Guid ChangedBy,
+    string? ChangeReason,
+    DateTimeOffset ChangedAt
 );
 
 // ── Salary Loans & Advances Models ───────────────────────────────────────────

@@ -11,6 +11,10 @@ import {
   isValidCnic,
   evaluateShiftAttendance,
   canApplyLeave,
+  maskCnic,
+  maskBankAccount,
+  maskIban,
+  maskSalary,
 } from '../src/hrHelpers.ts';
 
 test('calculateAnnualIncomeTaxPkr applies 0% up to PKR 600,000', () => {
@@ -148,4 +152,38 @@ test('canApplyLeave checks allocated and used balance accurately', () => {
   // Zero days: invalid
   const check3 = canApplyLeave(14, 4, 0);
   assert.equal(check3.allowed, false);
+});
+
+test('calculateAnnualIncomeTaxPkr applies 10% surcharge on income exceeding 10M', () => {
+  // At 12,000,000:
+  // Base tax: 700,000 + 35% of (12,000,000 - 4,100,000 = 7,900,000) = 700,000 + 2,765,000 = 3,465,000
+  // Surcharge (10%): 346,500
+  // Total tax: 3,811,500
+  assert.equal(calculateAnnualIncomeTaxPkr(12000000), 3811500);
+
+  // Exactly 10M: no surcharge
+  // Base tax: 700,000 + 35% of 5,900,000 = 700,000 + 2,065,000 = 2,765,000
+  assert.equal(calculateAnnualIncomeTaxPkr(10000000), 2765000);
+});
+
+test('maskCnic protects employee CNIC identity', () => {
+  assert.equal(maskCnic('42101-1234567-1'), '42101-*****67-1');
+  assert.equal(maskCnic('4210112345671'), '42101-*****67-1');
+  assert.equal(maskCnic(null), '');
+});
+
+test('maskBankAccount masks all but last 4 digits', () => {
+  assert.equal(maskBankAccount('12345678901234'), '****1234');
+  assert.equal(maskBankAccount('1234'), '****');
+  assert.equal(maskBankAccount(null), '');
+});
+
+test('maskIban preserves country prefix and trailing digits', () => {
+  assert.equal(maskIban('PK36HABB0000123456789012'), 'PK**...****9012');
+  assert.equal(maskIban(null), '');
+});
+
+test('maskSalary obscures numbers when unauthorized', () => {
+  assert.equal(maskSalary(150000, false), '••••••••');
+  assert.equal(maskSalary(150000, true), 'PKR 150,000');
 });

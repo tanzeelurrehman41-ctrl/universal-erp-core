@@ -43,11 +43,26 @@ export interface LeaveBalanceCheck {
  */
 export function calculateAnnualIncomeTaxPkr(annualTaxableIncome: number): number {
   if (annualTaxableIncome <= 600000) return 0;
-  if (annualTaxableIncome <= 1200000) return Math.round((annualTaxableIncome - 600000) * 0.05);
-  if (annualTaxableIncome <= 2200000) return Math.round(30000 + (annualTaxableIncome - 1200000) * 0.15);
-  if (annualTaxableIncome <= 3200000) return Math.round(180000 + (annualTaxableIncome - 2200000) * 0.25);
-  if (annualTaxableIncome <= 4100000) return Math.round(430000 + (annualTaxableIncome - 3200000) * 0.30);
-  return Math.round(700000 + (annualTaxableIncome - 4100000) * 0.35);
+  let tax = 0;
+  if (annualTaxableIncome <= 1200000) {
+    tax = Math.round((annualTaxableIncome - 600000) * 0.05);
+  } else if (annualTaxableIncome <= 2200000) {
+    tax = Math.round(30000 + (annualTaxableIncome - 1200000) * 0.15);
+  } else if (annualTaxableIncome <= 3200000) {
+    tax = Math.round(180000 + (annualTaxableIncome - 2200000) * 0.25);
+  } else if (annualTaxableIncome <= 4100000) {
+    tax = Math.round(430000 + (annualTaxableIncome - 3200000) * 0.30);
+  } else {
+    tax = Math.round(700000 + (annualTaxableIncome - 4100000) * 0.35);
+  }
+
+  // Pakistan Finance Act 2024 / 2026: 10% surcharge on taxable income exceeding PKR 10 million
+  if (annualTaxableIncome > 10000000) {
+    const surcharge = Math.round(tax * 0.10);
+    tax += surcharge;
+  }
+
+  return tax;
 }
 
 /**
@@ -203,4 +218,44 @@ export function canApplyLeave(
     };
   }
   return { allowed: true, remainingAfter: currentRemaining - requestedDays };
+}
+
+/**
+ * Masks a Pakistani CNIC to protect employee PII (e.g., 42101-*****67-1).
+ */
+export function maskCnic(cnic?: string | null): string {
+  if (!cnic) return '';
+  const digits = cnic.replace(/\D/g, '');
+  if (digits.length !== 13) return '*****';
+  return `${digits.slice(0, 5)}-*****${digits.slice(10, 12)}-${digits.slice(12, 13)}`;
+}
+
+/**
+ * Masks a bank account number showing only the last 4 digits (e.g., ****1234).
+ */
+export function maskBankAccount(account?: string | null): string {
+  if (!account) return '';
+  const trimmed = account.trim();
+  if (trimmed.length <= 4) return '****';
+  return `****${trimmed.slice(-4)}`;
+}
+
+/**
+ * Masks an IBAN preserving country code and last 4 digits (e.g., PK**...****1234).
+ */
+export function maskIban(iban?: string | null): string {
+  if (!iban) return '';
+  const clean = iban.replace(/\s+/g, '').toUpperCase();
+  if (clean.length < 8) return '****';
+  const prefix = clean.slice(0, 2);
+  const suffix = clean.slice(-4);
+  return `${prefix}**...****${suffix}`;
+}
+
+/**
+ * Masks confidential salary figures unless the user holds payroll view privileges.
+ */
+export function maskSalary(salary: number, canViewSalary: boolean): string {
+  if (!canViewSalary) return '••••••••';
+  return `PKR ${salary.toLocaleString()}`;
 }

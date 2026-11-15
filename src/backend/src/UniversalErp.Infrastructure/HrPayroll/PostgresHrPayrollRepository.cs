@@ -508,6 +508,18 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
         await using var conn = await OpenConnectionAsync(tenantId, companyId, ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
 
+        // Lookup previous active gross salary for audit logging
+        const string prevGrossSql = @"
+            SELECT gross_salary_pkr FROM hr.compensation_structures
+            WHERE tenant_id = @tenantId AND company_id = @companyId AND employee_id = @empId AND is_active = true
+            ORDER BY effective_date DESC LIMIT 1;";
+        await using var pgCmd = new NpgsqlCommand(prevGrossSql, conn, tx);
+        pgCmd.Parameters.AddWithValue("tenantId", tenantId);
+        pgCmd.Parameters.AddWithValue("companyId", companyId);
+        pgCmd.Parameters.AddWithValue("empId", request.EmployeeId);
+        var prevGrossObj = await pgCmd.ExecuteScalarAsync(ct);
+        decimal? prevGross = prevGrossObj is decimal d ? d : null;
+
         // Deactivate previous active compensations
         const string deactSql = @"
             UPDATE hr.compensation_structures SET is_active = false
@@ -566,6 +578,27 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             ToDateTimeOffset(reader.GetValue(1))
         );
         await reader.CloseAsync();
+
+        // Record entry in hr.salary_audit_logs
+        const string auditSql = @"
+            INSERT INTO hr.salary_audit_logs (
+                tenant_id, company_id, employee_id, action_type,
+                previous_gross_salary_pkr, new_gross_salary_pkr,
+                changed_by, change_reason, changed_at
+            )
+            VALUES (
+                @tenantId, @companyId, @empId, 'compensation_update',
+                @prevGross, @newGross, @changedBy, @reason, now()
+            );";
+        await using var aCmd = new NpgsqlCommand(auditSql, conn, tx);
+        aCmd.Parameters.AddWithValue("tenantId", tenantId);
+        aCmd.Parameters.AddWithValue("companyId", companyId);
+        aCmd.Parameters.AddWithValue("empId", request.EmployeeId);
+        aCmd.Parameters.AddWithValue("prevGross", (object?)prevGross ?? DBNull.Value);
+        aCmd.Parameters.AddWithValue("newGross", gross);
+        aCmd.Parameters.AddWithValue("changedBy", (object?)request.ChangedBy ?? Guid.Empty);
+        aCmd.Parameters.AddWithValue("reason", (object?)request.ChangeReason ?? "Compensation update");
+        await aCmd.ExecuteNonQueryAsync(ct);
 
         await tx.CommitAsync(ct);
         return comp;
@@ -1263,11 +1296,13 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             INSERT INTO hr.statutory_configurations (
                 tenant_id, company_id, config_key, config_name, effective_from, effective_to,
                 rate_percentage, threshold_amount_pkr, employer_rate_percentage,
-                employer_fixed_amount_pkr, employee_fixed_amount_pkr, is_active
+                employer_fixed_amount_pkr, employee_fixed_amount_pkr, is_active,
+                jurisdiction, authoritative_source, approval_reference
             )
             VALUES (
                 @tenantId, @companyId, @key, @name, @effFrom, @effTo,
-                @rate, @thresh, @empRate, @empFix, @eeFix, true
+                @rate, @thresh, @empRate, @empFix, @eeFix, true,
+                @jurisdiction, @authSource, @apprRef
             )
             ON CONFLICT (tenant_id, company_id, config_key, effective_from)
             DO UPDATE SET
@@ -1278,6 +1313,9 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 employer_rate_percentage = EXCLUDED.employer_rate_percentage,
                 employer_fixed_amount_pkr = EXCLUDED.employer_fixed_amount_pkr,
                 employee_fixed_amount_pkr = EXCLUDED.employee_fixed_amount_pkr,
+                jurisdiction = EXCLUDED.jurisdiction,
+                authoritative_source = EXCLUDED.authoritative_source,
+                approval_reference = EXCLUDED.approval_reference,
                 is_active = true
             RETURNING id, created_at;";
 
@@ -1293,6 +1331,9 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
         cmd.Parameters.AddWithValue("empRate", (object?)request.EmployerRatePercentage ?? DBNull.Value);
         cmd.Parameters.AddWithValue("empFix", (object?)request.EmployerFixedAmountPkr ?? DBNull.Value);
         cmd.Parameters.AddWithValue("eeFix", (object?)request.EmployeeFixedAmountPkr ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("jurisdiction", request.Jurisdiction);
+        cmd.Parameters.AddWithValue("authSource", request.AuthoritativeSource);
+        cmd.Parameters.AddWithValue("apprRef", request.ApprovalReference);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         await reader.ReadAsync(ct);
@@ -1300,7 +1341,8 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             reader.GetGuid(0), tenantId, companyId, request.ConfigKey.Trim().ToLowerInvariant(),
             request.ConfigName.Trim(), request.EffectiveFrom, request.EffectiveTo, request.RatePercentage,
             request.ThresholdAmountPkr, request.EmployerRatePercentage, request.EmployerFixedAmountPkr,
-            request.EmployeeFixedAmountPkr, true, ToDateTimeOffset(reader.GetValue(1))
+            request.EmployeeFixedAmountPkr, true, ToDateTimeOffset(reader.GetValue(1)),
+            request.Jurisdiction, request.AuthoritativeSource, request.ApprovalReference
         );
     }
 
@@ -1310,7 +1352,10 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
         const string sql = @"
             SELECT id, config_key, config_name, effective_from, effective_to, rate_percentage,
                    threshold_amount_pkr, employer_rate_percentage, employer_fixed_amount_pkr,
-                   employee_fixed_amount_pkr, is_active, created_at
+                   employee_fixed_amount_pkr, is_active, created_at,
+                   COALESCE(jurisdiction, 'FEDERAL'),
+                   COALESCE(authoritative_source, 'EOBI Act 1976 / Provincial Labour Gazette'),
+                   COALESCE(approval_reference, 'STAT-REG-2026-01')
             FROM hr.statutory_configurations
             WHERE tenant_id = @tenantId AND company_id = @companyId
             ORDER BY config_key, effective_from DESC;";
@@ -1331,7 +1376,8 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 reader.IsDBNull(7) ? null : reader.GetDecimal(7),
                 reader.IsDBNull(8) ? null : reader.GetDecimal(8),
                 reader.IsDBNull(9) ? null : reader.GetDecimal(9),
-                reader.GetBoolean(10), ToDateTimeOffset(reader.GetValue(11))
+                reader.GetBoolean(10), ToDateTimeOffset(reader.GetValue(11)),
+                reader.GetString(12), reader.GetString(13), reader.GetString(14)
             ));
         }
         return list;
@@ -1344,11 +1390,14 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             INSERT INTO hr.tax_slabs (
                 tenant_id, company_id, tax_year, effective_from, effective_to, slab_order,
                 min_annual_income_pkr, max_annual_income_pkr, fixed_tax_amount_pkr,
-                marginal_tax_rate_percentage, description
+                marginal_tax_rate_percentage, description,
+                jurisdiction, authoritative_source, approval_reference,
+                surcharge_rate_percentage, surcharge_threshold_pkr
             )
             VALUES (
                 @tenantId, @companyId, @yr, @effFrom, @effTo, @order,
-                @min, @max, @fixed, @rate, @desc
+                @min, @max, @fixed, @rate, @desc,
+                @jurisdiction, @authSource, @apprRef, @surchargeRate, @surchargeThresh
             )
             ON CONFLICT (tenant_id, company_id, tax_year, slab_order)
             DO UPDATE SET
@@ -1356,7 +1405,12 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 max_annual_income_pkr = EXCLUDED.max_annual_income_pkr,
                 fixed_tax_amount_pkr = EXCLUDED.fixed_tax_amount_pkr,
                 marginal_tax_rate_percentage = EXCLUDED.marginal_tax_rate_percentage,
-                description = EXCLUDED.description
+                description = EXCLUDED.description,
+                jurisdiction = EXCLUDED.jurisdiction,
+                authoritative_source = EXCLUDED.authoritative_source,
+                approval_reference = EXCLUDED.approval_reference,
+                surcharge_rate_percentage = EXCLUDED.surcharge_rate_percentage,
+                surcharge_threshold_pkr = EXCLUDED.surcharge_threshold_pkr
             RETURNING id, created_at;";
 
         await using var cmd = new NpgsqlCommand(sql, conn);
@@ -1371,13 +1425,20 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
         cmd.Parameters.AddWithValue("fixed", request.FixedTaxAmountPkr);
         cmd.Parameters.AddWithValue("rate", request.MarginalTaxRatePercentage);
         cmd.Parameters.AddWithValue("desc", (object?)request.Description?.Trim() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("jurisdiction", request.Jurisdiction);
+        cmd.Parameters.AddWithValue("authSource", request.AuthoritativeSource);
+        cmd.Parameters.AddWithValue("apprRef", request.ApprovalReference);
+        cmd.Parameters.AddWithValue("surchargeRate", request.SurchargeRatePercentage);
+        cmd.Parameters.AddWithValue("surchargeThresh", request.SurchargeThresholdPkr);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         await reader.ReadAsync(ct);
         return new TaxSlabDto(
             reader.GetGuid(0), tenantId, companyId, request.TaxYear, request.EffectiveFrom, request.EffectiveTo,
             request.SlabOrder, request.MinAnnualIncomePkr, request.MaxAnnualIncomePkr, request.FixedTaxAmountPkr,
-            request.MarginalTaxRatePercentage, request.Description, ToDateTimeOffset(reader.GetValue(1))
+            request.MarginalTaxRatePercentage, request.Description, ToDateTimeOffset(reader.GetValue(1)),
+            request.Jurisdiction, request.AuthoritativeSource, request.ApprovalReference,
+            request.SurchargeRatePercentage, request.SurchargeThresholdPkr
         );
     }
 
@@ -1387,7 +1448,12 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
         const string sql = @"
             SELECT id, tax_year, effective_from, effective_to, slab_order, min_annual_income_pkr,
                    max_annual_income_pkr, fixed_tax_amount_pkr, marginal_tax_rate_percentage,
-                   description, created_at
+                   description, created_at,
+                   COALESCE(jurisdiction, 'FEDERAL'),
+                   COALESCE(authoritative_source, 'Income Tax Ordinance, 2001 / Finance Act 2026'),
+                   COALESCE(approval_reference, 'FBR-CIRCULAR-2026-SALARIED'),
+                   COALESCE(surcharge_rate_percentage, 0),
+                   COALESCE(surcharge_threshold_pkr, 10000000)
             FROM hr.tax_slabs
             WHERE tenant_id = @tenantId AND company_id = @companyId
               AND (@yr::int IS NULL OR tax_year = @yr)
@@ -1406,7 +1472,9 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 reader.GetGuid(0), tenantId, companyId, reader.GetInt32(1), ToDateOnly(reader.GetValue(2)),
                 ToNullableDateOnly(reader.GetValue(3)), reader.GetInt32(4), reader.GetDecimal(5),
                 reader.IsDBNull(6) ? null : reader.GetDecimal(6), reader.GetDecimal(7), reader.GetDecimal(8),
-                reader.IsDBNull(9) ? null : reader.GetString(9), ToDateTimeOffset(reader.GetValue(10))
+                reader.IsDBNull(9) ? null : reader.GetString(9), ToDateTimeOffset(reader.GetValue(10)),
+                reader.GetString(11), reader.GetString(12), reader.GetString(13),
+                reader.GetDecimal(14), reader.GetDecimal(15)
             ));
         }
         return list;
@@ -1602,7 +1670,22 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
 
         // Fetch active employees
         var employees = await GetEmployeesAsync(tenantId, companyId, "active", null, ct);
-        var taxSlabs = await GetTaxSlabsAsync(tenantId, companyId, startDate.Year, ct);
+
+        // Resolve effective-dated statutory rules for the pay period (Tax Year runs July 1 - June 30)
+        int taxYear = startDate.Month >= 7 ? startDate.Year + 1 : startDate.Year;
+        var allSlabs = await GetTaxSlabsAsync(tenantId, companyId, taxYear, ct);
+        var effectiveTaxSlabs = allSlabs
+            .Where(s => s.EffectiveFrom <= endDate && (s.EffectiveTo == null || s.EffectiveTo >= startDate))
+            .ToList();
+
+        // Resolve effective minimum wage and EOBI threshold
+        var statConfigs = await GetStatutoryConfigsAsync(tenantId, companyId, ct);
+        var minWageConfig = statConfigs.FirstOrDefault(c =>
+            (c.ConfigKey.StartsWith("min_wage") || c.ConfigKey.StartsWith("eobi_min_wage")) &&
+            c.EffectiveFrom <= endDate &&
+            (c.EffectiveTo == null || c.EffectiveTo >= startDate));
+        decimal statutoryMinWage = minWageConfig?.ThresholdAmountPkr ?? 37_000m;
+
         var activeLoans = await GetSalaryLoansAsync(tenantId, companyId, null, "active", ct);
 
         decimal totalPeriodGross = 0;
@@ -1632,7 +1715,8 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 bonusAmount: 0,
                 loanInstallment: loanDeduction,
                 otherDeductions: 0,
-                taxSlabs: taxSlabs
+                taxSlabs: effectiveTaxSlabs,
+                statutoryMinWage: statutoryMinWage
             );
 
             totalPeriodGross += computed.GrossPay;

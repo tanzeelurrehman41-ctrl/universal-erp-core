@@ -8,6 +8,7 @@ import FinanceWorkspace from "./FinanceWorkspace";
 import ManufacturingWorkspace from "./ManufacturingWorkspace";
 import FoundationWorkspace from "./FoundationWorkspace";
 import HRWorkspace from "./HRWorkspace";
+import { AnalyticsWorkspace } from "./AnalyticsWorkspace";
 import {
   apiFetch,
   apiUrl,
@@ -112,6 +113,7 @@ export default function App() {
     | "manufacturing"
     | "foundation"
     | "hr"
+    | "analytics"
     | "saas"
     | "all"
   >("inventory");
@@ -777,6 +779,23 @@ export default function App() {
         </button>
         <button
           type="button"
+          onClick={() => setActiveNavTab("analytics")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "analytics" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "analytics" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "analytics" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          📊 Analytics & BI
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveNavTab("saas")}
           style={{
             padding: "8px 14px",
@@ -984,6 +1003,13 @@ export default function App() {
 
       {(activeNavTab === "hr" || activeNavTab === "all") && (
         <HRWorkspace
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
+      )}
+
+      {(activeNavTab === "analytics" || activeNavTab === "all") && (
+        <AnalyticsWorkspace
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
