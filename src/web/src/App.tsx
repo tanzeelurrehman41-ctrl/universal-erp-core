@@ -4,6 +4,7 @@ import PurchasingWorkspace from "./PurchasingWorkspace";
 import SalesWorkspace from "./SalesWorkspace";
 import TenancyWorkspace from "./TenancyWorkspace";
 import FinanceWorkspace from "./FinanceWorkspace";
+import ManufacturingWorkspace from "./ManufacturingWorkspace";
 import FoundationWorkspace from "./FoundationWorkspace";
 import {
   apiFetch,
@@ -100,7 +101,7 @@ export default function App() {
   });
   const activeWorkspace = workspaces.find((workspace) => workspaceKey(workspace) === activeWorkspaceKey) ?? null;
   const queueOwnerKey = ownerKeyForUser(authUser);
-  const [activeNavTab, setActiveNavTab] = useState<"inventory" | "purchasing" | "sales" | "finance" | "foundation" | "saas" | "all">("inventory");
+  const [activeNavTab, setActiveNavTab] = useState<"inventory" | "purchasing" | "sales" | "finance" | "manufacturing" | "foundation" | "saas" | "all">("inventory");
 
   useEffect(() => {
     if (!oidcConfigured) return;
@@ -695,6 +696,23 @@ export default function App() {
         </button>
         <button
           type="button"
+          onClick={() => setActiveNavTab("manufacturing")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "manufacturing" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "manufacturing" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "manufacturing" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          🏭 Manufacturing & BOM
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveNavTab("foundation")}
           style={{
             padding: "8px 14px",
@@ -891,6 +909,13 @@ export default function App() {
 
       {(activeNavTab === "finance" || activeNavTab === "all") && (
         <FinanceWorkspace
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
+      )}
+
+      {(activeNavTab === "manufacturing" || activeNavTab === "all") && (
+        <ManufacturingWorkspace
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />

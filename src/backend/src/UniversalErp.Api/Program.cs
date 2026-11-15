@@ -13,6 +13,7 @@ using UniversalErp.Api.Development;
 using UniversalErp.Api.HealthChecks;
 using UniversalErp.Api.Inventory;
 using UniversalErp.Api.Finance;
+using UniversalErp.Api.Manufacturing;
 using UniversalErp.Api.Purchasing;
 using UniversalErp.Api.Sales;
 using UniversalErp.Api.Security;
@@ -22,6 +23,7 @@ using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Finance;
 using UniversalErp.Application.Foundation;
 using UniversalErp.Application.Inventory;
+using UniversalErp.Application.Manufacturing;
 using UniversalErp.Application.Purchasing;
 using UniversalErp.Application.Sales;
 using UniversalErp.Application.Sync;
@@ -29,6 +31,7 @@ using UniversalErp.Application.Tenancy;
 using UniversalErp.Infrastructure.Finance;
 using UniversalErp.Infrastructure.Foundation;
 using UniversalErp.Infrastructure.Inventory;
+using UniversalErp.Infrastructure.Manufacturing;
 using UniversalErp.Infrastructure.Purchasing;
 using UniversalErp.Infrastructure.Sales;
 using UniversalErp.Infrastructure.Sync;
@@ -93,6 +96,8 @@ builder.Services.AddScoped<ITenantOnboardingRepository, PostgresTenantOnboarding
 builder.Services.AddScoped<TenantOnboardingService>();
 builder.Services.AddScoped<IFinanceRepository, PostgresFinanceRepository>();
 builder.Services.AddScoped<FinanceService>();
+builder.Services.AddScoped<IManufacturingRepository, PostgresManufacturingRepository>();
+builder.Services.AddScoped<ManufacturingService>();
 builder.Services.AddScoped<ISupplyChainOutboxRepository, PostgresSupplyChainOutboxRepository>();
 builder.Services.AddScoped<SupplyChainOutboxService>();
 builder.Services.AddScoped<ISalesRepository, PostgresSalesRepository>();
@@ -344,6 +349,12 @@ else
             "finance.bank.manage", "finance.bank.reconcile",
             "finance.tax.manage", "finance.asset.manage", "finance.asset.depreciate",
             "finance.reports.view",
+            "mfg.bom.view", "mfg.bom.manage",
+            "mfg.work_center.manage", "mfg.routing.manage",
+            "mfg.work_order.view", "mfg.work_order.create", "mfg.work_order.approve",
+            "mfg.material.reserve", "mfg.material.issue", "mfg.material.return",
+            "mfg.operation.report", "mfg.qc.inspect", "mfg.work_order.complete",
+            "mfg.reports.view",
         })
         {
             options.AddPolicy(permissionCode, policy => policy
@@ -375,6 +386,7 @@ var moduleCatalog = new[]
     new { id = "inventory", name = "Inventory", status = "In progress", description = "Catalog, units, variants, warehouses, bins, and atomic untracked stock receipts; transfers, reservations, and valuation remain." },
     new { id = "purchasing", name = "Purchasing", status = "In progress", description = "Suppliers, purchase orders, goods received notes with idempotent posting and inventory outbox events; invoice matching and quality inspection remain." },
     new { id = "finance", name = "Finance", status = "Active", description = "Chart of Accounts, General Ledger, Treasury, Bank Reconciliation, Fixed Assets, Tax, and Period Close." },
+    new { id = "manufacturing", name = "Manufacturing", status = "Active", description = "Bill of Materials, Multi-Level Components, Routings, Work Centers, Work Orders, FIFO Material Issues, WIP Accounting, and Quality Control." },
     new { id = "security", name = "Security and access", status = "In progress", description = "OIDC bearer validation and live membership/permission checks; user provisioning and client sign-in remain." },
     new { id = "offline", name = "Offline sync", status = "In progress", description = "Encrypted local journals, authenticated device grants, a durable receipt operation inbox, atomic snapshot cursors, and a paged change feed; event-level merge and product inbox processing remain." },
     new { id = "reporting", name = "Reporting", status = "Architecture only", description = "Approved datasets, dashboards, exports, and scheduled reports." },
@@ -540,6 +552,7 @@ app.MapPurchasingEndpoints(isDevelopment);
 app.MapSalesEndpoints(isDevelopment);
 app.MapTenantEndpoints(isDevelopment);
 app.MapFinanceEndpoints(isDevelopment);
+app.MapManufacturingEndpoints(isDevelopment);
 productApi.MapFoundationEndpoints();
 
 app.MapGet("/", () => Results.Ok(new
