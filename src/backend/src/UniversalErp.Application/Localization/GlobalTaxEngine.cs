@@ -183,21 +183,39 @@ public sealed class GlobalTaxEngine
                     CalculationExplanation: "New York classifies SaaS access as taxable prewritten computer software.",
                     AuditEvidenceSummary: "NYS Department of Taxation and Finance combined rate (4.0% state + 4.5% NYC + 0.375% MCTD)."),
 
-                // Texas: 80% Taxable Base for SaaS / Data Processing (8.25% * 0.8 = effective 6.6%)
-                "TX" => new TaxDeterminationResult(
+                // Texas: 80% Taxable Base for SaaS / Data Processing
+                // Texas levies a 6.25% state sales tax with applicable local taxes (city, county, transit) up to 2.0% (totaling up to 8.25%).
+                // Under Tex. Tax Code § 151.0101(a)(12) & 34 TAC Rule 3.342, 20% of the value is exempt (80% taxable base).
+                "TX_STATE" or "TX_UNINCORPORATED" => new TaxDeterminationResult(
+                    Jurisdiction: "US-TX-STATE",
+                    CountryCode: "US",
+                    ProvinceState: "TX",
+                    Authority: "TX_COMPTROLLER",
+                    TaxSystem: "sales_tax",
+                    TaxName: "Texas State Sales Tax on SaaS (State Only 6.25% on 80% Base)",
+                    TariffOrClassificationCode: request.ProductServiceClassification ?? "NAICS-518210",
+                    RatePercentage: 5.0000m, // 6.25% * 0.8 = 5.0%
+                    InputTaxAllowable: true,
+                    IsReverseCharge: false,
+                    IsExempt: false,
+                    StatutoryReference: "Texas Tax Code § 151.0101(a)(12) & 34 TAC Rule 3.342 (State Rate 6.25% on 80% Taxable Base)",
+                    CalculationExplanation: "Texas state-only sales tax: 6.25% statutory rate assessed on 80% taxable base yields 5.0% effective tax.",
+                    AuditEvidenceSummary: "Texas Comptroller state rate 6.25% on 80% taxable base without local jurisdiction add-ons."),
+
+                "TX" or "TX_COMBINED" or "TX_AUSTIN" or "TX_HOUSTON" or "TX_DALLAS" => new TaxDeterminationResult(
                     Jurisdiction: "US-TX",
                     CountryCode: "US",
                     ProvinceState: "TX",
                     Authority: "TX_COMPTROLLER",
                     TaxSystem: "sales_tax",
-                    TaxName: "Texas Sales Tax on SaaS (80% Statutory Taxable Base)",
+                    TaxName: "Texas Combined State & Local Sales Tax on SaaS (8.25% on 80% Base)",
                     TariffOrClassificationCode: request.ProductServiceClassification ?? "NAICS-518210",
-                    RatePercentage: 6.6000m,
+                    RatePercentage: 6.6000m, // (6.25% state + 2.0% local = 8.25%) * 0.8 = 6.6%
                     InputTaxAllowable: true,
                     IsReverseCharge: false,
                     IsExempt: false,
-                    StatutoryReference: "Texas Tax Code § 151.0101(a)(12) & 34 TAC Rule 3.342 (Data Processing Services)",
-                    CalculationExplanation: "Texas grants a 20% statutory exemption on data processing/SaaS, resulting in 6.6% effective tax.",
+                    StatutoryReference: "Texas Tax Code § 151.0101(a)(12) & 34 TAC Rule 3.342 (Combined 8.25% on 80% Taxable Base)",
+                    CalculationExplanation: "Texas combined state (6.25%) and local (2.00%) sales tax assessed on 80% taxable base yields 6.6% effective tax.",
                     AuditEvidenceSummary: "Texas Comptroller combined rate 8.25% assessed on 80% taxable base."),
 
                 // California: Pure SaaS is Exempt (No tangible personal property transferred)

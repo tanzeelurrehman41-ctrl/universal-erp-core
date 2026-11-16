@@ -213,11 +213,25 @@ test("LOCALIZATION_COVERAGE_MATRIX maintains authoritative status integrity", ()
 
   // Query by status
   const implemented = getCoverageByStatus("Implemented and tested");
-  assert.ok(implemented.length >= 5);
+  assert.ok(implemented.length >= 4);
   const codes = implemented.map(e => e.countryCode);
   assert.ok(codes.includes("PK"));
   assert.ok(codes.includes("US"));
   assert.ok(codes.includes("GB"));
   assert.ok(codes.includes("AE"));
-  assert.ok(codes.includes("SA"));
+
+  const partial = getCoverageByStatus("Partially implemented");
+  assert.ok(partial.length >= 3);
+  const partialCodes = partial.map(e => e.countryCode);
+  assert.ok(partialCodes.includes("SA"));
+  assert.ok(partialCodes.includes("AU"));
+  assert.ok(partialCodes.includes("CA"));
+
+  // Verify SA and DE payroll subsystem statuses
+  const sa = getCountryCoverage("SA");
+  assert.ok(sa);
+  assert.equal(sa.subsystems.payroll.status, "Architecture configured only");
+  const de = getCountryCoverage("DE");
+  assert.ok(de);
+  assert.equal(de.subsystems.payroll.status, "Architecture configured only");
 });

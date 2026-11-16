@@ -1,15 +1,20 @@
 /**
  * Universal ERP — Authoritative Country Localization Coverage Matrix
- * System-wide regulatory and statutory capability matrix categorizing countries into:
- * 1. "Implemented and tested"
- * 2. "Partially implemented"
- * 3. "Architecture configured only"
- * 4. "Not yet supported"
- * 5. "Awaiting regulatory verification"
+ * System-wide regulatory and statutory capability matrix categorizing countries across 7 distinct subsystems:
+ * 1. Tax
+ * 2. Payroll
+ * 3. Accounting
+ * 4. E-Invoicing
+ * 5. Payment Integration
+ * 6. Language and Locale
+ * 7. Currency and Formatting
  *
- * Roadmap order:
- * 1. Pakistan, 2. United States, 3. United Kingdom, 4. European Union (EU-27),
- * 5. UAE, 6. Saudi Arabia, 7. Canada, 8. Australia, 9. India, 10. Future roadmap countries.
+ * Statuses:
+ * - "Implemented and tested"
+ * - "Partially implemented"
+ * - "Architecture configured only"
+ * - "Not yet supported"
+ * - "Awaiting regulatory verification"
  */
 
 export type CoverageStatus =
@@ -24,19 +29,23 @@ export type DomainCapability = {
   notes: string;
 };
 
+export type SubsystemsCoverage = {
+  tax: DomainCapability;
+  payroll: DomainCapability;
+  accounting: DomainCapability;
+  eInvoicing: DomainCapability;
+  paymentIntegration: DomainCapability;
+  languageAndLocale: DomainCapability;
+  currencyAndFormatting: DomainCapability;
+};
+
 export type CountryCoverageEntry = {
   roadmapPriority: number;
   countryCode: string;
   countryName: string;
   primaryCurrency: string;
   overallStatus: CoverageStatus;
-  domains: {
-    generalLedgerAndCurrencies: DomainCapability;
-    salesTaxAndVat: DomainCapability;
-    payrollAndWithholding: DomainCapability;
-    eInvoicingAndReporting: DomainCapability;
-    bankingAndPayments: DomainCapability;
-  };
+  subsystems: SubsystemsCoverage;
   statutoryAuthorities: string[];
   supportedSubnationalJurisdictions?: string[];
   activeVersion: string;
@@ -50,32 +59,40 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
     countryName: "Pakistan",
     primaryCurrency: "PKR",
     overallStatus: "Implemented and tested",
-    domains: {
-      generalLedgerAndCurrencies: {
+    subsystems: {
+      tax: {
         status: "Implemented and tested",
-        notes: "Full PKR ledger, South Asian lakh/crore number formatting, custom fiscal years (July-June).",
+        notes: "SRB 15%/3%, PRA 16%/5%, KPRA 15%/2%, BRA 15%/6% (Finance Act 2026, input tax credit barred), ICT 15%/5%, export zero-rating.",
       },
-      salesTaxAndVat: {
+      payroll: {
         status: "Implemented and tested",
-        notes: "SRB 15%/3%, PRA 16%/5%, KPRA 15%/2%, BRA 15%/6% (Finance Act 2026, input credit barred), ICT 15%/5%, export zero-rating.",
+        notes: "FBR Tax Year 2027 8-tier salaried slabs (Finance Act 2026), statutory EOBI (PKR 37,000 base: PKR 370 EE, PKR 1,850 ER), SESSI/PESSI 5% on PKR 40k ceiling.",
       },
-      payrollAndWithholding: {
+      accounting: {
         status: "Implemented and tested",
-        notes: "FBR Tax Year 2027 8-tier salaried slabs, EOBI (PKR 37,000 base), SESSI/PESSI 5% on PKR 40k ceiling.",
+        notes: "Double-entry general ledger in PKR, custom fiscal year (July 1 - June 30), multi-branch trial balance.",
       },
-      eInvoicingAndReporting: {
+      eInvoicing: {
         status: "Implemented and tested",
         notes: "FBR Digital Invoicing integration under Sales Tax General Order 01/2024.",
       },
-      bankingAndPayments: {
+      paymentIntegration: {
         status: "Implemented and tested",
-        notes: "Raast instant payments, 1Link, PRAL banking clearing support.",
+        notes: "Raast instant payments, 1Link clearing rails, PRAL banking clearing support.",
+      },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "Urdu (ur-PK) with Right-to-Left (dir=\"rtl\") UI layout and English (en-PK).",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Pakistani Rupee (PKR), South Asian numbering system (lakh/crore grouping: 1,50,000.00).",
       },
     },
     statutoryAuthorities: ["FBR", "SRB", "PRA", "KPRA", "BRA", "EOBI"],
     supportedSubnationalJurisdictions: ["SINDH", "PUNJAB", "KP", "BALOCHISTAN", "FEDERAL"],
     activeVersion: "2026.1",
-    verificationEvidence: "Verified against Finance Act 2026 and official provincial statutory notifications.",
+    verificationEvidence: "Verified against Finance Act 2026, provincial sales tax acts, and EOBI Act 1976.",
   },
 
   US: {
@@ -84,32 +101,40 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
     countryName: "United States",
     primaryCurrency: "USD",
     overallStatus: "Implemented and tested",
-    domains: {
-      generalLedgerAndCurrencies: {
+    subsystems: {
+      tax: {
         status: "Implemented and tested",
-        notes: "USD 2-decimal ledger, calendar fiscal year (Jan-Dec), imperial units.",
+        notes: "State & local sales tax resolution: NY (8.875%), TX (state 6.25% + local up to 2.0% with 80% taxable base = 5.0% state-only or 6.6% combined), WA (6.5%), CA (pure SaaS exempt), resale certs.",
       },
-      salesTaxAndVat: {
+      payroll: {
         status: "Implemented and tested",
-        notes: "Destination-based sales tax: NY (8.875%), TX (6.6% via 80% taxable base), WA (6.5%), CA (pure SaaS exempt), resale cert support.",
+        notes: "2026 OASDI cap ($184,500), Medicare 1.45% + Additional 0.9% over $200k/$250k, 2026 standard deductions ($16,100 Single, $32,200 MFJ, $24,150 HOH), Form W-4 settings (Steps 2-4), FUTA 0.6%, SUTA.",
       },
-      payrollAndWithholding: {
+      accounting: {
         status: "Implemented and tested",
-        notes: "2026 OASDI cap ($184,500), Medicare 1.45% + Additional 0.9% over $200k/$250k, 2026 FIT schedules (Single/MFJ/HOH), FUTA 0.6%, SUTA.",
+        notes: "USD 2-decimal ledger, US GAAP double-entry, calendar fiscal year (Jan 1 - Dec 31).",
       },
-      eInvoicingAndReporting: {
+      eInvoicing: {
         status: "Architecture configured only",
-        notes: "BPC Digital Invoicing / Peppol US pilot architecture configured.",
+        notes: "Business Payments Coalition (BPC) / Peppol US pilot framework architecture configured.",
       },
-      bankingAndPayments: {
+      paymentIntegration: {
         status: "Implemented and tested",
         notes: "ACH (NACHA) file generation, Fedwire, Stripe sandbox integration.",
       },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "English (en-US), US date format (MM/DD/YYYY), imperial units.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "US Dollar ($ USD), standard 2-decimal Western comma grouping ($ 1,250.50).",
+      },
     },
-    statutoryAuthorities: ["IRS", "SSA", "NYS_TAX", "TX_COMPTROLLER", "CDTFA", "WA_DOR"],
+    statutoryAuthorities: ["IRS", "SSA", "NYS DTF", "TX Comptroller", "CDTFA", "WA DOR"],
     supportedSubnationalJurisdictions: ["NY", "TX", "WA", "CA", "IL"],
     activeVersion: "2026.1.0",
-    verificationEvidence: "Verified against IRS Publication 15-T (2026) and SSA 2026 Social Security changes.",
+    verificationEvidence: "Verified against IRS Publication 15-T (2026), Form W-4, and SSA statutory wage base card.",
   },
 
   GB: {
@@ -118,126 +143,240 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
     countryName: "United Kingdom",
     primaryCurrency: "GBP",
     overallStatus: "Implemented and tested",
-    domains: {
-      generalLedgerAndCurrencies: {
+    subsystems: {
+      tax: {
         status: "Implemented and tested",
-        notes: "GBP 2-decimal ledger, UK tax year (6 April - 5 April).",
+        notes: "HMRC standard 20% VAT, cross-border B2B reverse charge (VATA 1994 s7A), overseas vendor digital rules.",
       },
-      salesTaxAndVat: {
+      payroll: {
         status: "Implemented and tested",
-        notes: "Standard 20% VAT, cross-border B2B reverse charge (VATA 1994 s7A), overseas vendor digital rules.",
+        notes: "2026-27 Employer Class 1 NIC (15.0%, £417/mo secondary threshold), categories (A/B/C/H/M/J), Scottish 6-band PAYE, Student Loans (Plan 1 £2,241.66, Plan 2 £2,448.75, Plan 4 £2,816.25, Plan 5 £2,083.33, PG £1,750.00), Pension Auto-Enrolment.",
       },
-      payrollAndWithholding: {
+      accounting: {
         status: "Implemented and tested",
-        notes: "2026-27 Employer Class 1 NIC (15.0%, £417/mo secondary threshold), categories (A/B/C/H/M/J), Scottish 6-band PAYE, Student Loans (1/2/4/5/PG), Pension Auto-Enrolment.",
+        notes: "UK GAAP / FRS 102 ledger, UK tax year (6 April - 5 April).",
       },
-      eInvoicingAndReporting: {
+      eInvoicing: {
         status: "Implemented and tested",
         notes: "HMRC Making Tax Digital (MTD) for VAT compliance.",
       },
-      bankingAndPayments: {
+      paymentIntegration: {
         status: "Implemented and tested",
-        notes: "BACS, Faster Payments Service (FPS), CHAPS clearing.",
+        notes: "BACS direct entry, Faster Payments Service (FPS), CHAPS clearing.",
+      },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "English (en-GB), UK date format (DD/MM/YYYY), UK postcode validator.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "British Pound (£ GBP), 2 decimals, standard comma grouping (£ 2,450.75).",
       },
     },
     statutoryAuthorities: ["HMRC", "TPR", "SLC"],
     supportedSubnationalJurisdictions: ["ENGLAND", "SCOTLAND", "WALES", "NI"],
     activeVersion: "2026.2.0",
-    verificationEvidence: "Verified against Autumn Budget 2024 National Insurance reforms and Scottish Income Tax 2026/27.",
+    verificationEvidence: "Verified against Autumn Budget 2024 NIC reform, HMRC PAYE, and Scottish Income Tax 2026/27.",
+  },
+
+  AE: {
+    roadmapPriority: 4,
+    countryCode: "AE",
+    countryName: "United Arab Emirates",
+    primaryCurrency: "AED",
+    overallStatus: "Implemented and tested",
+    subsystems: {
+      tax: {
+        status: "Implemented and tested",
+        notes: "Federal Decree-Law No. (8) of 2017 standard 5% VAT, FTA tax invoice generation.",
+      },
+      payroll: {
+        status: "Implemented and tested",
+        notes: "0% income tax; separate cohort rules for Federal Law 7 of 1999 (5% EE, 12.5% ER, cap AED 50k), Federal Decree-Law 57 of 2023 (11% EE, 15% ER, cap AED 70k/100k), ADPF (11% EE, 15% ER), SSSF (5% EE, 15% ER), expat EOSG under Decree-Law 33 of 2021.",
+      },
+      accounting: {
+        status: "Implemented and tested",
+        notes: "AED double-entry ledger, Gregorian and Hijri calendar support.",
+      },
+      eInvoicing: {
+        status: "Implemented and tested",
+        notes: "UAE Ministry of Finance E-Invoicing standard based on Peppol PINT.",
+      },
+      paymentIntegration: {
+        status: "Implemented and tested",
+        notes: "Wages Protection System (WPS) SIF file generation, UAE Central Bank IPP.",
+      },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "Arabic (ar-AE) with RTL (dir=\"rtl\") layout and English (en-AE).",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "UAE Dirham (AED), 2 decimals.",
+      },
+    },
+    statutoryAuthorities: ["FTA", "MOHRE", "GPSSA", "ADPF", "SSSF"],
+    activeVersion: "2026.1",
+    verificationEvidence: "Verified against Federal Decree-Law 57 of 2023, Law 7 of 1999, and MOHRE Labour Law 33 of 2021.",
+  },
+
+  SA: {
+    roadmapPriority: 5,
+    countryCode: "SA",
+    countryName: "Saudi Arabia",
+    primaryCurrency: "SAR",
+    overallStatus: "Partially implemented",
+    subsystems: {
+      tax: {
+        status: "Implemented and tested",
+        notes: "Standard 15% VAT under Royal Decree No. M/113.",
+      },
+      payroll: {
+        status: "Architecture configured only",
+        notes: "General Organization for Social Insurance (GOSI) statutory architecture configured in roadmap; awaiting regulatory release.",
+      },
+      accounting: {
+        status: "Implemented and tested",
+        notes: "SAR double-entry ledger, Hijri/Umm al-Qura calendar support.",
+      },
+      eInvoicing: {
+        status: "Implemented and tested",
+        notes: "ZATCA FATOORA Phase 2 (Cryptographic Stamp, ECDSA secp256k1, QR Code, UBL 2.1 XML).",
+      },
+      paymentIntegration: {
+        status: "Implemented and tested",
+        notes: "SARIE instant payments, Mada, Saudi National WPS.",
+      },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "Arabic (ar-SA) with RTL (dir=\"rtl\") layout.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Saudi Riyal (SAR), 2 decimals.",
+      },
+    },
+    statutoryAuthorities: ["ZATCA", "GOSI"],
+    activeVersion: "2026.1",
+    verificationEvidence: "Verified against ZATCA Phase 2 E-Invoicing Technical Specifications.",
   },
 
   DE: {
-    roadmapPriority: 4,
+    roadmapPriority: 6,
     countryCode: "DE",
     countryName: "Germany (European Union)",
     primaryCurrency: "EUR",
-    overallStatus: "Implemented and tested",
-    domains: {
-      generalLedgerAndCurrencies: {
-        status: "Implemented and tested",
-        notes: "EUR 2-decimal ledger, GoBD principles, metric system.",
-      },
-      salesTaxAndVat: {
+    overallStatus: "Partially implemented",
+    subsystems: {
+      tax: {
         status: "Implemented and tested",
         notes: "German MwSt 19%, EU OSS Destination VAT, Intra-EU B2B Reverse Charge (Directive 2006/112/EC Art 196).",
       },
-      payrollAndWithholding: {
+      payroll: {
         status: "Architecture configured only",
-        notes: "Lohnsteuer & Sozialversicherung architecture defined in roadmap.",
+        notes: "Lohnsteuer & Sozialversicherung architecture defined in roadmap; not yet activated.",
       },
-      eInvoicingAndReporting: {
+      accounting: {
+        status: "Implemented and tested",
+        notes: "EUR 2-decimal ledger, GoBD principles, metric system.",
+      },
+      eInvoicing: {
         status: "Implemented and tested",
         notes: "ZUGFeRD 2.2 / XRechnung (EN 16931) mandatory e-invoicing architecture.",
       },
-      bankingAndPayments: {
+      paymentIntegration: {
         status: "Implemented and tested",
-        notes: "SEPA Credit Transfer (SCT) and SEPA Direct Debit (SDD) XML ISO 20022.",
+        notes: "SEPA Credit Transfer (SCT) and Direct Debit (SDD) ISO 20022 XML.",
+      },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "German (de-DE), DIN 5008 address format, 5-digit postal code.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Euro (€ EUR), 2 decimals.",
       },
     },
-    statutoryAuthorities: ["Bundeszentralamt für Steuern (BZSt)", "Finanzamt"],
+    statutoryAuthorities: ["BZSt", "Finanzamt"],
     activeVersion: "2026.1",
     verificationEvidence: "Verified against German UStG § 12 and B2B E-Invoicing Mandate 2025/2026.",
   },
 
   FR: {
-    roadmapPriority: 4,
+    roadmapPriority: 6,
     countryCode: "FR",
     countryName: "France (European Union)",
     primaryCurrency: "EUR",
-    overallStatus: "Implemented and tested",
-    domains: {
-      generalLedgerAndCurrencies: {
-        status: "Implemented and tested",
-        notes: "EUR 2-decimal ledger, Plan Comptable Général (PCG).",
-      },
-      salesTaxAndVat: {
+    overallStatus: "Partially implemented",
+    subsystems: {
+      tax: {
         status: "Implemented and tested",
         notes: "French TVA 20%, EU OSS Destination VAT, Intra-EU Art 196 Reverse Charge.",
       },
-      payrollAndWithholding: {
+      payroll: {
         status: "Architecture configured only",
-        notes: "Bulletin de paie & URSSAF architecture configured.",
+        notes: "Bulletin de paie & URSSAF architecture configured in roadmap; not yet activated.",
       },
-      eInvoicingAndReporting: {
+      accounting: {
+        status: "Implemented and tested",
+        notes: "EUR 2-decimal ledger, Plan Comptable Général (PCG).",
+      },
+      eInvoicing: {
         status: "Implemented and tested",
         notes: "Chorus Pro / Portail Public de Facturation (PPF) integration.",
       },
-      bankingAndPayments: {
+      paymentIntegration: {
         status: "Implemented and tested",
         notes: "SEPA ISO 20022 XML formats.",
       },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "French (fr-FR), French address and postal code formats.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Euro (€ EUR), 2 decimals.",
+      },
     },
-    statutoryAuthorities: ["Direction Générale des Finances Publiques (DGFiP)", "URSSAF"],
+    statutoryAuthorities: ["DGFiP", "URSSAF"],
     activeVersion: "2026.1",
     verificationEvidence: "Verified against French CGI Art 278 and PPF mandate.",
   },
 
   IE: {
-    roadmapPriority: 4,
+    roadmapPriority: 6,
     countryCode: "IE",
     countryName: "Ireland (European Union)",
     primaryCurrency: "EUR",
-    overallStatus: "Implemented and tested",
-    domains: {
-      generalLedgerAndCurrencies: {
-        status: "Implemented and tested",
-        notes: "EUR 2-decimal ledger, calendar fiscal year.",
-      },
-      salesTaxAndVat: {
+    overallStatus: "Partially implemented",
+    subsystems: {
+      tax: {
         status: "Implemented and tested",
         notes: "Irish standard VAT 23%, EU OSS, Intra-EU Art 196 Reverse Charge.",
       },
-      payrollAndWithholding: {
+      payroll: {
         status: "Architecture configured only",
-        notes: "PAYE Modernisation architecture configured.",
+        notes: "PAYE Modernisation architecture configured in roadmap; not yet activated.",
       },
-      eInvoicingAndReporting: {
+      accounting: {
+        status: "Implemented and tested",
+        notes: "EUR 2-decimal ledger, calendar fiscal year.",
+      },
+      eInvoicing: {
         status: "Implemented and tested",
         notes: "Peppol BIS Billing 3.0 e-invoicing.",
       },
-      bankingAndPayments: {
+      paymentIntegration: {
         status: "Implemented and tested",
         notes: "SEPA SCT/SDD clearing.",
+      },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "English (en-IE), Eircode postal validator.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Euro (€ EUR), 2 decimals.",
       },
     },
     statutoryAuthorities: ["Irish Revenue Commissioners"],
@@ -246,102 +385,44 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
   },
 
   EU_OTHER: {
-    roadmapPriority: 4,
+    roadmapPriority: 6,
     countryCode: "EU",
     countryName: "Other EU Member States (24 Countries)",
     primaryCurrency: "EUR",
     overallStatus: "Partially implemented",
-    domains: {
-      generalLedgerAndCurrencies: {
-        status: "Implemented and tested",
-        notes: "Multi-currency support for EUR and non-EUR members (SEK, PLN, DKK, CZK, HUF, RON, BGN).",
-      },
-      salesTaxAndVat: {
+    subsystems: {
+      tax: {
         status: "Implemented and tested",
         notes: "Standard rates for all 27 EU member states, EU One Stop Shop (OSS) destination VAT, and Article 196 Reverse Charge.",
       },
-      payrollAndWithholding: {
+      payroll: {
         status: "Not yet supported",
-        notes: "Member-state specific payroll modules planned for future phases.",
+        notes: "Member-state specific payroll modules planned for future localizations.",
       },
-      eInvoicingAndReporting: {
+      accounting: {
+        status: "Implemented and tested",
+        notes: "Multi-currency support for EUR and non-EUR members (SEK, PLN, DKK, CZK, HUF, RON, BGN).",
+      },
+      eInvoicing: {
         status: "Partially implemented",
         notes: "Italy SdI, Poland KSeF, Spain FACe, and Peppol BIS 3.0 architecture mapped.",
       },
-      bankingAndPayments: {
+      paymentIntegration: {
         status: "Implemented and tested",
         notes: "SEPA Single Euro Payments Area ISO 20022 XML.",
+      },
+      languageAndLocale: {
+        status: "Partially implemented",
+        notes: "European date and address format standards.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "ISO 4217 compliant formatting.",
       },
     },
     statutoryAuthorities: ["European Commission / Member State Tax Authorities"],
     activeVersion: "2026.1",
     verificationEvidence: "Complies with EU Council Directive 2006/112/EC and OSS Regulation 2019/1995.",
-  },
-
-  AE: {
-    roadmapPriority: 5,
-    countryCode: "AE",
-    countryName: "United Arab Emirates",
-    primaryCurrency: "AED",
-    overallStatus: "Implemented and tested",
-    domains: {
-      generalLedgerAndCurrencies: {
-        status: "Implemented and tested",
-        notes: "AED 2-decimal ledger, bilingual Arabic/English, Islamic & Gregorian calendars.",
-      },
-      salesTaxAndVat: {
-        status: "Implemented and tested",
-        notes: "Standard 5% VAT under Federal Decree-Law No. (8) of 2017, FTA tax invoice generation.",
-      },
-      payrollAndWithholding: {
-        status: "Implemented and tested",
-        notes: "0% personal income tax, GPSSA pension (5% EE, 12.5% ER) for UAE nationals, MOHRE End of Service Gratuity (EOSG) monthly accrual.",
-      },
-      eInvoicingAndReporting: {
-        status: "Implemented and tested",
-        notes: "UAE MoF E-Invoicing system using Peppol PINT standard.",
-      },
-      bankingAndPayments: {
-        status: "Implemented and tested",
-        notes: "WPS (Wages Protection System) SIF file generation, UAE Central Bank IPP.",
-      },
-    },
-    statutoryAuthorities: ["Federal Tax Authority (FTA)", "MOHRE", "GPSSA"],
-    activeVersion: "2026.1",
-    verificationEvidence: "Verified against FTA VAT Law and MOHRE Labour Law Decree No. 33 of 2021.",
-  },
-
-  SA: {
-    roadmapPriority: 6,
-    countryCode: "SA",
-    countryName: "Saudi Arabia",
-    primaryCurrency: "SAR",
-    overallStatus: "Implemented and tested",
-    domains: {
-      generalLedgerAndCurrencies: {
-        status: "Implemented and tested",
-        notes: "SAR 2-decimal ledger, Hijri/Umm al-Qura calendar support, Arabic RTL typography.",
-      },
-      salesTaxAndVat: {
-        status: "Implemented and tested",
-        notes: "Standard 15% VAT under Royal Decree No. M/113.",
-      },
-      payrollAndWithholding: {
-        status: "Architecture configured only",
-        notes: "GOSI (General Organization for Social Insurance) rules configured in roadmap.",
-      },
-      eInvoicingAndReporting: {
-        status: "Implemented and tested",
-        notes: "ZATCA FATOORA Phase 2 (Cryptographic Stamp, ECDSA secp256k1, QR Code, UBL 2.1 XML).",
-      },
-      bankingAndPayments: {
-        status: "Implemented and tested",
-        notes: "SARIE instant payments, Mada, Saudi National WPS.",
-      },
-    },
-    statutoryAuthorities: ["Zakat, Tax and Customs Authority (ZATCA)", "GOSI"],
-    activeVersion: "2026.1",
-    verificationEvidence: "Verified against ZATCA Phase 2 E-Invoicing Technical Specifications.",
   },
 
   CA: {
@@ -350,29 +431,37 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
     countryName: "Canada",
     primaryCurrency: "CAD",
     overallStatus: "Partially implemented",
-    domains: {
-      generalLedgerAndCurrencies: {
-        status: "Implemented and tested",
-        notes: "CAD 2-decimal ledger, bilingual English/French support.",
-      },
-      salesTaxAndVat: {
+    subsystems: {
+      tax: {
         status: "Implemented and tested",
         notes: "Non-resident digital services regime: ON HST 13%, BC 12%, QC QST 14.975%, Atlantic 15%, Federal 5%, B2B reverse charge.",
       },
-      payrollAndWithholding: {
+      payroll: {
         status: "Architecture configured only",
         notes: "CPP/EI & TD1 federal tax credit architecture seeded under Migration 041.",
       },
-      eInvoicingAndReporting: {
+      accounting: {
+        status: "Implemented and tested",
+        notes: "CAD 2-decimal ledger, bilingual English/French support.",
+      },
+      eInvoicing: {
         status: "Architecture configured only",
         notes: "CRA digital reporting architecture configured.",
       },
-      bankingAndPayments: {
+      paymentIntegration: {
         status: "Partially implemented",
         notes: "Interac & EFT 80-byte / 1464-byte batch files mapped.",
       },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "English (en-CA) and French (fr-CA), postal code A1A 1A1.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Canadian Dollar (CA$ CAD), 2 decimals.",
+      },
     },
-    statutoryAuthorities: ["Canada Revenue Agency (CRA)", "Revenu Québec"],
+    statutoryAuthorities: ["CRA", "Revenu Québec"],
     supportedSubnationalJurisdictions: ["ON", "BC", "QC", "AB", "NS", "NB", "NL", "PE"],
     activeVersion: "0.1.0-draft",
     verificationEvidence: "Verified against CRA Excise Tax Act Part IX Non-Resident Digital Framework.",
@@ -384,32 +473,40 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
     countryName: "Australia",
     primaryCurrency: "AUD",
     overallStatus: "Partially implemented",
-    domains: {
-      generalLedgerAndCurrencies: {
-        status: "Implemented and tested",
-        notes: "AUD 2-decimal ledger, Australian fiscal year (1 July - 30 June).",
-      },
-      salesTaxAndVat: {
+    subsystems: {
+      tax: {
         status: "Implemented and tested",
         notes: "ATO standard 10% GST, B2C inbound digital supplies (Subdiv 84-B), B2B reverse charge (Subdiv 84-A).",
       },
-      payrollAndWithholding: {
-        status: "Architecture configured only",
-        notes: "Superannuation Guarantee (12%) & PAYG withholding architecture seeded under Migration 041.",
+      payroll: {
+        status: "Partially implemented",
+        notes: "Superannuation Guarantee 12.0% effective 1 July 2026, OTE qualification, Payday Super 7-business-day fund clearance rule, PAYG withholding.",
       },
-      eInvoicingAndReporting: {
+      accounting: {
+        status: "Implemented and tested",
+        notes: "AUD 2-decimal ledger, Australian fiscal year (1 July - 30 June).",
+      },
+      eInvoicing: {
         status: "Partially implemented",
         notes: "ATO Peppol E-Invoicing framework.",
       },
-      bankingAndPayments: {
+      paymentIntegration: {
         status: "Partially implemented",
         notes: "NPP (New Payments Platform) / PayID & BECS Direct Entry file format.",
       },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "English (en-AU), 4-digit postal code validator.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Australian Dollar (A$ AUD), 2 decimals.",
+      },
     },
-    statutoryAuthorities: ["Australian Taxation Office (ATO)"],
+    statutoryAuthorities: ["ATO"],
     supportedSubnationalJurisdictions: ["NSW", "VIC", "QLD", "WA", "SA"],
     activeVersion: "0.1.0-draft",
-    verificationEvidence: "Verified against A New Tax System (Goods and Services Tax) Act 1999.",
+    verificationEvidence: "Verified against A New Tax System (GST) Act 1999 and Superannuation Guarantee Administration Act 1992.",
   },
 
   IN: {
@@ -418,29 +515,37 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
     countryName: "India",
     primaryCurrency: "INR",
     overallStatus: "Architecture configured only",
-    domains: {
-      generalLedgerAndCurrencies: {
-        status: "Implemented and tested",
-        notes: "INR 2-decimal ledger, South Asian numbering format, fiscal year (1 April - 31 March).",
-      },
-      salesTaxAndVat: {
+    subsystems: {
+      tax: {
         status: "Architecture configured only",
         notes: "Dual GST (CGST + SGST / IGST) and OIDAR non-resident digital services tax rules configured.",
       },
-      payrollAndWithholding: {
+      payroll: {
         status: "Architecture configured only",
         notes: "EPF (12%), ESI, Professional Tax, and Section 192 TDS architecture seeded.",
       },
-      eInvoicingAndReporting: {
+      accounting: {
+        status: "Implemented and tested",
+        notes: "INR 2-decimal ledger, South Asian numbering format, fiscal year (1 April - 31 March).",
+      },
+      eInvoicing: {
         status: "Architecture configured only",
         notes: "NIC E-Invoice Portal / Invoice Registration Portal (IRP) architecture mapped.",
       },
-      bankingAndPayments: {
+      paymentIntegration: {
         status: "Partially implemented",
         notes: "UPI, NEFT, RTGS rails mapped.",
       },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "English (en-IN), Hindi (hi-IN), Indian pin code validator.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Indian Rupee (₹ INR), South Asian lakh/crore grouping.",
+      },
     },
-    statutoryAuthorities: ["Central Board of Indirect Taxes and Customs (CBIC)", "EPFO", "Income Tax Department"],
+    statutoryAuthorities: ["CBIC", "EPFO", "Income Tax Department"],
     supportedSubnationalJurisdictions: ["MH", "KA", "DL", "TN", "UP"],
     activeVersion: "0.1.0-draft",
     verificationEvidence: "Verified against GST Acts 2017 and OIDAR statutory guidelines.",

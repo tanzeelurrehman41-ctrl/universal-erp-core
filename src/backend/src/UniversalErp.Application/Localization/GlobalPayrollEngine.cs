@@ -24,7 +24,19 @@ public sealed record PayrollCalculationContext(
     bool PensionAutoEnrolment = false,
     decimal PensionEmployeeRate = 0.05m,
     decimal PensionEmployerRate = 0.03m,
-    decimal SutaRate = 0.034m);
+    decimal SutaRate = 0.027m,
+    // US Form W-4 Settings (IRS Pub 15-T)
+    bool W4Step2cMultipleJobs = false,
+    decimal W4Step3DependentCredits = 0.00m,
+    decimal W4Step4aOtherIncome = 0.00m,
+    decimal W4Step4bOtherDeductions = 0.00m,
+    decimal W4Step4cExtraWithholding = 0.00m,
+    // UAE Pension Cohort & Jurisdiction Settings
+    string? UaePensionScheme = null, // "Law7_1999", "DecreeLaw57_2023", "ADPF", "SSSF"
+    string UaeSector = "private", // "private", "government"
+    // Australia Superannuation Settings
+    bool AustraliaPaydaySuper = false,
+    decimal OrdinaryTimeEarnings = 0.00m);
 
 public sealed record ConfigurableTaxSlab(
     int Order,
@@ -71,7 +83,7 @@ public interface IPayrollCountryAdapter
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. United States Payroll Adapter (IRS / SSA / DOL)
+// 1. United States Payroll Adapter (IRS Pub 15-T / SSA / DOL)
 // ─────────────────────────────────────────────────────────────────────────────
 public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
 {
@@ -82,7 +94,6 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
     public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
     {
         var state = (jurisdiction ?? "").Trim().ToUpperInvariant();
-        // State minimum wage overrides federal $7.25/hr
         var hourly = state switch
         {
             "CA" => 16.50m, // California 2026 minimum wage
@@ -90,7 +101,6 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
             "WA" => 16.66m, // Washington State 2026 minimum wage
             _ => 7.25m      // US Federal Fair Labor Standards Act (FLSA)
         };
-        // Standard 173.33 monthly working hours
         return Math.Round(hourly * 173.33m, 2);
     }
 
@@ -115,9 +125,12 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
 
         // 2. Medicare (HI): 1.45% EE, 1.45% ER
         // Additional Medicare Tax: 0.9% EE only on earnings over $200,000 (Single/HOH = $16,666.67/mo) or $250,000 (MFJ = $20,833.33/mo)
-        var isMfj = string.Equals(context.FilingStatus, "married_joint", StringComparison.OrdinalIgnoreCase);
-        var monthlyAdditionalMedicareThreshold = isMfj ? 20833.33m : 16666.67m;
+        var isMfj = string.Equals(context.FilingStatus, "married_joint", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(context.FilingStatus, "MarriedFilingJointly", StringComparison.OrdinalIgnoreCase);
+        var isHoh = string.Equals(context.FilingStatus, "head_of_household", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(context.FilingStatus, "HeadOfHousehold", StringComparison.OrdinalIgnoreCase);
 
+        var monthlyAdditionalMedicareThreshold = isMfj ? 20833.33m : 16666.67m;
         var baseMedicareEe = Math.Round(grossPay * 0.0145m, 2);
         var additionalMedicareEe = 0.00m;
         if (grossPay > monthlyAdditionalMedicareThreshold)
@@ -127,25 +140,29 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
         var totalMedicareEe = baseMedicareEe + additionalMedicareEe;
         var medicareEr = Math.Round(grossPay * 0.0145m, 2); // Employer does not match 0.9% additional tax
 
-        // 3. Federal Income Tax (FIT) Withholding (2026 Official Schedules)
-        var annualGross = grossPay * 12.0m;
+        // 3. Federal Income Tax (FIT) Withholding (IRS Publication 15-T 2026 Percentage Method)
+        // Adjusted Wage = Gross + Step4a/12 - Step4b/12
+        var monthlyAdjustedWage = Math.Max(0.00m, grossPay + (context.W4Step4aOtherIncome / 12.0m) - (context.W4Step4bOtherDeductions / 12.0m));
+        var annualAdjustedWage = monthlyAdjustedWage * 12.0m;
+
+        // 2026 Official Standard Deductions
         decimal standardDeduction;
         if (context.EffectiveDate >= new DateOnly(2026, 1, 1))
         {
-            standardDeduction = isMfj ? 31400.00m :
-                string.Equals(context.FilingStatus, "head_of_household", StringComparison.OrdinalIgnoreCase) ? 23550.00m : 15700.00m;
+            standardDeduction = isMfj ? 32200.00m :
+                isHoh ? 24150.00m : 16100.00m;
         }
         else
         {
             standardDeduction = isMfj ? 30000.00m : 15000.00m;
         }
 
-        var annualTaxable = Math.Max(0.00m, annualGross - standardDeduction);
+        var annualTaxable = Math.Max(0.00m, annualAdjustedWage - standardDeduction);
         decimal annualFit;
 
         if (isMfj)
         {
-            // 2026 Married Filing Jointly Brackets
+            // 2026 Married Filing Jointly Brackets (IRS Pub 15-T)
             if (annualTaxable <= 24800m)
                 annualFit = annualTaxable * 0.10m;
             else if (annualTaxable <= 100800m)
@@ -161,9 +178,27 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
             else
                 annualFit = 206589m + ((annualTaxable - 768700m) * 0.37m);
         }
+        else if (isHoh)
+        {
+            // 2026 Head of Household Brackets (IRS Pub 15-T)
+            if (annualTaxable <= 17700m)
+                annualFit = annualTaxable * 0.10m;
+            else if (annualTaxable <= 67500m)
+                annualFit = 1770m + ((annualTaxable - 17700m) * 0.12m);
+            else if (annualTaxable <= 107700m)
+                annualFit = 7746m + ((annualTaxable - 67500m) * 0.22m);
+            else if (annualTaxable <= 205500m)
+                annualFit = 16590m + ((annualTaxable - 107700m) * 0.24m);
+            else if (annualTaxable <= 260950m)
+                annualFit = 40062m + ((annualTaxable - 205500m) * 0.32m);
+            else if (annualTaxable <= 652050m)
+                annualFit = 57806m + ((annualTaxable - 260950m) * 0.35m);
+            else
+                annualFit = 194691m + ((annualTaxable - 652050m) * 0.37m);
+        }
         else
         {
-            // 2026 Single / Head of Household Brackets
+            // 2026 Single / Married Filing Separately Brackets (IRS Pub 15-T)
             if (annualTaxable <= 12400m)
                 annualFit = annualTaxable * 0.10m;
             else if (annualTaxable <= 50400m)
@@ -180,7 +215,10 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
                 annualFit = 192982m + ((annualTaxable - 640600m) * 0.37m);
         }
 
-        var monthlyFit = Math.Round(annualFit / 12.0m, 2);
+        // Apply Form W-4 Step 3 Dependent Credits and Step 4c Extra Withholding
+        var tentativeMonthlyFit = Math.Round(annualFit / 12.0m, 2);
+        var monthlyCredits = Math.Round(context.W4Step3DependentCredits / 12.0m, 2);
+        var monthlyFit = Math.Max(0.00m, tentativeMonthlyFit - monthlyCredits) + context.W4Step4cExtraWithholding;
 
         // 4. Unemployment Obligations (FUTA & SUTA - Employer Only)
         // FUTA: 0.6% on first $7,000/yr ($583.33/mo)
@@ -188,7 +226,7 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
         var futaEr = Math.Round(monthlyFutaWage * 0.006m, 2);
 
         // SUTA: Employer state obligation on state taxable base (default $833.33/mo base e.g. $10,000)
-        var sutaRate = context.SutaRate > 0 ? context.SutaRate : 0.034m;
+        var sutaRate = context.SutaRate > 0 ? context.SutaRate : 0.027m;
         var monthlySutaWage = Math.Min(grossPay, 833.33m);
         var sutaEr = Math.Round(monthlySutaWage * sutaRate, 2);
 
@@ -202,37 +240,37 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
         {
             new("earning", "base_salary", "Base Salary", context.BaseSalary, "USD"),
             new("earning", "allowances", "Allowances", context.Allowances, "USD"),
-            new("deduction", "federal_income_tax", $"Federal Income Tax (FIT 2026 - {context.FilingStatus})", monthlyFit, "USD"),
-            new("deduction", "fica_social_security", "FICA Social Security (6.2%)", ficaEe, "USD"),
-            new("deduction", "fica_medicare", "Medicare Tax (1.45%)", baseMedicareEe, "USD")
+            new("deduction", "fica_social_security", $"FICA Social Security EE (6.2% up to ${monthlyFicaCap * 12:N0}/yr)", ficaEe, "USD"),
+            new("employer_contribution", "fica_social_security_er", "FICA Social Security ER (6.2%)", ficaEr, "USD"),
+            new("deduction", "fica_medicare", "FICA Medicare EE (1.45%)", baseMedicareEe, "USD"),
+            new("employer_contribution", "fica_medicare_er", "FICA Medicare ER (1.45%)", medicareEr, "USD")
         };
 
         if (additionalMedicareEe > 0)
         {
-            payLines.Add(new("deduction", "additional_medicare", "Additional Medicare Tax (0.9%)", additionalMedicareEe, "USD"));
+            payLines.Add(new("deduction", "additional_medicare", $"Additional Medicare Tax (0.9% over ${monthlyAdditionalMedicareThreshold * 12:N0}/yr)", additionalMedicareEe, "USD"));
         }
 
-        payLines.Add(new("employer_contribution", "fica_social_security_er", "Employer FICA Social Security", ficaEr, "USD"));
-        payLines.Add(new("employer_contribution", "fica_medicare_er", "Employer Medicare", medicareEr, "USD"));
-        payLines.Add(new("employer_contribution", "futa_tax_er", "Federal Unemployment Tax (FUTA 0.6%)", futaEr, "USD"));
-        payLines.Add(new("employer_contribution", "suta_tax_er", $"State Unemployment Tax (SUTA {sutaRate:P1})", sutaEr, "USD"));
+        payLines.Add(new("deduction", "federal_income_tax", $"Federal Income Tax (IRS Pub 15-T {(isMfj ? "MFJ" : isHoh ? "HOH" : "Single")} StdDed ${standardDeduction:N0})", monthlyFit, "USD"));
+        payLines.Add(new("employer_contribution", "futa_tax_er", "FUTA Federal Unemployment (0.6% on first $7,000/yr)", futaEr, "USD"));
+        payLines.Add(new("employer_contribution", "suta_tax_er", $"SUTA State Unemployment ({(sutaRate * 100):F2}%)", sutaEr, "USD"));
 
         return new PayrollCalculationResult(
             EmployeeId: context.EmployeeId,
             CountryCode: "US",
-            WorkJurisdiction: context.WorkJurisdiction,
+            WorkJurisdiction: context.WorkJurisdiction ?? "FEDERAL",
             GrossPay: grossPay,
             IncomeTaxWithholding: monthlyFit,
             EmployeeSocialSecurity: ficaEe + totalMedicareEe,
-            EmployerSocialSecurity: ficaEr + medicareEr,
+            EmployerSocialSecurity: ficaEr + medicareEr + futaEr + sutaEr,
             EmployeePension: 0.00m,
-            EmployerPension: futaEr + sutaEr,
+            EmployerPension: 0.00m,
             OtherDeductions: 0.00m,
             TotalEmployeeDeductions: totalEeDeductions,
             NetPay: netPay,
             CurrencyCode: "USD",
             StatutoryAuthority: "Internal Revenue Service (IRS) & Social Security Administration (SSA)",
-            StatutoryCitation: "IRC § 3402, FICA § 3101/3111 (2026 OASDI Base $184,500), FUTA § 3301",
+            StatutoryCitation: "IRC § 3402, IRS Pub 15-T (2026), FICA § 3101/3111 (2026 OASDI Base $184,500), FUTA § 3301",
             MinimumWageCompliant: isCompliant,
             ApplicableMinimumWage: minWage,
             PayLines: payLines);
@@ -260,7 +298,12 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
         var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
 
         // 1. HMRC PAYE Income Tax (Emergency Code 1257L: Personal allowance £12,570/yr = £1,047.50/mo)
-        var monthlyPersonalAllowance = 1047.50m;
+        // Subject to £1 tapering for every £2 over £100,000/yr (£8,333.33/mo)
+        var annualGross = grossPay * 12.0m;
+        var personalAllowanceAnnual = annualGross > 100000m
+            ? Math.Max(0.00m, 12570m - ((annualGross - 100000m) * 0.5m))
+            : 12570m;
+        var monthlyPersonalAllowance = Math.Round(personalAllowanceAnnual / 12.0m, 2);
         var taxableIncome = Math.Max(0.00m, grossPay - monthlyPersonalAllowance);
         decimal monthlyTax = 0.00m;
 
@@ -268,17 +311,17 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
 
         if (isScotland)
         {
-            // Scottish Income Tax 2026–27 Bands (Monthly Taxable thresholds):
-            // Starter: 19% on £0 to £192.08
-            // Basic: 20% on £192.09 to £1,165.83 (band £973.75)
-            // Intermediate: 21% on £1,165.84 to £2,590.83 (band £1,425.00)
-            // Higher: 42% on £2,590.84 to £5,202.33 (band £2,611.50)
-            // Advanced: 45% on £5,202.34 to £9,380.67 (band £4,178.33)
-            // Top: 48% on over £9,380.67
+            // Scottish Income Tax 2026–27 Published Schedule (Monthly Taxable thresholds):
+            // Starter: 19% on £0 to £192.17 (band £192.17, annual £2,306)
+            // Basic: 20% on £192.17 to £1,165.92 (band £973.75, annual £13,991)
+            // Intermediate: 21% on £1,165.92 to £2,591.00 (band £1,425.08, annual £31,092)
+            // Higher: 42% on £2,591.00 to £5,202.50 (band £2,611.50, annual £62,430)
+            // Advanced: 45% on £5,202.50 to £10,428.33 (band £5,225.83, annual £125,140)
+            // Top: 48% on over £10,428.33 (over £125,140 annual)
             if (taxableIncome > 0)
             {
                 var rem = taxableIncome;
-                var band1 = Math.Min(rem, 192.08m);
+                var band1 = Math.Min(rem, 192.17m);
                 monthlyTax += band1 * 0.19m;
                 rem -= band1;
 
@@ -290,7 +333,7 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
                 }
                 if (rem > 0)
                 {
-                    var band3 = Math.Min(rem, 1425.00m);
+                    var band3 = Math.Min(rem, 1425.08m);
                     monthlyTax += band3 * 0.21m;
                     rem -= band3;
                 }
@@ -302,7 +345,7 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
                 }
                 if (rem > 0)
                 {
-                    var band5 = Math.Min(rem, 4178.33m);
+                    var band5 = Math.Min(rem, 5225.83m);
                     monthlyTax += band5 * 0.45m;
                     rem -= band5;
                 }
@@ -314,44 +357,45 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
         }
         else
         {
-            // Rest of UK (England, Wales, Northern Ireland) Bands:
-            // Basic: 20% up to £3,141.67 (£37,700/yr)
-            // Higher: 40% between £3,141.67 and £9,380.83 (£74,870/yr)
-            // Additional: 45% over £9,380.83
-            var basicThreshold = 3141.67m;
-            var higherThreshold = 9380.83m;
+            // Rest of UK (rUK) 3-Band Tax Schedule 2026–27:
+            // Basic Rate: 20% on £0 to £3,141.67/mo (annual £37,700)
+            // Higher Rate: 40% on £3,141.67 to £10,428.33/mo (annual £37,700 to £125,140)
+            // Additional Rate: 45% on over £10,428.33/mo (over £125,140)
+            if (taxableIncome > 0)
+            {
+                var rem = taxableIncome;
+                var basicBand = Math.Min(rem, 3141.67m);
+                monthlyTax += basicBand * 0.20m;
+                rem -= basicBand;
 
-            if (taxableIncome <= basicThreshold)
-            {
-                monthlyTax = taxableIncome * 0.20m;
-            }
-            else if (taxableIncome <= higherThreshold)
-            {
-                monthlyTax = (basicThreshold * 0.20m) + ((taxableIncome - basicThreshold) * 0.40m);
-            }
-            else
-            {
-                monthlyTax = (basicThreshold * 0.20m) + ((higherThreshold - basicThreshold) * 0.40m) +
-                             ((taxableIncome - higherThreshold) * 0.45m);
+                if (rem > 0)
+                {
+                    var higherBand = Math.Min(rem, 7286.66m);
+                    monthlyTax += higherBand * 0.40m;
+                    rem -= higherBand;
+                }
+                if (rem > 0)
+                {
+                    monthlyTax += rem * 0.45m;
+                }
             }
         }
         monthlyTax = Math.Round(monthlyTax, 2);
 
         // 2. Class 1 National Insurance Contributions (NIC)
-        // Primary Threshold (PT): £1,048/mo. Upper Earnings Limit (UEL): £4,189/mo.
-        var pt = 1048.00m;
-        var uel = 4189.00m;
+        var pt = 1048.00m;  // Primary Threshold (£12,570/yr / 12)
+        var uel = 4189.00m; // Upper Earnings Limit (£50,270/yr / 12)
         var cat = (context.UkCategoryLetter ?? "A").Trim().ToUpperInvariant();
 
         decimal nicEe = 0.00m;
         if (cat == "C")
         {
-            // Over state pension age: 0% employee NIC
+            // Category C: State Pension Age -> 0% EE NIC
             nicEe = 0.00m;
         }
         else if (cat == "B")
         {
-            // Married women reduced rate: 5.85% between PT and UEL, 2% above UEL
+            // Category B: Married Women / Widows reduced rate -> 5.85% between PT and UEL, 2% above UEL
             if (grossPay > pt)
             {
                 var mainBand = Math.Min(grossPay, uel) - pt;
@@ -364,10 +408,10 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
         }
         else if (cat == "J")
         {
-            // Deferment: 2% above UEL only
-            if (grossPay > uel)
+            // Category J: Deferment -> 2% above PT
+            if (grossPay > pt)
             {
-                nicEe = Math.Round((grossPay - uel) * 0.02m, 2);
+                nicEe = Math.Round((grossPay - pt) * 0.02m, 2);
             }
         }
         else
@@ -418,20 +462,21 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
             }
         }
 
-        // 3. Student Loan Deductions
+        // 3. Student Loan Deductions (HMRC / DfE 2026-27 Rates)
         decimal studentLoanDeduction = 0.00m;
         if (!string.IsNullOrWhiteSpace(context.StudentLoanPlan))
         {
             var plan = context.StudentLoanPlan.Trim().ToUpperInvariant();
             var (thresh, rate) = plan switch
             {
-                "PLAN1" => (2082.50m, 0.09m),
-                "PLAN2" => (2274.58m, 0.09m),
-                "PLAN4" => (2616.25m, 0.09m),
+                "PLAN1" => (2241.66m, 0.09m),
+                "PLAN2" => (2448.75m, 0.09m),
+                "PLAN4" => (2816.25m, 0.09m),
                 "PLAN5" => (2083.33m, 0.09m),
-                "POSTGRADUATE" => (1750.00m, 0.06m),
+                "POSTGRADUATE" or "PLAN_PG" => (1750.00m, 0.06m),
                 _ => (0.00m, 0.00m)
             };
+
             if (rate > 0 && grossPay > thresh)
             {
                 studentLoanDeduction = Math.Round((grossPay - thresh) * rate, 2);
@@ -443,11 +488,9 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
         decimal pensionEr = 0.00m;
         if (context.PensionAutoEnrolment && grossPay > 520.00m)
         {
-            var qualEarnings = Math.Min(grossPay, 4189.00m) - 520.00m;
-            var eeRate = context.PensionEmployeeRate > 0 ? context.PensionEmployeeRate : 0.05m;
-            var erRate = context.PensionEmployerRate > 0 ? context.PensionEmployerRate : 0.03m;
-            pensionEe = Math.Round(qualEarnings * eeRate, 2);
-            pensionEr = Math.Round(qualEarnings * erRate, 2);
+            var qualifyingWage = Math.Min(grossPay, 4189.00m) - 520.00m;
+            pensionEe = Math.Round(qualifyingWage * context.PensionEmployeeRate, 2);
+            pensionEr = Math.Round(qualifyingWage * context.PensionEmployerRate, 2);
         }
 
         var totalEeDeductions = monthlyTax + nicEe + studentLoanDeduction + pensionEe;
@@ -458,15 +501,16 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
 
         var payLines = new List<PayrollPayLine>
         {
-            new("earning", "base_salary", "Base Salary", context.BaseSalary, "GBP"),
-            new("deduction", "paye_income_tax", $"PAYE Income Tax ({(isScotland ? "Scottish" : "Rest of UK")})", monthlyTax, "GBP"),
-            new("deduction", "nic_employee", $"Employee National Insurance (Class 1 Category {cat})", nicEe, "GBP"),
-            new("employer_contribution", "nic_employer", $"Employer National Insurance ({employerNicRate:P0} above £{secondaryThreshold:F0})", nicEr, "GBP")
+            new("earning", "base_salary", "Basic Salary", context.BaseSalary, "GBP"),
+            new("earning", "allowances", "Allowances", context.Allowances, "GBP"),
+            new("deduction", "paye_income_tax", $"HMRC PAYE Tax ({(isScotland ? "Scottish 6-Band" : "UK Standard")})", monthlyTax, "GBP"),
+            new("deduction", "nic_class1_ee", $"Class 1 NIC EE (Category {cat})", nicEe, "GBP"),
+            new("employer_contribution", "nic_class1_er", $"Class 1 NIC ER ({(employerNicRate * 100):F1}% above £{secondaryThreshold:N0}/mo)", nicEr, "GBP")
         };
 
         if (studentLoanDeduction > 0)
         {
-            payLines.Add(new("deduction", "student_loan", $"Student Loan ({context.StudentLoanPlan})", studentLoanDeduction, "GBP"));
+            payLines.Add(new("deduction", "student_loan", $"Student Loan Repayment ({context.StudentLoanPlan})", studentLoanDeduction, "GBP"));
         }
         if (pensionEe > 0)
         {
@@ -497,7 +541,7 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. United Arab Emirates Payroll Adapter (GPSSA & EOSG)
+// 3. United Arab Emirates Payroll Adapter (GPSSA Cohorts, ADPF, SSSF & EOSG)
 // ─────────────────────────────────────────────────────────────────────────────
 public sealed class UnitedArabEmiratesPayrollAdapter : IPayrollCountryAdapter
 {
@@ -507,7 +551,6 @@ public sealed class UnitedArabEmiratesPayrollAdapter : IPayrollCountryAdapter
 
     public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
     {
-        // UAE Labour Law does not specify a numerical national minimum wage, but MOHRE guidelines recommend AED 5,000 for skilled
         return 5000.00m;
     }
 
@@ -519,29 +562,11 @@ public sealed class UnitedArabEmiratesPayrollAdapter : IPayrollCountryAdapter
         // 1. Personal Income Tax in UAE is strictly 0.00%
         decimal incomeTax = 0.00m;
 
-        // 2. GPSSA Pension for UAE Nationals (5% Employee, 12.5% Employer of Basic Salary + Housing)
-        decimal gpssaEe = 0.00m;
-        decimal gpssaEr = 0.00m;
-
-        if (context.IsNationalEmployee)
-        {
-            var pensionableSalary = context.BaseSalary + context.Allowances;
-            gpssaEe = Math.Round(pensionableSalary * 0.05m, 2);
-            gpssaEr = Math.Round(pensionableSalary * 0.125m, 2);
-        }
-
-        // 3. End of Service Gratuity (EOSG) Accrual for Expats (21 days/yr = 1.75 days/mo = ~5.75% of basic)
+        // 2. Statutory Pension & EOSG Evaluation
+        decimal pensionEe = 0.00m;
+        decimal pensionEr = 0.00m;
+        decimal govtSubsidy = 0.00m;
         decimal eosgMonthlyAccrual = 0.00m;
-        if (!context.IsNationalEmployee)
-        {
-            eosgMonthlyAccrual = Math.Round((context.BaseSalary / 30.0m) * 1.75m, 2);
-        }
-
-        var totalEeDeductions = gpssaEe;
-        var netPay = Math.Max(0.00m, grossPay - totalEeDeductions);
-
-        var minWage = GetStatutoryMinimumWage(context.WorkJurisdiction, context.SkillCategory, context.EffectiveDate);
-        var isCompliant = grossPay >= minWage;
 
         var payLines = new List<PayrollPayLine>
         {
@@ -551,30 +576,121 @@ public sealed class UnitedArabEmiratesPayrollAdapter : IPayrollCountryAdapter
 
         if (context.IsNationalEmployee)
         {
-            payLines.Add(new("deduction", "gpssa_ee", "GPSSA Pension Contribution (5%)", gpssaEe, "AED"));
-            payLines.Add(new("employer_contribution", "gpssa_er", "Employer GPSSA Pension (12.5%)", gpssaEr, "AED"));
+            var isGov = string.Equals(context.UaeSector, "government", StringComparison.OrdinalIgnoreCase);
+            var scheme = context.UaePensionScheme?.Trim().ToUpperInvariant() ??
+                (context.EffectiveDate >= new DateOnly(2023, 10, 14) ? "DECREELAW57_2023" : "LAW7_1999");
+
+            var pensionableSalary = context.BaseSalary + context.Allowances;
+            decimal capAmount;
+            decimal eeRate;
+            decimal erRate;
+
+            switch (scheme)
+            {
+                case "LAW7_1999":
+                    // Federal Law No. 7 of 1999 (Legacy GPSSA)
+                    // Cap: AED 50,000 / month
+                    capAmount = 50000.00m;
+                    eeRate = 0.05m;
+                    if (isGov)
+                    {
+                        erRate = 0.15m;
+                        govtSubsidy = 0.00m;
+                    }
+                    else
+                    {
+                        erRate = 0.125m;
+                        govtSubsidy = Math.Round(Math.Min(pensionableSalary, capAmount) * 0.025m, 2);
+                    }
+                    break;
+
+                case "ADPF":
+                    // Abu Dhabi Pension Fund (Law No. 2 of 2000 as amended)
+                    capAmount = 100000.00m;
+                    eeRate = 0.11m;
+                    erRate = 0.15m;
+                    govtSubsidy = 0.00m;
+                    break;
+
+                case "SSSF":
+                    // Sharjah Social Security Fund (Law No. 5 of 2018)
+                    capAmount = 50000.00m;
+                    eeRate = 0.05m;
+                    erRate = 0.15m;
+                    govtSubsidy = 0.00m;
+                    break;
+
+                case "DECREELAW57_2023":
+                default:
+                    // Federal Decree-Law No. 57 of 2023 (New GPSSA)
+                    capAmount = isGov ? 100000.00m : 70000.00m;
+                    eeRate = 0.11m;
+                    if (isGov)
+                    {
+                        erRate = 0.15m;
+                        govtSubsidy = 0.00m;
+                    }
+                    else
+                    {
+                        // In private sector, government contributes 2.5% subsidy for UAE nationals earning < AED 20,000
+                        if (pensionableSalary < 20000.00m)
+                        {
+                            erRate = 0.125m;
+                            govtSubsidy = Math.Round(pensionableSalary * 0.025m, 2);
+                        }
+                        else
+                        {
+                            erRate = 0.15m;
+                            govtSubsidy = 0.00m;
+                        }
+                    }
+                    break;
+            }
+
+            var cappedSubjectSalary = Math.Min(pensionableSalary, capAmount);
+            pensionEe = Math.Round(cappedSubjectSalary * eeRate, 2);
+            pensionEr = Math.Round(cappedSubjectSalary * erRate, 2);
+
+            payLines.Add(new("deduction", "uae_national_pension_ee", $"UAE Pension EE ({scheme} {(eeRate * 100):F1}% up to AED {capAmount:N0})", pensionEe, "AED"));
+            payLines.Add(new("employer_contribution", "uae_national_pension_er", $"UAE Pension ER ({(erRate * 100):F1}%)", pensionEr, "AED"));
+
+            if (govtSubsidy > 0)
+            {
+                payLines.Add(new("employer_contribution", "uae_govt_pension_subsidy", "UAE Government Pension Subsidy (2.5%)", govtSubsidy, "AED"));
+            }
         }
         else
         {
-            payLines.Add(new("employer_contribution", "eosg_accrual", "Monthly End of Service Gratuity Accrual", eosgMonthlyAccrual, "AED"));
+            // 3. Expatriate End of Service Gratuity (EOSG) Accrual under Federal Decree-Law No. 33 of 2021
+            // 21 days basic salary per year / 12 months = 1.75 days basic pay/month (~5.75%)
+            eosgMonthlyAccrual = Math.Round((context.BaseSalary / 30.0m) * 1.75m, 2);
+            payLines.Add(new("employer_contribution", "eosg_accrual_er", "MOHRE End of Service Gratuity Accrual (1.75 days basic pay)", eosgMonthlyAccrual, "AED"));
         }
+
+        var totalEeDeductions = pensionEe;
+        var netPay = Math.Max(0.00m, grossPay - totalEeDeductions);
+
+        var minWage = GetStatutoryMinimumWage(context.WorkJurisdiction, context.SkillCategory, context.EffectiveDate);
+        var isCompliant = grossPay >= minWage;
 
         return new PayrollCalculationResult(
             EmployeeId: context.EmployeeId,
             CountryCode: "AE",
-            WorkJurisdiction: context.WorkJurisdiction ?? "DUBAI",
+            WorkJurisdiction: context.WorkJurisdiction ?? "FEDERAL",
             GrossPay: grossPay,
             IncomeTaxWithholding: incomeTax,
             EmployeeSocialSecurity: 0.00m,
             EmployerSocialSecurity: 0.00m,
-            EmployeePension: gpssaEe,
-            EmployerPension: gpssaEr + eosgMonthlyAccrual,
+            EmployeePension: pensionEe,
+            EmployerPension: pensionEr + govtSubsidy + eosgMonthlyAccrual,
             OtherDeductions: 0.00m,
             TotalEmployeeDeductions: totalEeDeductions,
             NetPay: netPay,
             CurrencyCode: "AED",
-            StatutoryAuthority: "Ministry of Human Resources and Emiratisation (MOHRE) & GPSSA",
-            StatutoryCitation: "UAE Federal Decree-Law No. (33) of 2021 & Federal Law No. (7) of 1999 (Pensions)",
+            StatutoryAuthority: "General Pension and Social Security Authority (GPSSA) & MOHRE",
+            StatutoryCitation: context.IsNationalEmployee
+                ? "Federal Law No. 7 of 1999 & Federal Decree-Law No. 57 of 2023 on Pension and Social Security"
+                : "Federal Decree-Law No. 33 of 2021 on the Regulation of Labour Relations (Article 51 EOSG)",
             MinimumWageCompliant: isCompliant,
             ApplicableMinimumWage: minWage,
             PayLines: payLines);
@@ -582,7 +698,88 @@ public sealed class UnitedArabEmiratesPayrollAdapter : IPayrollCountryAdapter
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Pakistan Statutory Payroll Adapter (FBR, EOBI, SESSI/PESSI)
+// 4. Australia Payroll Adapter (ATO Superannuation & PAYG)
+// ─────────────────────────────────────────────────────────────────────────────
+public sealed class AustraliaPayrollAdapter : IPayrollCountryAdapter
+{
+    public string CountryCode => "AU";
+    public string CountryName => "Australia";
+    public string DefaultCurrencyCode => "AUD";
+
+    public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
+    {
+        // Australian National Minimum Wage 2026: $24.10/hr * 164.67 monthly hours = $3,968.55
+        return 3968.55m;
+    }
+
+    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
+    {
+        var overtimePay = Math.Round(context.OvertimeHours * context.OvertimeHourlyRate * 1.5m, 2);
+        var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
+
+        // 1. Superannuation Guarantee (12.0% effective 1 July 2026, 11.5% prior)
+        var superRate = context.EffectiveDate >= new DateOnly(2026, 7, 1) ? 0.12m : 0.115m;
+        // Ordinary Time Earnings (OTE) excludes overtime
+        var ote = context.OrdinaryTimeEarnings > 0 ? context.OrdinaryTimeEarnings : (context.BaseSalary + context.Allowances);
+        // Maximum Super Contribution Base (MSCB): quarterly $65,070 ($21,690/mo)
+        var cappedOte = Math.Min(ote, 21690.00m);
+        var superEr = Math.Round(cappedOte * superRate, 2);
+
+        // 2. PAYG Withholding (ATO 2026 Schedule - Annual Tax-Free Threshold $18,200)
+        var annualGross = grossPay * 12.0m;
+        var annualPayg = 0.00m;
+        if (annualGross > 18200m)
+        {
+            var rem = annualGross - 18200m;
+            if (rem <= 26800m) // $18,201 to $45,000
+                annualPayg = rem * 0.16m;
+            else if (rem <= 116800m) // $45,001 to $135,000
+                annualPayg = 4288m + ((rem - 26800m) * 0.30m);
+            else if (rem <= 171800m) // $135,001 to $190,000
+                annualPayg = 31288m + ((rem - 116800m) * 0.37m);
+            else // Over $190,000
+                annualPayg = 51638m + ((rem - 171800m) * 0.45m);
+        }
+        var monthlyPayg = Math.Round(annualPayg / 12.0m, 2);
+
+        var totalEeDeductions = monthlyPayg;
+        var netPay = Math.Max(0.00m, grossPay - totalEeDeductions);
+
+        var minWage = GetStatutoryMinimumWage(context.WorkJurisdiction, context.SkillCategory, context.EffectiveDate);
+        var isCompliant = grossPay >= minWage;
+
+        var payLines = new List<PayrollPayLine>
+        {
+            new("earning", "base_salary", "Base Salary", context.BaseSalary, "AUD"),
+            new("earning", "allowances", "Allowances", context.Allowances, "AUD"),
+            new("deduction", "payg_withholding", "ATO PAYG Withholding", monthlyPayg, "AUD"),
+            new("employer_contribution", "superannuation_guarantee", $"Superannuation Guarantee ({(superRate * 100):F1}% OTE)", superEr, "AUD")
+        };
+
+        return new PayrollCalculationResult(
+            EmployeeId: context.EmployeeId,
+            CountryCode: "AU",
+            WorkJurisdiction: context.WorkJurisdiction ?? "ATO",
+            GrossPay: grossPay,
+            IncomeTaxWithholding: monthlyPayg,
+            EmployeeSocialSecurity: 0.00m,
+            EmployerSocialSecurity: 0.00m,
+            EmployeePension: 0.00m,
+            EmployerPension: superEr,
+            OtherDeductions: 0.00m,
+            TotalEmployeeDeductions: totalEeDeductions,
+            NetPay: netPay,
+            CurrencyCode: "AUD",
+            StatutoryAuthority: "Australian Taxation Office (ATO)",
+            StatutoryCitation: "Superannuation Guarantee (Administration) Act 1992 & Payday Super Mandate 2026",
+            MinimumWageCompliant: isCompliant,
+            ApplicableMinimumWage: minWage,
+            PayLines: payLines);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Pakistan Payroll Adapter (FBR Finance Act 2026, EOBI & Provincial WSS)
 // ─────────────────────────────────────────────────────────────────────────────
 public sealed class PakistanPayrollAdapter : IPayrollCountryAdapter
 {
@@ -592,28 +789,31 @@ public sealed class PakistanPayrollAdapter : IPayrollCountryAdapter
 
     public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
     {
-        var jur = (jurisdiction ?? "FEDERAL").Trim().ToUpperInvariant();
-        var skill = (skillCategory ?? "unskilled").Trim().ToLowerInvariant();
+        var prov = (jurisdiction ?? "").Trim().ToUpperInvariant();
+        var skill = (skillCategory ?? "").Trim().ToLowerInvariant();
 
-        if (jur == "SINDH")
+        if (prov == "SINDH")
         {
             return skill switch
             {
-                "semi_skilled" or "semiskilled" => 44484m,
-                "skilled" => 53350m,
-                "highly_skilled" or "highlyskilled" => 55626m,
-                _ => 43000m
+                "semi-skilled" or "semiskilled" => 44484.00m,
+                "skilled" => 53350.00m,
+                "highly-skilled" or "highlyskilled" => 55626.00m,
+                _ => 43000.00m
             };
         }
 
-        return jur switch
+        if (prov == "ICT" || prov == "FEDERAL")
         {
-            "FEDERAL" or "ICT" => 40700m,
-            "PUNJAB" => 40000m,
-            "KPK" or "KP" => 40000m,
-            "BALOCHISTAN" => 37000m,
-            _ => 40700m
-        };
+            return 40700.00m;
+        }
+
+        if (prov == "BALOCHISTAN")
+        {
+            return 37000.00m;
+        }
+
+        return 40000.00m; // Punjab, KP, general standard
     }
 
     public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
@@ -621,45 +821,36 @@ public sealed class PakistanPayrollAdapter : IPayrollCountryAdapter
         var overtimePay = Math.Round(context.OvertimeHours * context.OvertimeHourlyRate * 2.0m, 2);
         var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
 
-        // 1. FBR Income Tax Withholding (Tax Year 2027 Salaried Slabs)
-        var annualIncome = grossPay * 12.0m;
+        // 1. FBR Tax Year 2027 Salaried Slabs (Finance Act 2026)
+        var annualGross = grossPay * 12.0m;
         decimal annualTax;
 
-        if (annualIncome <= 600000m)
+        if (annualGross <= 600000m)
             annualTax = 0.00m;
-        else if (annualIncome <= 1200000m)
-            annualTax = (annualIncome - 600000m) * 0.01m;
-        else if (annualIncome <= 2200000m)
-            annualTax = 6000m + ((annualIncome - 1200000m) * 0.11m);
-        else if (annualIncome <= 3200000m)
-            annualTax = 116000m + ((annualIncome - 2200000m) * 0.20m);
-        else if (annualIncome <= 4100000m)
-            annualTax = 316000m + ((annualIncome - 3200000m) * 0.25m);
-        else if (annualIncome <= 5600000m)
-            annualTax = 541000m + ((annualIncome - 4100000m) * 0.29m);
-        else if (annualIncome <= 7000000m)
-            annualTax = 976000m + ((annualIncome - 5600000m) * 0.32m);
+        else if (annualGross <= 1200000m)
+            annualTax = (annualGross - 600000m) * 0.01m;
+        else if (annualGross <= 2200000m)
+            annualTax = 6000m + ((annualGross - 1200000m) * 0.11m);
+        else if (annualGross <= 3200000m)
+            annualTax = 116000m + ((annualGross - 2200000m) * 0.20m);
+        else if (annualGross <= 4100000m)
+            annualTax = 316000m + ((annualGross - 3200000m) * 0.25m);
+        else if (annualGross <= 5600000m)
+            annualTax = 541000m + ((annualGross - 4100000m) * 0.29m);
+        else if (annualGross <= 7000000m)
+            annualTax = 976000m + ((annualGross - 5600000m) * 0.32m);
         else
-            annualTax = 1424000m + ((annualIncome - 7000000m) * 0.35m);
+            annualTax = 1424000m + ((annualGross - 7000000m) * 0.35m);
 
         var monthlyTax = Math.Round(annualTax / 12.0m, 2);
 
-        // 2. EOBI (PKR 37,000 statutory minimum wage base: 1% Employee = PKR 370, 5% Employer = PKR 1,850)
-        var eobiBase = 37000.00m;
-        var eobiEe = Math.Round(eobiBase * 0.01m, 2);
-        var eobiEr = Math.Round(eobiBase * 0.05m, 2);
+        // 2. EOBI (Statutory Base PKR 37,000: 1% EE = PKR 370, 5% ER = PKR 1,850)
+        var eobiEe = 370.00m;
+        var eobiEr = 1850.00m;
 
-        // 3. Provincial Social Security (6% Employer up to provincial wage ceiling)
-        var ceiling = (context.WorkJurisdiction ?? "FEDERAL").Trim().ToUpperInvariant() switch
-        {
-            "SINDH" => 43000.00m,
-            "PUNJAB" => 40000.00m,
-            "KPK" or "KP" => 40000.00m,
-            "BALOCHISTAN" => 37000.00m,
-            _ => 40700.00m
-        };
-        var socialSecurityWage = Math.Min(grossPay, ceiling);
-        var socialSecurityEr = Math.Round(socialSecurityWage * 0.06m, 2);
+        // 3. Provincial Social Security (SESSI/PESSI: Employer 5% on wage ceiling PKR 40,000 = PKR 2,000 max)
+        var sessiWage = Math.Min(grossPay, 40000.00m);
+        var sessiEr = Math.Round(sessiWage * 0.05m, 2);
 
         var totalEeDeductions = monthlyTax + eobiEe;
         var netPay = Math.Max(0.00m, grossPay - totalEeDeductions);
@@ -669,12 +860,12 @@ public sealed class PakistanPayrollAdapter : IPayrollCountryAdapter
 
         var payLines = new List<PayrollPayLine>
         {
-            new("earning", "base_salary", "Basic Salary", context.BaseSalary, "PKR"),
+            new("earning", "base_salary", "Base Salary", context.BaseSalary, "PKR"),
             new("earning", "allowances", "Allowances", context.Allowances, "PKR"),
-            new("deduction", "income_tax", "Income Tax Withholding (TY2027)", monthlyTax, "PKR"),
-            new("deduction", "eobi_employee", "EOBI Employee Share (1%)", eobiEe, "PKR"),
-            new("employer_contribution", "eobi_employer", "EOBI Employer Share (5%)", eobiEr, "PKR"),
-            new("employer_contribution", "social_security_er", "Provincial Social Security Employer Share (6%)", socialSecurityEr, "PKR")
+            new("deduction", "fbr_income_tax", "FBR Salaried Income Tax (Finance Act 2026)", monthlyTax, "PKR"),
+            new("deduction", "eobi_ee", "EOBI Employee Contribution (1% of statutory PKR 37,000 base)", eobiEe, "PKR"),
+            new("employer_contribution", "eobi_er", "EOBI Employer Contribution (5% of statutory PKR 37,000 base)", eobiEr, "PKR"),
+            new("employer_contribution", "sessi_er", "Provincial Social Security (5% up to PKR 40k ceiling)", sessiEr, "PKR")
         };
 
         return new PayrollCalculationResult(
@@ -684,7 +875,7 @@ public sealed class PakistanPayrollAdapter : IPayrollCountryAdapter
             GrossPay: grossPay,
             IncomeTaxWithholding: monthlyTax,
             EmployeeSocialSecurity: 0.00m,
-            EmployerSocialSecurity: socialSecurityEr,
+            EmployerSocialSecurity: sessiEr,
             EmployeePension: eobiEe,
             EmployerPension: eobiEr,
             OtherDeductions: 0.00m,
@@ -692,7 +883,7 @@ public sealed class PakistanPayrollAdapter : IPayrollCountryAdapter
             NetPay: netPay,
             CurrencyCode: "PKR",
             StatutoryAuthority: "Federal Board of Revenue (FBR) & EOBI",
-            StatutoryCitation: "Income Tax Ordinance 2001 (Finance Act 2026) & EOBI Act 1976",
+            StatutoryCitation: "Finance Act 2026 First Schedule & EOBI Act 1976",
             MinimumWageCompliant: isCompliant,
             ApplicableMinimumWage: minWage,
             PayLines: payLines);
@@ -700,78 +891,7 @@ public sealed class PakistanPayrollAdapter : IPayrollCountryAdapter
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. Global Configurable Payroll Adapter (Worldwide Generic Fallback)
-// ─────────────────────────────────────────────────────────────────────────────
-public sealed class GlobalConfigurablePayrollAdapter : IPayrollCountryAdapter
-{
-    public string CountryCode => "GLOBAL";
-    public string CountryName => "Global International";
-    public string DefaultCurrencyCode => "USD";
-
-    public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate) => 1500.00m;
-
-    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
-    {
-        var overtimePay = Math.Round(context.OvertimeHours * context.OvertimeHourlyRate * 1.5m, 2);
-        var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
-
-        decimal incomeTax = 0.00m;
-
-        // Evaluate against custom slabs if supplied
-        if (context.CustomSlabs != null && context.CustomSlabs.Count > 0)
-        {
-            var annual = grossPay * 12.0m;
-            foreach (var slab in context.CustomSlabs.OrderBy(s => s.Order))
-            {
-                if (annual >= slab.MinAnnualIncome && (slab.MaxAnnualIncome == null || annual <= slab.MaxAnnualIncome.Value))
-                {
-                    var excess = annual - slab.MinAnnualIncome;
-                    var annualTax = slab.FixedTaxAmount + (excess * (slab.MarginalRatePercentage / 100.0m));
-                    incomeTax = Math.Round(annualTax / 12.0m, 2);
-                    break;
-                }
-            }
-        }
-        else
-        {
-            // Default flat 10% withholding
-            incomeTax = Math.Round(grossPay * 0.10m, 2);
-        }
-
-        var totalDeductions = incomeTax;
-        var netPay = Math.Max(0.00m, grossPay - totalDeductions);
-        var minWage = GetStatutoryMinimumWage(context.WorkJurisdiction, context.SkillCategory, context.EffectiveDate);
-
-        var payLines = new List<PayrollPayLine>
-        {
-            new("earning", "base_salary", "Base Salary", context.BaseSalary, context.CurrencyCode),
-            new("deduction", "income_tax", "Statutory Withholding Tax", incomeTax, context.CurrencyCode)
-        };
-
-        return new PayrollCalculationResult(
-            EmployeeId: context.EmployeeId,
-            CountryCode: context.CountryCode,
-            WorkJurisdiction: context.WorkJurisdiction,
-            GrossPay: grossPay,
-            IncomeTaxWithholding: incomeTax,
-            EmployeeSocialSecurity: 0.00m,
-            EmployerSocialSecurity: 0.00m,
-            EmployeePension: 0.00m,
-            EmployerPension: 0.00m,
-            OtherDeductions: 0.00m,
-            TotalEmployeeDeductions: totalDeductions,
-            NetPay: netPay,
-            CurrencyCode: context.CurrencyCode,
-            StatutoryAuthority: "Local Jurisdiction Authority",
-            StatutoryCitation: "Standard International Payroll Specification",
-            MinimumWageCompliant: grossPay >= minWage,
-            ApplicableMinimumWage: minWage,
-            PayLines: payLines);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Global Payroll Engine Factory / Dispatcher
+// 6. Global Dispatching Engine
 // ─────────────────────────────────────────────────────────────────────────────
 public sealed class GlobalPayrollEngine
 {
@@ -784,24 +904,53 @@ public sealed class GlobalPayrollEngine
             ["US"] = new UnitedStatesPayrollAdapter(),
             ["GB"] = new UnitedKingdomPayrollAdapter(),
             ["AE"] = new UnitedArabEmiratesPayrollAdapter(),
-            ["PK"] = new PakistanPayrollAdapter(),
-            ["GLOBAL"] = new GlobalConfigurablePayrollAdapter()
+            ["AU"] = new AustraliaPayrollAdapter(),
+            ["PK"] = new PakistanPayrollAdapter()
         };
     }
 
-    public IPayrollCountryAdapter GetAdapter(string? countryCode)
+    public PayrollCalculationResult Calculate(PayrollCalculationContext context)
     {
-        var code = (countryCode ?? "GLOBAL").Trim().ToUpperInvariant();
-        if (_adapters.TryGetValue(code, out var adapter))
+        if (_adapters.TryGetValue(context.CountryCode, out var adapter))
         {
-            return adapter;
+            return adapter.CalculatePayroll(context);
         }
-        return _adapters["GLOBAL"];
+
+        // Generic International Fallback
+        var gross = context.BaseSalary + context.Allowances + context.Bonus;
+        return new PayrollCalculationResult(
+            EmployeeId: context.EmployeeId,
+            CountryCode: context.CountryCode,
+            WorkJurisdiction: context.WorkJurisdiction,
+            GrossPay: gross,
+            IncomeTaxWithholding: 0.00m,
+            EmployeeSocialSecurity: 0.00m,
+            EmployerSocialSecurity: 0.00m,
+            EmployeePension: 0.00m,
+            EmployerPension: 0.00m,
+            OtherDeductions: 0.00m,
+            TotalEmployeeDeductions: 0.00m,
+            NetPay: gross,
+            CurrencyCode: context.CurrencyCode,
+            StatutoryAuthority: "Standard Global Ledger",
+            StatutoryCitation: "Standard Generic Employment Contract",
+            MinimumWageCompliant: true,
+            ApplicableMinimumWage: 0.00m,
+            PayLines: new[]
+            {
+                new PayrollPayLine("earning", "base_salary", "Base Salary", context.BaseSalary, context.CurrencyCode),
+                new PayrollPayLine("earning", "allowances", "Allowances", context.Allowances, context.CurrencyCode)
+            });
     }
 
-    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
+    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context) => Calculate(context);
+
+    public decimal GetMinimumWage(string countryCode, string? jurisdiction, string skillCategory, DateOnly effectiveDate)
     {
-        var adapter = GetAdapter(context.CountryCode);
-        return adapter.CalculatePayroll(context);
+        if (_adapters.TryGetValue(countryCode, out var adapter))
+        {
+            return adapter.GetStatutoryMinimumWage(jurisdiction, skillCategory, effectiveDate);
+        }
+        return 0.00m;
     }
 }

@@ -78,7 +78,7 @@ test("calculateGlobalTax resolves United States state-level sales taxes", () => 
   assert.equal(ny.totalAmount, 1088.75);
   assert.ok(ny.taxAuthority.includes("New York"));
 
-  // Texas (6.6% effective SaaS rate)
+  // Texas Combined State + Local (6.6% effective SaaS rate on 80% taxable base)
   const tx = calculateGlobalTax({
     amount: 1000,
     customerCountryCode: "US",
@@ -89,6 +89,17 @@ test("calculateGlobalTax resolves United States state-level sales taxes", () => 
   assert.equal(tx.taxAmount, 66.0);
   assert.equal(tx.totalAmount, 1066.0);
   assert.ok(tx.statutoryReference.includes("151.0101"));
+
+  // Texas State-Only (5.0% effective SaaS rate on 80% taxable base of 6.25%)
+  const txState = calculateGlobalTax({
+    amount: 1000,
+    customerCountryCode: "US",
+    customerJurisdictionCode: "TX_STATE",
+    supplierCountryCode: "US",
+  });
+  assert.equal(txState.ratePct, 5.0);
+  assert.equal(txState.taxAmount, 50.0);
+  assert.equal(txState.totalAmount, 1050.0);
 
   // Washington (6.5%)
   const wa = calculateGlobalTax({
@@ -304,7 +315,13 @@ test("calculateUsPayroll verifies 2026 OASDI cap ($184,500), Additional Medicare
   assert.ok(futa);
   assert.equal(futa.employerAmount, 3.50);
 
-  // Married Filing Jointly should have higher standard deduction ($31,400) resulting in lower FIT
+  // FIT 2026 Single (IRS Pub 15-T, StdDed $16,100): Taxable = $283,900 -> FIT = $5,678.08
+  assert.equal(res.employeeIncomeTax, 5678.08);
+
+  // Net Take-Home Pay = $25,000.00 - ($953.25 + $437.50 + $5,678.08 = $7,068.83) = $17,931.17
+  assert.equal(res.netSalary, 17931.17);
+
+  // Married Filing Jointly should have higher standard deduction ($32,200) resulting in lower FIT
   const resMfj = calculateGlobalPayroll({
     countryCode: "US",
     grossSalary: 25000,
@@ -312,6 +329,81 @@ test("calculateUsPayroll verifies 2026 OASDI cap ($184,500), Additional Medicare
     effectiveDate: "2026-06-01",
   });
   assert.ok(resMfj.employeeIncomeTax < res.employeeIncomeTax);
+});
+
+test("calculateUaePayroll verifies pension cohorts: Law 7 of 1999, Decree-Law 57 of 2023, ADPF, SSSF, Expat EOSG", () => {
+  // 1. Federal Law 7 of 1999 (Legacy: 5% EE, 12.5% ER, 2.5% Gov subsidy, cap AED 50k)
+  const law7 = calculateGlobalPayroll({
+    countryCode: "AE",
+    grossSalary: 25000,
+    isExpatriate: false,
+    uaePensionScheme: "Law7_1999",
+  });
+  assert.equal(law7.employeeIncomeTax, 0);
+  assert.equal(law7.employeeStatutoryDeductions, 1250.0); // 5% of 25,000
+  const pensionLaw7 = law7.statutoryLines.find((l) => l.code === "AE_PENSION_EE");
+  assert.ok(pensionLaw7);
+  assert.equal(pensionLaw7.employeeAmount, 1250.0);
+  assert.equal(pensionLaw7.employerAmount, 3125.0); // 12.5% of 25,000
+  const subLaw7 = law7.statutoryLines.find((l) => l.code === "AE_PENSION_GOVT_SUBSIDY");
+  assert.ok(subLaw7);
+  assert.equal(subLaw7.employerAmount, 625.0); // 2.5% of 25,000
+
+  // 2. Federal Decree-Law 57 of 2023 (New GPSSA: 11% EE, 15% ER, cap AED 70k)
+  const dl57 = calculateGlobalPayroll({
+    countryCode: "AE",
+    grossSalary: 25000,
+    isExpatriate: false,
+    uaePensionScheme: "DecreeLaw57_2023",
+  });
+  assert.equal(dl57.employeeStatutoryDeductions, 2750.0); // 11% of 25,000
+  const pensionDl57 = dl57.statutoryLines.find((l) => l.code === "AE_PENSION_EE");
+  assert.ok(pensionDl57);
+  assert.equal(pensionDl57.employeeAmount, 2750.0);
+  assert.equal(pensionDl57.employerAmount, 3750.0); // 15% of 25,000
+
+  // 3. Abu Dhabi Pension Fund (ADPF: 11% EE, 15% ER, cap AED 100k)
+  const adpf = calculateGlobalPayroll({
+    countryCode: "AE",
+    grossSalary: 40000,
+    isExpatriate: false,
+    uaePensionScheme: "ADPF",
+  });
+  assert.equal(adpf.employeeStatutoryDeductions, 4400.0); // 11% of 40,000
+  const pensionAdpf = adpf.statutoryLines.find((l) => l.code === "AE_PENSION_EE");
+  assert.ok(pensionAdpf);
+  assert.equal(pensionAdpf.employeeAmount, 4400.0);
+  assert.equal(pensionAdpf.employerAmount, 6000.0); // 15% of 40,000
+
+  // 4. Sharjah Social Security Fund (SSSF: 5% EE, 15% ER, cap AED 50k)
+  const sssf = calculateGlobalPayroll({
+    countryCode: "AE",
+    grossSalary: 40000,
+    isExpatriate: false,
+    uaePensionScheme: "SSSF",
+  });
+  assert.equal(sssf.employeeStatutoryDeductions, 2000.0); // 5% of 40,000
+  const pensionSssf = sssf.statutoryLines.find((l) => l.code === "AE_PENSION_EE");
+  assert.ok(pensionSssf);
+  assert.equal(pensionSssf.employeeAmount, 2000.0);
+  assert.equal(pensionSssf.employerAmount, 6000.0); // 15% of 40,000
+});
+
+test("calculateAustraliaPayroll verifies 12% Super Guarantee (effective 1 July 2026), OTE, and Payday Super", () => {
+  const auPay = calculateGlobalPayroll({
+    countryCode: "AU",
+    grossSalary: 9250,
+    basicSalary: 8000,
+    ordinaryTimeEarnings: 8000,
+    effectiveDate: "2026-07-01",
+  });
+  assert.equal(auPay.countryCode, "AU");
+  assert.ok(auPay.employeeIncomeTax > 0); // PAYG
+  // Super Guarantee: 12.0% on OTE ($8,000) = $960.00
+  const superLine = auPay.statutoryLines.find((l) => l.code === "AU_SUPER");
+  assert.ok(superLine);
+  assert.equal(superLine.employerAmount, 960.0);
+  assert.ok(superLine.authority.includes("Australian Taxation Office"));
 });
 
 test("calculateUkPayroll verifies 2026-27 Employer NIC (15%, £417 threshold), Scottish PAYE, Student Loans, Categories", () => {
@@ -343,8 +435,8 @@ test("calculateUkPayroll verifies 2026-27 Employer NIC (15%, £417 threshold), S
 
   const slLine = scot.statutoryLines.find((l) => l.code === "UK_SL_PLAN4");
   assert.ok(slLine);
-  // Plan 4 threshold £2,616.25 -> (4000 - 2616.25) * 0.09 = 124.54
-  assert.equal(slLine.employeeAmount, 124.54);
+  // Plan 4 2026-27 threshold £2,816.25 -> (4000 - 2816.25) * 0.09 = 106.54
+  assert.equal(slLine.employeeAmount, 106.54);
 
   const pensionLine = scot.statutoryLines.find((l) => l.code === "UK_PENSION_AE");
   assert.ok(pensionLine);

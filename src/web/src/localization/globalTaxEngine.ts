@@ -245,11 +245,16 @@ export function calculateGlobalTax(request: GlobalTaxRequest): GlobalTaxResult {
       taxAuthority = "New York State Department of Taxation and Finance";
       statutoryReference = "NY Tax Law § 1105(c)(9) (NYC Combined State & Local Rate)";
       explanation = "New York State combined sales tax on prewritten computer software and cloud SaaS services.";
-    } else if (state === "TX" || state === "TEXAS") {
-      ratePct = 6.6; // 80% taxable basis of 8.25%
+    } else if (state === "TX_STATE" || state === "TX_UNINCORPORATED") {
+      ratePct = 5.0; // 6.25% state rate * 80% taxable base = 5.0%
       taxAuthority = "Texas Comptroller of Public Accounts";
-      statutoryReference = "Tex. Tax Code § 151.0101 & 34 TAC Rule 3.342 (80% Taxable Basis)";
-      explanation = "Texas data processing and SaaS services are taxed at an effective rate of 6.6% (20% exemption of 8.25%).";
+      statutoryReference = "Tex. Tax Code § 151.0101 & 34 TAC Rule 3.342 (State Rate 6.25% on 80% Taxable Base)";
+      explanation = "Texas state-only sales tax: 6.25% statutory rate assessed on 80% taxable base yields 5.0% effective tax.";
+    } else if (state === "TX" || state === "TEXAS" || state === "TX_COMBINED" || state === "TX_AUSTIN" || state === "TX_HOUSTON" || state === "TX_DALLAS") {
+      ratePct = 6.6; // (6.25% state + 2.0% local = 8.25%) * 80% taxable base = 6.6%
+      taxAuthority = "Texas Comptroller of Public Accounts";
+      statutoryReference = "Tex. Tax Code § 151.0101 & 34 TAC Rule 3.342 (Combined 8.25% on 80% Taxable Base)";
+      explanation = "Texas combined state (6.25%) and local (2.0%) sales tax assessed on 80% taxable base yields 6.6% effective tax.";
     } else if (state === "WA" || state === "WASHINGTON") {
       ratePct = 6.5;
       taxAuthority = "Washington Department of Revenue";

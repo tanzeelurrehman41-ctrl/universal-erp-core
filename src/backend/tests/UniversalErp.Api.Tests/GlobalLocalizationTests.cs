@@ -16,6 +16,7 @@ public class GlobalLocalizationTests
     [Theory]
     [InlineData("NY", 8.8750, "NYS_TAX", "sales_tax", false)]
     [InlineData("TX", 6.6000, "TX_COMPTROLLER", "sales_tax", false)]
+    [InlineData("TX_STATE", 5.0000, "TX_COMPTROLLER", "sales_tax", false)]
     [InlineData("CA", 0.0000, "CA_CDTFA", "exempt", true)]
     [InlineData("WA", 6.5000, "WA_DOR", "sales_tax", false)]
     public void DetermineTax_UnitedStatesDestinations_ResolvesStateSpecificRules(
@@ -296,6 +297,19 @@ public class GlobalLocalizationTests
         var futaLine = result.PayLines.FirstOrDefault(l => l.Category == "futa_tax_er");
         Assert.NotNull(futaLine);
         Assert.Equal(3.50m, futaLine.Amount);
+
+        // Recalculated 2026 Federal Income Tax (IRS Pub 15-T Single, StdDed $16,100):
+        // Taxable = $300,000 - $16,100 = $283,900. Bracket tax = $58,442 + 35% on $27,700 = $68,137 / 12 = $5,678.08
+        Assert.Equal(5678.08m, result.IncomeTaxWithholding);
+
+        // Total Employee Deductions = $953.25 + $362.50 + $75.00 + $5,678.08 = $7,068.83
+        Assert.Equal(7068.83m, result.TotalEmployeeDeductions);
+
+        // Net Take-Home Pay = $25,000.00 - $7,068.83 = $17,931.17
+        Assert.Equal(17931.17m, result.NetPay);
+
+        // Total Employer Obligations = $953.25 (SS) + $362.50 (Med) + $3.50 (FUTA) + $22.50 (SUTA) = $1,341.75
+        Assert.Equal(1341.75m, result.EmployerSocialSecurity);
     }
 
     [Fact]
@@ -318,9 +332,9 @@ public class GlobalLocalizationTests
         var result = _payrollEngine.CalculatePayroll(context);
 
         Assert.Equal("US", result.CountryCode);
-        // Annual gross: $120,000. 2026 MFJ Standard Deduction = $31,400. Taxable = $88,600.
-        // Tax = $2,480 (10% on $24,800) + 12% on ($88,600 - $24,800 = $63,800) = $2,480 + $7,656 = $10,136 / 12 = $844.67
-        Assert.Equal(844.67m, result.IncomeTaxWithholding);
+        // Annual gross: $120,000. 2026 MFJ Standard Deduction = $32,200. Taxable = $87,800.
+        // Tax = $2,480 (10% on $24,800) + 12% on ($87,800 - $24,800 = $63,000) = $2,480 + $7,560 = $10,040 / 12 = $836.67
+        Assert.Equal(836.67m, result.IncomeTaxWithholding);
     }
 
     [Fact]
@@ -347,13 +361,14 @@ public class GlobalLocalizationTests
         Assert.Equal("SCOTLAND", result.WorkJurisdiction);
         Assert.Equal(5000.00m, result.GrossPay);
 
-        // Scottish Income Tax higher than Rest of UK due to 6 progressive bands
-        Assert.True(result.IncomeTaxWithholding > 0);
+        // Scottish 6-band Income Tax: Personal allowance £1,047.50 -> Taxable £3,952.50
+        // Starter 19% on £192.17 (£36.51) + Basic 20% on £973.75 (£194.75) + Intermediate 21% on £1,425.08 (£299.27) + Higher 42% on £1,361.50 (£571.83) = £1,102.36
+        Assert.Equal(1102.36m, result.IncomeTaxWithholding);
 
-        // Student loan Plan 4: 9% over £2,616.25/mo -> (£5,000 - £2,616.25) * 0.09 = £214.54
+        // Student loan Plan 4: 9% over £2,816.25/mo -> (£5,000 - £2,816.25) * 0.09 = £196.54
         var slLine = result.PayLines.FirstOrDefault(l => l.Category == "student_loan");
         Assert.NotNull(slLine);
-        Assert.Equal(214.54m, slLine.Amount);
+        Assert.Equal(196.54m, slLine.Amount);
 
         // Workplace pension auto-enrolment: Qualifying earnings between £520 and £4,189 = £3,669
         // EE 5% = £183.45. ER 3% = £110.07.
@@ -432,7 +447,7 @@ public class GlobalLocalizationTests
     // ── 8. Global Payroll Engine: United Arab Emirates (GPSSA & EOSG) ─────────
 
     [Fact]
-    public void CalculatePayroll_UnitedArabEmiratesNational_ComputesGpssaPensionAndZeroTax()
+    public void CalculatePayroll_UnitedArabEmiratesLaw7_1999_ComputesLegacyRatesAndGovtSubsidy()
     {
         var context = new PayrollCalculationContext(
             EmployeeId: Guid.NewGuid(),
@@ -446,7 +461,9 @@ public class GlobalLocalizationTests
             Bonus: 0.00m,
             EffectiveDate: new DateOnly(2026, 1, 1),
             CurrencyCode: "AED",
-            IsNationalEmployee: true);
+            IsNationalEmployee: true,
+            UaePensionScheme: "LAW7_1999",
+            UaeSector: "private");
 
         var result = _payrollEngine.CalculatePayroll(context);
 
@@ -455,11 +472,155 @@ public class GlobalLocalizationTests
         Assert.Equal(25000.00m, result.GrossPay);
         // UAE personal income tax is strictly 0.00
         Assert.Equal(0.00m, result.IncomeTaxWithholding);
-        // GPSSA Employee Share: 5% of AED 25,000 = AED 1,250.00
+        // Law 7 of 1999: Employee Share 5% of AED 25,000 = AED 1,250.00
         Assert.Equal(1250.00m, result.EmployeePension);
-        // GPSSA Employer Share: 12.5% of AED 25,000 = AED 3,125.00
-        Assert.Equal(3125.00m, result.EmployerPension);
+        // Law 7 of 1999: Employer Share 12.5% of AED 25,000 = AED 3,125.00
+        var erPensionLine = result.PayLines.First(l => l.Category == "uae_national_pension_er");
+        Assert.Equal(3125.00m, erPensionLine.Amount);
+        // Law 7 of 1999: Government Subsidy 2.5% of AED 25,000 = AED 625.00
+        var govSubsidyLine = result.PayLines.First(l => l.Category == "uae_govt_pension_subsidy");
+        Assert.Equal(625.00m, govSubsidyLine.Amount);
         Assert.Equal(23750.00m, result.NetPay);
+    }
+
+    [Fact]
+    public void CalculatePayroll_UnitedArabEmiratesDecreeLaw57_2023_ComputesNewGpssaRates()
+    {
+        var context = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "AE",
+            WorkJurisdiction: "DUBAI",
+            SkillCategory: "skilled",
+            BaseSalary: 20000.00m,
+            Allowances: 5000.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 1, 1),
+            CurrencyCode: "AED",
+            IsNationalEmployee: true,
+            UaePensionScheme: "DECREELAW57_2023",
+            UaeSector: "private");
+
+        var result = _payrollEngine.CalculatePayroll(context);
+
+        Assert.Equal("AE", result.CountryCode);
+        Assert.Equal(25000.00m, result.GrossPay);
+        // Decree-Law 57/2023: EE Share 11% of AED 25,000 = AED 2,750.00
+        Assert.Equal(2750.00m, result.EmployeePension);
+        // Decree-Law 57/2023: ER Share 15% (for salary >= 20k) = AED 3,750.00
+        var erPensionLine = result.PayLines.First(l => l.Category == "uae_national_pension_er");
+        Assert.Equal(3750.00m, erPensionLine.Amount);
+        Assert.Equal(22250.00m, result.NetPay);
+    }
+
+    [Fact]
+    public void CalculatePayroll_UnitedArabEmiratesAbuDhabiAndSharjahFunds_CalculatesSpecificRates()
+    {
+        // Abu Dhabi Pension Fund (ADPF: 11% EE, 15% ER, cap AED 100k)
+        var contextAdpf = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "AE",
+            WorkJurisdiction: "ABU_DHABI",
+            SkillCategory: "skilled",
+            BaseSalary: 30000.00m,
+            Allowances: 10000.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 1, 1),
+            CurrencyCode: "AED",
+            IsNationalEmployee: true,
+            UaePensionScheme: "ADPF");
+
+        var resultAdpf = _payrollEngine.CalculatePayroll(contextAdpf);
+        Assert.Equal(4400.00m, resultAdpf.EmployeePension); // 11% of 40,000
+        Assert.Equal(6000.00m, resultAdpf.PayLines.First(l => l.Category == "uae_national_pension_er").Amount); // 15% of 40,000
+
+        // Sharjah Social Security Fund (SSSF: 5% EE, 15% ER, cap AED 50k)
+        var contextSssf = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "AE",
+            WorkJurisdiction: "SHARJAH",
+            SkillCategory: "skilled",
+            BaseSalary: 30000.00m,
+            Allowances: 10000.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 1, 1),
+            CurrencyCode: "AED",
+            IsNationalEmployee: true,
+            UaePensionScheme: "SSSF");
+
+        var resultSssf = _payrollEngine.CalculatePayroll(contextSssf);
+        Assert.Equal(2000.00m, resultSssf.EmployeePension); // 5% of 40,000
+        Assert.Equal(6000.00m, resultSssf.PayLines.First(l => l.Category == "uae_national_pension_er").Amount); // 15% of 40,000
+    }
+
+    [Fact]
+    public void CalculatePayroll_UnitedArabEmiratesExpatriate_AccruesEndOfServiceGratuity()
+    {
+        var context = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "AE",
+            WorkJurisdiction: "DUBAI",
+            SkillCategory: "skilled",
+            BaseSalary: 12000.00m,
+            Allowances: 3000.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 1, 1),
+            CurrencyCode: "AED",
+            IsNationalEmployee: false);
+
+        var result = _payrollEngine.CalculatePayroll(context);
+
+        Assert.Equal(15000.00m, result.GrossPay);
+        Assert.Equal(0.00m, result.EmployeePension);
+        Assert.Equal(0.00m, result.IncomeTaxWithholding);
+        // Expatriate EOSG: (12,000 / 30) * 1.75 days = AED 700.00
+        var eosgLine = result.PayLines.First(l => l.Category == "eosg_accrual_er");
+        Assert.Equal(700.00m, eosgLine.Amount);
+        Assert.Equal(15000.00m, result.NetPay);
+    }
+
+    // ── 8B. Global Payroll Engine: Australia (12% Super & PAYG) ───────────────
+
+    [Fact]
+    public void CalculatePayroll_Australia_Computes12PercentSuperAndPaygWithholding()
+    {
+        var context = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "AU",
+            WorkJurisdiction: "NSW",
+            SkillCategory: "skilled",
+            BaseSalary: 8000.00m, // AUD 8,000 / month = AUD 96,000 / year
+            Allowances: 500.00m,
+            OvertimeHours: 10.00m,
+            OvertimeHourlyRate: 50.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 7, 1), // Post-1 July 2026 12.0% Super mandate
+            CurrencyCode: "AUD",
+            OrdinaryTimeEarnings: 8500.00m,
+            AustraliaPaydaySuper: true);
+
+        var result = _payrollEngine.CalculatePayroll(context);
+
+        Assert.Equal("AU", result.CountryCode);
+        Assert.Equal("AUD", result.CurrencyCode);
+        // Gross pay = 8000 + 500 + (10 * 50 * 1.5 = 750) = AUD 9,250.00
+        Assert.Equal(9250.00m, result.GrossPay);
+
+        // Superannuation Guarantee: 12.0% on OTE ($8,500.00) = AUD 1,020.00
+        var superLine = result.PayLines.First(l => l.Category == "superannuation_guarantee");
+        Assert.Equal(1020.00m, superLine.Amount);
+        Assert.Equal(1020.00m, result.EmployerPension);
+
+        // PAYG Withholding > 0 on annual gross $111,000
+        Assert.True(result.IncomeTaxWithholding > 0);
+        Assert.Contains("Payday Super", result.StatutoryCitation);
     }
 
     // ── 9. Global Payroll Engine: Pakistan (FBR TY2027 & EOBI) ───────────────
@@ -492,8 +653,8 @@ public class GlobalLocalizationTests
         Assert.Equal(370.00m, result.EmployeePension);
         // EOBI Employer Share: 5% of PKR 37,000 base = PKR 1,850.00
         Assert.Equal(1850.00m, result.EmployerPension);
-        // Provincial Social Security Employer Share: 6% of PKR 43,000 Sindh ceiling = PKR 2,580.00
-        Assert.Equal(2580.00m, result.EmployerSocialSecurity);
+        // Provincial Social Security Employer Share: 5% of PKR 40,000 ceiling = PKR 2,000.00
+        Assert.Equal(2000.00m, result.EmployerSocialSecurity);
     }
 
     // ── 10. Multi-Currency Formatting Service ────────────────────────────────
