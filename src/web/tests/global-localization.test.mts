@@ -525,3 +525,309 @@ test("calculateGlobalTax enforces EU OSS destination VAT for B2C and Art 196 rev
   assert.equal(caB2c.ratePct, 13.0);
   assert.equal(caB2c.taxAmount, 130.0);
 });
+
+test("calculateSaudiArabiaPayroll verifies GOSI contributions, caps, and expatriate EOSA accrual", () => {
+  // 1. Saudi National within cap (SAR 20,000 gross)
+  const nationalRes = calculateGlobalPayroll({
+    countryCode: "SA",
+    grossSalary: 20000,
+    isExpatriate: false,
+  });
+  assert.equal(nationalRes.currencyCode, "SAR");
+  // EE: 9% annuities (1800) + 0.75% SANED (150) = 1950
+  assert.equal(nationalRes.employeeStatutoryDeductions, 1950.0);
+  // ER: 9% annuities (1800) + 0.75% SANED (150) + 2% Occ Hazards (400) = 2350
+  assert.equal(nationalRes.employerStatutoryContributions, 2350.0);
+  assert.equal(nationalRes.netSalary, 18050.0);
+
+  const annuitiesLine = nationalRes.statutoryLines.find(l => l.code === "SA_GOSI_ANNUITIES");
+  assert.ok(annuitiesLine);
+  assert.equal(annuitiesLine.employeeAmount, 1800.0);
+  assert.equal(annuitiesLine.employerAmount, 1800.0);
+
+  // 2. Saudi National exceeding SAR 45,000 statutory cap (SAR 60,000 gross)
+  const cappedRes = calculateGlobalPayroll({
+    countryCode: "SA",
+    grossSalary: 60000,
+    isExpatriate: false,
+  });
+  // Cap at 45,000: EE = 9.75% of 45,000 = 4,387.50
+  assert.equal(cappedRes.employeeStatutoryDeductions, 4387.5);
+  // ER = 11.75% of 45,000 = 5,287.50
+  assert.equal(cappedRes.employerStatutoryContributions, 5287.5);
+  assert.equal(cappedRes.netSalary, 55612.5);
+
+  // 3. Expatriate employee (SAR 15,000 gross/basic, 3 years service -> 4.167% EOSA accrual)
+  const expatRes = calculateGlobalPayroll({
+    countryCode: "SA",
+    grossSalary: 15000,
+    basicSalary: 15000,
+    isExpatriate: true,
+    yearsOfService: 3,
+  });
+  // 0% EE deduction for expats
+  assert.equal(expatRes.employeeStatutoryDeductions, 0.0);
+  // ER: 2% Occ Hazards (300) + EOSA (625) = 925.0
+  assert.equal(expatRes.employerStatutoryContributions, 925.0);
+  assert.equal(expatRes.netSalary, 15000.0);
+  const eosaLine = expatRes.statutoryLines.find(l => l.code === "SA_EOSA");
+  assert.ok(eosaLine);
+  assert.equal(eosaLine.employerAmount, 625.0);
+
+  // 4. Expatriate employee senior (> 5 years service -> 8.333% EOSA accrual)
+  const expatSenior = calculateGlobalPayroll({
+    countryCode: "SA",
+    grossSalary: 15000,
+    basicSalary: 15000,
+    isExpatriate: true,
+    yearsOfService: 7,
+  });
+  const seniorEosaLine = expatSenior.statutoryLines.find(l => l.code === "SA_EOSA");
+  assert.ok(seniorEosaLine);
+  assert.equal(seniorEosaLine.employerAmount, 1250.0);
+});
+
+test("calculateCanadaPayroll verifies CPP base, CPP2, EI, and provincial withholding", () => {
+  // Monthly salary of CAD 6,000
+  const caRes = calculateGlobalPayroll({
+    countryCode: "CA",
+    grossSalary: 6000,
+    jurisdiction: "ON",
+  });
+  assert.equal(caRes.currencyCode, "CAD");
+  const cppLine = caRes.statutoryLines.find(l => l.code === "CA_CPP_BASE");
+  assert.ok(cppLine);
+  assert.equal(cppLine.employeeAmount, 336.18);
+  assert.equal(cppLine.employerAmount, 336.18);
+
+  const cpp2Line = caRes.statutoryLines.find(l => l.code === "CA_CPP2_ENHANCED");
+  assert.ok(cpp2Line);
+  assert.equal(cpp2Line.employeeAmount, 2.33);
+
+  const eiLine = caRes.statutoryLines.find(l => l.code === "CA_EI");
+  assert.ok(eiLine);
+  assert.equal(eiLine.employeeAmount, 89.24);
+  assert.equal(eiLine.employerAmount, 124.94);
+
+  assert.ok(caRes.employeeIncomeTax > 0);
+  assert.ok(caRes.netSalary > 0);
+  assert.ok(caRes.netSalary < caRes.grossSalary);
+});
+
+test("calculateIndiaPayroll verifies EPF statutory split, ESI wage ceiling, PT and Section 115BAC", () => {
+  // 1. High-earner: Basic 40,000, Gross 60,000 (exceeds 21,000 ESI ceiling, MH jurisdiction)
+  const inHigh = calculateGlobalPayroll({
+    countryCode: "IN",
+    grossSalary: 60000,
+    basicSalary: 40000,
+    jurisdiction: "MH",
+  });
+  assert.equal(inHigh.currencyCode, "INR");
+  // EPF EE: 12% of 40,000 = 4,800
+  const epfEeLine = inHigh.statutoryLines.find(l => l.code === "IN_EPF_EE");
+  assert.ok(epfEeLine);
+  assert.equal(epfEeLine.employeeAmount, 4800.0);
+
+  const epfErLine = inHigh.statutoryLines.find(l => l.code === "IN_EPF_ER");
+  assert.ok(epfErLine);
+  assert.equal(epfErLine.employerAmount, 4875.0);
+
+  // ESI: not present because gross 60,000 > 21,000 ceiling
+  const esiLine = inHigh.statutoryLines.find(l => l.code === "IN_ESI");
+  assert.equal(esiLine, undefined);
+
+  // Professional Tax: MH standard 200
+  const ptLine = inHigh.statutoryLines.find(l => l.code === "IN_PT");
+  assert.ok(ptLine);
+  assert.equal(ptLine.employeeAmount, 200.0);
+  assert.ok(inHigh.netSalary > 0);
+
+  // 2. Low-earner: Basic 15,000, Gross 18,000 (eligible for ESI <= 21,000)
+  const inLow = calculateGlobalPayroll({
+    countryCode: "IN",
+    grossSalary: 18000,
+    basicSalary: 15000,
+    jurisdiction: "MH",
+  });
+  const lowEsiLine = inLow.statutoryLines.find(l => l.code === "IN_ESI");
+  assert.ok(lowEsiLine);
+  assert.equal(lowEsiLine.employeeAmount, 135.0); // 0.75% of 18,000
+  assert.equal(lowEsiLine.employerAmount, 585.0); // 3.25% of 18,000
+});
+
+test("calculateEuropeanPayroll verifies Netherlands, Spain, Italy and Poland adapters", () => {
+  // Netherlands: Loonheffing Box 1 and Werkgeverspremies
+  const nlRes = calculateGlobalPayroll({
+    countryCode: "NL",
+    grossSalary: 4000,
+  });
+  assert.equal(nlRes.currencyCode, "EUR");
+  assert.ok(nlRes.employeeIncomeTax > 0);
+  assert.equal(nlRes.employerStatutoryContributions, 740.0); // 18.5%
+  assert.ok(nlRes.netSalary > 0);
+
+  // Spain: Seguridad Social 6.35% EE / 29.9% ER
+  const esRes = calculateGlobalPayroll({
+    countryCode: "ES",
+    grossSalary: 3000,
+  });
+  assert.equal(esRes.currencyCode, "EUR");
+  const esSsLine = esRes.statutoryLines.find(l => l.code === "ES_SEG_SOCIAL_EE");
+  assert.ok(esSsLine);
+  assert.equal(esSsLine.employeeAmount, 190.5); // 6.35% of 3000
+  assert.ok(esRes.netSalary > 0);
+
+  // Italy: INPS 9.19% EE / 30.0% ER + TFR 6.91%
+  const itRes = calculateGlobalPayroll({
+    countryCode: "IT",
+    grossSalary: 3000,
+  });
+  assert.equal(itRes.currencyCode, "EUR");
+  const inpsLine = itRes.statutoryLines.find(l => l.code === "IT_INPS_EE");
+  assert.ok(inpsLine);
+  assert.equal(inpsLine.employeeAmount, 275.7); // 9.19% of 3000
+  const tfrLine = itRes.statutoryLines.find(l => l.code === "IT_TFR");
+  assert.ok(tfrLine);
+  assert.ok(tfrLine.employerAmount > 0);
+  assert.ok(itRes.netSalary > 0);
+
+  // Poland: ZUS 13.71% EE / 20.38% ER
+  const plRes = calculateGlobalPayroll({
+    countryCode: "PL",
+    grossSalary: 8000,
+  });
+  assert.equal(plRes.currencyCode, "PLN");
+  const zusLine = plRes.statutoryLines.find(l => l.code === "PL_ZUS_EE");
+  assert.ok(zusLine);
+  assert.equal(zusLine.employeeAmount, 1096.8); // 13.71% of 8000
+  assert.ok(plRes.netSalary > 0);
+});
+
+test("calculateGlobalTax resolves multi-country statutory taxes across Canada, India and extensible nations", () => {
+  // 1. Canada Quebec: 14.975% (5% GST + 9.975% QST)
+  const caQc = calculateGlobalTax({
+    amount: 1000,
+    customerCountryCode: "CA",
+    customerJurisdictionCode: "QC",
+    supplierCountryCode: "CA",
+  });
+  assert.equal(caQc.ratePct, 14.975);
+  assert.equal(caQc.taxAmount, 149.75);
+
+  // 2. Canada Saskatchewan: 11% (5% GST + 6% PST)
+  const caSk = calculateGlobalTax({
+    amount: 1000,
+    customerCountryCode: "CA",
+    customerJurisdictionCode: "SK",
+    supplierCountryCode: "CA",
+  });
+  assert.equal(caSk.ratePct, 11.0);
+  assert.equal(caSk.taxAmount, 110.0);
+
+  // 3. Canada Manitoba: 12% (5% GST + 7% RST)
+  const caMb = calculateGlobalTax({
+    amount: 1000,
+    customerCountryCode: "CA",
+    customerJurisdictionCode: "MB",
+    supplierCountryCode: "CA",
+  });
+  assert.equal(caMb.ratePct, 12.0);
+  assert.equal(caMb.taxAmount, 120.0);
+
+  // 4. Canada Alberta: 5% (GST only)
+  const caAb = calculateGlobalTax({
+    amount: 1000,
+    customerCountryCode: "CA",
+    customerJurisdictionCode: "AB",
+    supplierCountryCode: "CA",
+  });
+  assert.equal(caAb.ratePct, 5.0);
+  assert.equal(caAb.taxAmount, 50.0);
+
+  // 5. India Intra-State: 18% (9% CGST + 9% SGST)
+  const inIntra = calculateGlobalTax({
+    amount: 10000,
+    supplierCountryCode: "IN",
+    supplierJurisdictionCode: "MH",
+    customerCountryCode: "IN",
+    customerJurisdictionCode: "MH",
+  });
+  assert.equal(inIntra.ratePct, 18.0);
+  assert.equal(inIntra.taxAmount, 1800.0);
+  assert.ok(inIntra.explanation.includes("9% CGST and 9% SGST"));
+
+  // 6. India Inter-State: 18% IGST
+  const inInter = calculateGlobalTax({
+    amount: 10000,
+    supplierCountryCode: "IN",
+    supplierJurisdictionCode: "MH",
+    customerCountryCode: "IN",
+    customerJurisdictionCode: "KA",
+  });
+  assert.equal(inInter.ratePct, 18.0);
+  assert.equal(inInter.taxAmount, 1800.0);
+  assert.ok(inInter.explanation.includes("18% IGST"));
+
+  // 7. India B2B Reverse Charge: 0% tax, isReverseCharge = true
+  const inRcm = calculateGlobalTax({
+    amount: 10000,
+    supplierCountryCode: "US",
+    customerCountryCode: "IN",
+    customerType: "b2b",
+    customerVatNumber: "27AAAAA0000A1Z5",
+  });
+  assert.equal(inRcm.ratePct, 0.0);
+  assert.equal(inRcm.taxAmount, 0.0);
+  assert.equal(inRcm.isReverseCharge, true);
+  assert.ok(inRcm.statutoryReference.includes("Section 5(3)"));
+
+  // 8. India OIDAR Inbound B2C: 18% IGST
+  const inOidar = calculateGlobalTax({
+    amount: 10000,
+    supplierCountryCode: "US",
+    customerCountryCode: "IN",
+    customerType: "b2c",
+  });
+  assert.equal(inOidar.ratePct, 18.0);
+  assert.equal(inOidar.taxAmount, 1800.0);
+
+  // 9. Singapore: 9% GST
+  const sg = calculateGlobalTax({
+    amount: 1000,
+    customerCountryCode: "SG",
+  });
+  assert.equal(sg.ratePct, 9.0);
+  assert.equal(sg.taxAmount, 90.0);
+
+  // 10. Switzerland: 8.1% MWST
+  const ch = calculateGlobalTax({
+    amount: 1000,
+    customerCountryCode: "CH",
+  });
+  assert.equal(ch.ratePct, 8.1);
+  assert.equal(ch.taxAmount, 81.0);
+
+  // 11. Japan: 10% JCT
+  const jp = calculateGlobalTax({
+    amount: 10000,
+    customerCountryCode: "JP",
+  });
+  assert.equal(jp.ratePct, 10.0);
+  assert.equal(jp.taxAmount, 1000.0);
+
+  // 12. Brazil: 26.5% Dual IBS/CBS Tax Reform
+  const br = calculateGlobalTax({
+    amount: 1000,
+    customerCountryCode: "BR",
+  });
+  assert.equal(br.ratePct, 26.5);
+  assert.equal(br.taxAmount, 265.0);
+
+  // 13. South Africa: 15% VAT
+  const za = calculateGlobalTax({
+    amount: 1000,
+    customerCountryCode: "ZA",
+  });
+  assert.equal(za.ratePct, 15.0);
+  assert.equal(za.taxAmount, 150.0);
+});

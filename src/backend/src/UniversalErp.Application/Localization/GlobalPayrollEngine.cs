@@ -36,7 +36,10 @@ public sealed record PayrollCalculationContext(
     string UaeSector = "private", // "private", "government"
     // Australia Superannuation Settings
     bool AustraliaPaydaySuper = false,
-    decimal OrdinaryTimeEarnings = 0.00m);
+    decimal OrdinaryTimeEarnings = 0.00m,
+    // Saudi Arabia EOSA & Canada TD1 Settings
+    int YearsOfService = 1,
+    decimal ProvincialClaimAmount = 0.00m);
 
 public sealed record ConfigurableTaxSlab(
     int Order,
@@ -891,7 +894,635 @@ public sealed class PakistanPayrollAdapter : IPayrollCountryAdapter
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. Global Dispatching Engine
+// 6. Saudi Arabia Payroll Adapter (GOSI & Saudi Labor Law Art. 84 EOSA)
+// ─────────────────────────────────────────────────────────────────────────────
+public sealed class SaudiArabiaPayrollAdapter : IPayrollCountryAdapter
+{
+    public string CountryCode => "SA";
+    public string CountryName => "Saudi Arabia";
+    public string DefaultCurrencyCode => "SAR";
+
+    public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
+    {
+        // Saudi Nitaqat citizen benchmark SAR 4,000.00/mo; general floor SAR 1,500.00/mo
+        return 4000.00m;
+    }
+
+    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
+    {
+        var overtimePay = Math.Round(context.OvertimeHours * context.OvertimeHourlyRate * 1.5m, 2);
+        var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
+
+        decimal employeePension = 0.00m;
+        decimal employerPension = 0.00m;
+        decimal employerSocialSecurity = 0.00m;
+        decimal eosaAccrual = 0.00m;
+
+        var payLines = new List<PayrollPayLine>
+        {
+            new("earning", "base_salary", "Base Salary", context.BaseSalary, "SAR"),
+            new("earning", "allowances", "Housing and Transport Allowances", context.Allowances, "SAR")
+        };
+
+        if (overtimePay > 0)
+        {
+            payLines.Add(new("earning", "overtime", "Overtime (1.5x Hourly Rate)", overtimePay, "SAR"));
+        }
+
+        if (context.IsNationalEmployee)
+        {
+            // GOSI Social Insurance for Saudi Nationals
+            // Annuities: 9.0% EE, 9.0% ER (cap SAR 45,000.00)
+            // SANED Unemployment: 0.75% EE, 0.75% ER (cap SAR 45,000.00)
+            // Occupational Hazards: 2.0% ER only
+            var pensionableWage = Math.Min(context.BaseSalary + context.Allowances, 45000.00m);
+            var gosiAnnuitiesEe = Math.Round(pensionableWage * 0.09m, 2);
+            var gosiAnnuitiesEr = Math.Round(pensionableWage * 0.09m, 2);
+            var sanedEe = Math.Round(pensionableWage * 0.0075m, 2);
+            var sanedEr = Math.Round(pensionableWage * 0.0075m, 2);
+            var occHazardsEr = Math.Round(pensionableWage * 0.02m, 2);
+
+            employeePension = gosiAnnuitiesEe + sanedEe;
+            employerPension = gosiAnnuitiesEr + sanedEr;
+            employerSocialSecurity = occHazardsEr;
+
+            payLines.Add(new("deduction", "gosi_annuities_ee", "GOSI Annuities Branch (9.0% up to SAR 45k cap)", gosiAnnuitiesEe, "SAR"));
+            payLines.Add(new("deduction", "gosi_saned_ee", "SANED Unemployment Insurance (0.75% up to SAR 45k cap)", sanedEe, "SAR"));
+            payLines.Add(new("employer_contribution", "gosi_annuities_er", "GOSI Annuities Branch ER (9.0%)", gosiAnnuitiesEr, "SAR"));
+            payLines.Add(new("employer_contribution", "gosi_saned_er", "SANED Unemployment Insurance ER (0.75%)", sanedEr, "SAR"));
+            payLines.Add(new("employer_contribution", "gosi_occ_hazards_er", "GOSI Occupational Hazards ER (2.0%)", occHazardsEr, "SAR"));
+        }
+        else
+        {
+            // Expatriates: Occupational Hazards 2.0% ER, 0% EE
+            var occWage = Math.Min(context.BaseSalary + context.Allowances, 45000.00m);
+            var occHazardsEr = Math.Round(occWage * 0.02m, 2);
+            employerSocialSecurity = occHazardsEr;
+            payLines.Add(new("employer_contribution", "gosi_occ_hazards_er", "GOSI Occupational Hazards ER (2.0%)", occHazardsEr, "SAR"));
+
+            // Saudi Labor Law Art. 84 EOSA (End of Service Award)
+            // First 5 years: Half-month wage/yr (0.5/12 = 4.167% of basic salary)
+            // Beyond 5 years: Full-month wage/yr (1.0/12 = 8.333% of basic salary)
+            var monthlyEosaRate = context.YearsOfService > 5 ? (1.0m / 12.0m) : (0.5m / 12.0m);
+            eosaAccrual = Math.Round(context.BaseSalary * monthlyEosaRate, 2);
+            employerPension = eosaAccrual;
+            payLines.Add(new("employer_contribution", "eosa_accrual_er", $"Saudi Labor Law Art 84 EOSA Accrual ({(context.YearsOfService > 5 ? "Full Month" : "Half Month")} Wage/Yr)", eosaAccrual, "SAR"));
+        }
+
+        var totalEeDeductions = employeePension;
+        var netPay = Math.Max(0.00m, grossPay - totalEeDeductions);
+        var minWage = GetStatutoryMinimumWage(context.WorkJurisdiction, context.SkillCategory, context.EffectiveDate);
+
+        return new PayrollCalculationResult(
+            EmployeeId: context.EmployeeId,
+            CountryCode: "SA",
+            WorkJurisdiction: context.WorkJurisdiction ?? "RIYADH",
+            GrossPay: grossPay,
+            IncomeTaxWithholding: 0.00m,
+            EmployeeSocialSecurity: 0.00m,
+            EmployerSocialSecurity: employerSocialSecurity,
+            EmployeePension: employeePension,
+            EmployerPension: employerPension,
+            OtherDeductions: 0.00m,
+            TotalEmployeeDeductions: totalEeDeductions,
+            NetPay: netPay,
+            CurrencyCode: "SAR",
+            StatutoryAuthority: "General Organization for Social Insurance (GOSI) & Ministry of Human Resources",
+            StatutoryCitation: context.IsNationalEmployee
+                ? "Social Insurance Law (Royal Decree No. M/33) & SANED (Royal Decree No. M/18)"
+                : "Social Insurance Law (Occupational Hazards) & Saudi Labor Law Royal Decree No. M/51 Art 84 (EOSA)",
+            MinimumWageCompliant: grossPay >= minWage,
+            ApplicableMinimumWage: minWage,
+            PayLines: payLines);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. Canada Payroll Adapter (CRA CPP, CPP2, EI & Provincial Taxes)
+// ─────────────────────────────────────────────────────────────────────────────
+public sealed class CanadaPayrollAdapter : IPayrollCountryAdapter
+{
+    public string CountryCode => "CA";
+    public string CountryName => "Canada";
+    public string DefaultCurrencyCode => "CAD";
+
+    public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
+    {
+        var prov = (jurisdiction ?? "ON").Trim().ToUpperInvariant();
+        return prov switch
+        {
+            "BC" => 2827.50m, // $17.40/hr * 162.5
+            "AB" => 2437.50m, // $15.00/hr * 162.5
+            "QC" => 2559.38m, // $15.75/hr * 162.5
+            _ => 2795.00m     // ON $17.20/hr * 162.5
+        };
+    }
+
+    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
+    {
+        var overtimePay = Math.Round(context.OvertimeHours * context.OvertimeHourlyRate * 1.5m, 2);
+        var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
+
+        // 1. Canada Pension Plan (CPP 2026 CRA Formulas)
+        // Basic exemption = $3,500/yr ($291.67/mo)
+        // YMPE 2026 = $71,300/yr ($5,941.67/mo) -> Base CPP 5.95% EE & ER (max $336.18/mo)
+        // YAMPE 2026 = $81,200/yr ($6,766.67/mo) -> CPP2 4.0% EE & ER on excess above YMPE (max $33.00/mo)
+        var monthlyExemption = 291.67m;
+        var monthlyYmpe = 5941.67m;
+        var monthlyYampe = 6766.67m;
+
+        decimal cppBaseEe = 0.00m;
+        decimal cppBaseEr = 0.00m;
+        decimal cpp2Ee = 0.00m;
+        decimal cpp2Er = 0.00m;
+
+        if (grossPay > monthlyExemption)
+        {
+            var pensionableBase = Math.Min(grossPay, monthlyYmpe) - monthlyExemption;
+            cppBaseEe = Math.Round(pensionableBase * 0.0595m, 2);
+            cppBaseEr = cppBaseEe;
+        }
+
+        if (grossPay > monthlyYmpe)
+        {
+            var pensionableTier2 = Math.Min(grossPay, monthlyYampe) - monthlyYmpe;
+            cpp2Ee = Math.Round(pensionableTier2 * 0.04m, 2);
+            cpp2Er = cpp2Ee;
+        }
+
+        var totalCppEe = cppBaseEe + cpp2Ee;
+        var totalCppEr = cppBaseEr + cpp2Er;
+
+        // 2. Employment Insurance (EI 2026 CRA Formulas)
+        // Maximum Annual Insurable Earnings = $65,700/yr ($5,475.00/mo)
+        // Employee = 1.63% (max $89.24/mo). Employer = 1.4x = 2.282% (max $124.94/mo).
+        var monthlyEiMax = 5475.00m;
+        var insurableEiWage = Math.Min(grossPay, monthlyEiMax);
+        var eiEe = Math.Round(insurableEiWage * 0.0163m, 2);
+        var eiEr = Math.Round(insurableEiWage * 0.02282m, 2);
+
+        // 3. Federal & Provincial Income Tax Withholding (TD1 2026)
+        var annualGross = grossPay * 12.0m;
+        var federalBpa = 16129.00m;
+        var taxableAnnual = Math.Max(0.00m, annualGross - federalBpa);
+        decimal annualFedTax;
+
+        if (taxableAnnual <= 57375m)
+            annualFedTax = taxableAnnual * 0.15m;
+        else if (taxableAnnual <= 114750m)
+            annualFedTax = 8606.25m + ((taxableAnnual - 57375m) * 0.205m);
+        else if (taxableAnnual <= 177882m)
+            annualFedTax = 20368.13m + ((taxableAnnual - 114750m) * 0.26m);
+        else if (taxableAnnual <= 253414m)
+            annualFedTax = 36782.45m + ((taxableAnnual - 177882m) * 0.29m);
+        else
+            annualFedTax = 58686.73m + ((taxableAnnual - 253414m) * 0.33m);
+
+        // Provincial Income Tax (Ontario default ~5.05%)
+        var annualProvTax = taxableAnnual * 0.0505m;
+        var monthlyIncomeTax = Math.Round((annualFedTax + annualProvTax) / 12.0m, 2);
+
+        var payLines = new List<PayrollPayLine>
+        {
+            new("earning", "base_salary", "Base Salary", context.BaseSalary, "CAD"),
+            new("earning", "allowances", "Taxable Allowances", context.Allowances, "CAD"),
+            new("deduction", "cpp_base_ee", "Canada Pension Plan Base EE (5.95%)", cppBaseEe, "CAD"),
+            new("employer_contribution", "cpp_base_er", "Canada Pension Plan Base ER (5.95%)", cppBaseEr, "CAD")
+        };
+
+        if (cpp2Ee > 0)
+        {
+            payLines.Add(new("deduction", "cpp2_enhanced_ee", "CPP2 Second Tier EE (4.0% on YAMPE band)", cpp2Ee, "CAD"));
+            payLines.Add(new("employer_contribution", "cpp2_enhanced_er", "CPP2 Second Tier ER (4.0% on YAMPE band)", cpp2Er, "CAD"));
+        }
+
+        payLines.Add(new("deduction", "ei_premium_ee", "Employment Insurance EE (1.63%)", eiEe, "CAD"));
+        payLines.Add(new("employer_contribution", "ei_premium_er", "Employment Insurance ER (2.282% / 1.4x)", eiEr, "CAD"));
+        payLines.Add(new("deduction", "income_tax_fed_prov", "Federal & Provincial Income Tax (CRA TD1)", monthlyIncomeTax, "CAD"));
+
+        var totalEeDeductions = totalCppEe + eiEe + monthlyIncomeTax;
+        var netPay = Math.Max(0.00m, grossPay - totalEeDeductions);
+        var minWage = GetStatutoryMinimumWage(context.WorkJurisdiction, context.SkillCategory, context.EffectiveDate);
+
+        return new PayrollCalculationResult(
+            EmployeeId: context.EmployeeId,
+            CountryCode: "CA",
+            WorkJurisdiction: context.WorkJurisdiction ?? "ON",
+            GrossPay: grossPay,
+            IncomeTaxWithholding: monthlyIncomeTax,
+            EmployeeSocialSecurity: eiEe,
+            EmployerSocialSecurity: eiEr,
+            EmployeePension: totalCppEe,
+            EmployerPension: totalCppEr,
+            OtherDeductions: 0.00m,
+            TotalEmployeeDeductions: totalEeDeductions,
+            NetPay: netPay,
+            CurrencyCode: "CAD",
+            StatutoryAuthority: "Canada Revenue Agency (CRA) & Employment and Social Development Canada (ESDC)",
+            StatutoryCitation: "Canada Pension Plan Act (R.S.C., 1985, c. C-8) & Employment Insurance Act (S.C. 1996, c. 23)",
+            MinimumWageCompliant: grossPay >= minWage,
+            ApplicableMinimumWage: minWage,
+            PayLines: payLines);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. India Payroll Adapter (CBIC GST, EPFO, ESIC & Sec 115BAC New Tax Regime)
+// ─────────────────────────────────────────────────────────────────────────────
+public sealed class IndiaPayrollAdapter : IPayrollCountryAdapter
+{
+    public string CountryCode => "IN";
+    public string CountryName => "India";
+    public string DefaultCurrencyCode => "INR";
+
+    public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
+    {
+        return 15000.00m;
+    }
+
+    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
+    {
+        var overtimePay = Math.Round(context.OvertimeHours * context.OvertimeHourlyRate * 2.0m, 2);
+        var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
+
+        // 1. Employees' Provident Fund (EPF & MP Act 1952)
+        // Employee: 12% on PF wage (Basic + DA)
+        // Employer: 12% split into 8.33% EPS (capped at ₹15,000 wage = ₹1,250 max) + EPF balance
+        var pfWage = context.BaseSalary;
+        var epfEe = Math.Round(pfWage * 0.12m, 2);
+
+        var epsBase = Math.Min(pfWage, 15000.00m);
+        var epsEr = Math.Round(epsBase * 0.0833m, 2); // max ₹1,250.00
+        var epfEr = epfEe - epsEr;
+        var edliEr = Math.Round(Math.Min(pfWage, 15000.00m) * 0.005m, 2); // 0.5% EDLI max ₹75
+
+        // 2. Employees' State Insurance (ESI Act 1948)
+        // Applies only if gross pay <= ₹21,000/month: EE 0.75%, ER 3.25%
+        decimal esiEe = 0.00m;
+        decimal esiEr = 0.00m;
+        if (grossPay <= 21000.00m)
+        {
+            esiEe = Math.Round(grossPay * 0.0075m, 2);
+            esiEr = Math.Round(grossPay * 0.0325m, 2);
+        }
+
+        // 3. Professional Tax (PT - State specific e.g. Maharashtra ₹200/mo)
+        decimal profTax = 0.00m;
+        var state = (context.WorkJurisdiction ?? "MH").Trim().ToUpperInvariant();
+        if (grossPay > 10000.00m)
+        {
+            profTax = (state == "MH" && context.EffectiveDate.Month == 2) ? 300.00m : 200.00m;
+        }
+
+        // 4. Income Tax TDS under Section 192 (Section 115BAC New Tax Regime)
+        var annualGross = grossPay * 12.0m;
+        var taxableAnnual = Math.Max(0.00m, annualGross - 75000.00m); // Standard Deduction ₹75,000
+        decimal annualTax = 0.00m;
+
+        if (taxableAnnual > 300000m)
+        {
+            if (taxableAnnual <= 700000m)
+            {
+                annualTax = 0.00m; // Sec 87A rebate
+            }
+            else
+            {
+                annualTax += 20000m; // 3-7L @ 5%
+                var rem = taxableAnnual - 700000m;
+
+                if (rem <= 300000m)
+                    annualTax += rem * 0.10m;
+                else
+                {
+                    annualTax += 30000m; // 7-10L @ 10%
+                    rem -= 300000m;
+
+                    if (rem <= 200000m)
+                        annualTax += rem * 0.15m;
+                    else
+                    {
+                        annualTax += 30000m; // 10-12L @ 15%
+                        rem -= 200000m;
+
+                        if (rem <= 300000m)
+                            annualTax += rem * 0.20m;
+                        else
+                        {
+                            annualTax += 60000m; // 12-15L @ 20%
+                            rem -= 300000m;
+                            annualTax += rem * 0.30m; // >15L @ 30%
+                        }
+                    }
+                }
+
+                annualTax = Math.Round(annualTax * 1.04m, 2); // 4% Health & Education Cess
+            }
+        }
+
+        var monthlyTds = Math.Round(annualTax / 12.0m, 2);
+
+        var payLines = new List<PayrollPayLine>
+        {
+            new("earning", "base_salary", "Basic Salary (PF Wage)", context.BaseSalary, "INR"),
+            new("earning", "allowances", "Special & HRA Allowances", context.Allowances, "INR"),
+            new("deduction", "epf_ee", "Employees' Provident Fund EE (12.0%)", epfEe, "INR"),
+            new("employer_contribution", "epf_er", "EPF Employer Share (3.67% + balance)", epfEr, "INR"),
+            new("employer_contribution", "eps_er", "Employees' Pension Scheme ER (8.33% max ₹1,250)", epsEr, "INR"),
+            new("employer_contribution", "edli_er", "EDLI Insurance Contribution ER (0.50%)", edliEr, "INR")
+        };
+
+        if (esiEe > 0)
+        {
+            payLines.Add(new("deduction", "esi_ee", "ESI Employee Contribution (0.75%)", esiEe, "INR"));
+            payLines.Add(new("employer_contribution", "esi_er", "ESI Employer Contribution (3.25%)", esiEr, "INR"));
+        }
+
+        if (profTax > 0)
+        {
+            payLines.Add(new("deduction", "professional_tax", $"State Professional Tax ({state})", profTax, "INR"));
+        }
+
+        if (monthlyTds > 0)
+        {
+            payLines.Add(new("deduction", "income_tax_tds", "Income Tax TDS (Sec 115BAC New Tax Regime)", monthlyTds, "INR"));
+        }
+
+        var totalEeDeductions = epfEe + esiEe + profTax + monthlyTds;
+        var netPay = Math.Max(0.00m, grossPay - totalEeDeductions);
+        var minWage = GetStatutoryMinimumWage(context.WorkJurisdiction, context.SkillCategory, context.EffectiveDate);
+
+        return new PayrollCalculationResult(
+            EmployeeId: context.EmployeeId,
+            CountryCode: "IN",
+            WorkJurisdiction: context.WorkJurisdiction ?? "MH",
+            GrossPay: grossPay,
+            IncomeTaxWithholding: monthlyTds,
+            EmployeeSocialSecurity: esiEe + profTax,
+            EmployerSocialSecurity: esiEr + edliEr,
+            EmployeePension: epfEe,
+            EmployerPension: epsEr + epfEr,
+            OtherDeductions: 0.00m,
+            TotalEmployeeDeductions: totalEeDeductions,
+            NetPay: netPay,
+            CurrencyCode: "INR",
+            StatutoryAuthority: "Employees' Provident Fund Organisation (EPFO), ESIC & Income Tax Department",
+            StatutoryCitation: "Employees' Provident Funds and Miscellaneous Provisions Act 1952 & Income Tax Act Section 115BAC",
+            MinimumWageCompliant: grossPay >= minWage,
+            ApplicableMinimumWage: minWage,
+            PayLines: payLines);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. European Payroll Adapters (Netherlands, Spain, Italy, Poland)
+// ─────────────────────────────────────────────────────────────────────────────
+public sealed class NetherlandsPayrollAdapter : IPayrollCountryAdapter
+{
+    public string CountryCode => "NL";
+    public string CountryName => "Netherlands";
+    public string DefaultCurrencyCode => "EUR";
+
+    public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
+    {
+        // Dutch statutory minimum wage 2026: €13.68/hr * 160 = €2,188.80/month
+        return 2188.80m;
+    }
+
+    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
+    {
+        var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + context.Bonus);
+        var annualGross = grossPay * 12.0m;
+
+        // Loonheffing (Dutch Wage Tax 2026 2-bracket): 36.97% up to €75,518; 49.50% above
+        decimal annualTax;
+        if (annualGross <= 75518m)
+            annualTax = annualGross * 0.3697m;
+        else
+            annualTax = (75518m * 0.3697m) + ((annualGross - 75518m) * 0.4950m);
+
+        // General tax credit (Algemene heffingskorting max €3,362, tapered)
+        var generalCredit = Math.Max(0.00m, 3362m - (Math.Max(0.00m, annualGross - 24812m) * 0.0663m));
+        var netAnnualTax = Math.Max(0.00m, annualTax - generalCredit);
+        var monthlyTax = Math.Round(netAnnualTax / 12.0m, 2);
+
+        // Employer Social Premiums (AOF, Awf, Whk ~18.5%)
+        var erPremiums = Math.Round(grossPay * 0.185m, 2);
+
+        var payLines = new List<PayrollPayLine>
+        {
+            new("earning", "base_salary", "Base Salary", context.BaseSalary, "EUR"),
+            new("deduction", "loonheffing", "Loonheffing (Wage Tax & National Insurance)", monthlyTax, "EUR"),
+            new("employer_contribution", "social_premiums_er", "Werkgeverspremies (AOF / Awf / Whk 18.5%)", erPremiums, "EUR")
+        };
+
+        var netPay = Math.Max(0.00m, grossPay - monthlyTax);
+        return new PayrollCalculationResult(
+            EmployeeId: context.EmployeeId,
+            CountryCode: "NL",
+            WorkJurisdiction: context.WorkJurisdiction ?? "AMSTERDAM",
+            GrossPay: grossPay,
+            IncomeTaxWithholding: monthlyTax,
+            EmployeeSocialSecurity: 0.00m,
+            EmployerSocialSecurity: erPremiums,
+            EmployeePension: 0.00m,
+            EmployerPension: 0.00m,
+            OtherDeductions: 0.00m,
+            TotalEmployeeDeductions: monthlyTax,
+            NetPay: netPay,
+            CurrencyCode: "EUR",
+            StatutoryAuthority: "Belastingdienst (Dutch Tax Administration) & UWV",
+            StatutoryCitation: "Wet op de loonbelasting 1964 & Wet financiering sociale verzekeringen",
+            MinimumWageCompliant: grossPay >= 2188.80m,
+            ApplicableMinimumWage: 2188.80m,
+            PayLines: payLines);
+    }
+}
+
+public sealed class SpainPayrollAdapter : IPayrollCountryAdapter
+{
+    public string CountryCode => "ES";
+    public string CountryName => "Spain";
+    public string DefaultCurrencyCode => "EUR";
+
+    public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
+    {
+        // Salario Mínimo Interprofesional (SMI) 2026: €1,134.00 (14 payments) = €1,323.00/month (12 payments)
+        return 1323.00m;
+    }
+
+    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
+    {
+        var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + context.Bonus);
+
+        // Seguridad Social: Base capped at €4,720.50/mo
+        var baseCotizacion = Math.Min(grossPay, 4720.50m);
+        // Employee: 4.70% Contingencias Comunes + 1.55% Desempleo + 0.10% Formación = 6.35%
+        var ssEe = Math.Round(baseCotizacion * 0.0635m, 2);
+        // Employer: 23.60% CC + 5.50% Desempleo + 0.60% FP + 0.20% FOGASA = 29.90%
+        var ssEr = Math.Round(baseCotizacion * 0.2990m, 2);
+
+        // IRPF Withholding (Progressive scales ~15.0% for median salary)
+        var irpfRate = grossPay > 5000m ? 0.30m : grossPay > 3000m ? 0.19m : 0.15m;
+        var irpfWithholding = Math.Round(grossPay * irpfRate, 2);
+
+        var payLines = new List<PayrollPayLine>
+        {
+            new("earning", "base_salary", "Sueldo Base", context.BaseSalary, "EUR"),
+            new("deduction", "seguridad_social_ee", "Seguridad Social Trabajador (6.35%)", ssEe, "EUR"),
+            new("employer_contribution", "seguridad_social_er", "Seguridad Social Empresa (29.90%)", ssEr, "EUR"),
+            new("deduction", "retencion_irpf", $"Retención IRPF ({(irpfRate * 100):F1}%)", irpfWithholding, "EUR")
+        };
+
+        var totalEe = ssEe + irpfWithholding;
+        var netPay = Math.Max(0.00m, grossPay - totalEe);
+        return new PayrollCalculationResult(
+            EmployeeId: context.EmployeeId,
+            CountryCode: "ES",
+            WorkJurisdiction: context.WorkJurisdiction ?? "MADRID",
+            GrossPay: grossPay,
+            IncomeTaxWithholding: irpfWithholding,
+            EmployeeSocialSecurity: ssEe,
+            EmployerSocialSecurity: ssEr,
+            EmployeePension: 0.00m,
+            EmployerPension: 0.00m,
+            OtherDeductions: 0.00m,
+            TotalEmployeeDeductions: totalEe,
+            NetPay: netPay,
+            CurrencyCode: "EUR",
+            StatutoryAuthority: "Seguridad Social & Agencia Estatal de Administración Tributaria (AEAT)",
+            StatutoryCitation: "Ley General de la Seguridad Social (Real Decreto Legislativo 8/2015) & Ley IRPF",
+            MinimumWageCompliant: grossPay >= 1323.00m,
+            ApplicableMinimumWage: 1323.00m,
+            PayLines: payLines);
+    }
+}
+
+public sealed class ItalyPayrollAdapter : IPayrollCountryAdapter
+{
+    public string CountryCode => "IT";
+    public string CountryName => "Italy";
+    public string DefaultCurrencyCode => "EUR";
+
+    public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
+    {
+        // CCNL national sectoral contract minimum benchmark (approx €1,600.00/mo)
+        return 1600.00m;
+    }
+
+    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
+    {
+        var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + context.Bonus);
+
+        // INPS Social Contributions: Employee 9.19%, Employer ~30.0%
+        var inpsEe = Math.Round(grossPay * 0.0919m, 2);
+        var inpsEr = Math.Round(grossPay * 0.3000m, 2);
+
+        // TFR Accrual (Trattamento di Fine Rapporto = Gross / 13.5 = ~7.41%)
+        var tfrAccrual = Math.Round(grossPay / 13.5m, 2);
+
+        // IRPEF Withholding (2026 3-bracket: 23% to 28k, 35% 28-50k, 43% > 50k)
+        var taxableMonthly = Math.Max(0.00m, grossPay - inpsEe);
+        var irpefWithholding = Math.Round(taxableMonthly * 0.23m, 2);
+
+        var payLines = new List<PayrollPayLine>
+        {
+            new("earning", "base_salary", "Retribuzione Base", context.BaseSalary, "EUR"),
+            new("deduction", "contributi_inps_ee", "Contributi Previdenziali INPS (9.19%)", inpsEe, "EUR"),
+            new("employer_contribution", "contributi_inps_er", "Contributi Previdenziali INPS Datore (30.0%)", inpsEr, "EUR"),
+            new("employer_contribution", "accantonamento_tfr", "Accantonamento TFR (Retribuzione / 13.5)", tfrAccrual, "EUR"),
+            new("deduction", "ritenute_irpef", "Ritenute Fiscali IRPEF (Scaglione Base 23%)", irpefWithholding, "EUR")
+        };
+
+        var totalEe = inpsEe + irpefWithholding;
+        var netPay = Math.Max(0.00m, grossPay - totalEe);
+        return new PayrollCalculationResult(
+            EmployeeId: context.EmployeeId,
+            CountryCode: "IT",
+            WorkJurisdiction: context.WorkJurisdiction ?? "ROMA",
+            GrossPay: grossPay,
+            IncomeTaxWithholding: irpefWithholding,
+            EmployeeSocialSecurity: inpsEe,
+            EmployerSocialSecurity: inpsEr + tfrAccrual,
+            EmployeePension: 0.00m,
+            EmployerPension: tfrAccrual,
+            OtherDeductions: 0.00m,
+            TotalEmployeeDeductions: totalEe,
+            NetPay: netPay,
+            CurrencyCode: "EUR",
+            StatutoryAuthority: "Istituto Nazionale Previdenza Sociale (INPS) & Agenzia delle Entrate",
+            StatutoryCitation: "Testo Unico delle Imposte sui Redditi (TUIR) & CCNL Metalmeccanico/Terziario",
+            MinimumWageCompliant: grossPay >= 1600.00m,
+            ApplicableMinimumWage: 1600.00m,
+            PayLines: payLines);
+    }
+}
+
+public sealed class PolandPayrollAdapter : IPayrollCountryAdapter
+{
+    public string CountryCode => "PL";
+    public string CountryName => "Poland";
+    public string DefaultCurrencyCode => "PLN";
+
+    public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
+    {
+        // Minimalne wynagrodzenie za pracę 2026: 4,300.00 PLN
+        return 4300.00m;
+    }
+
+    public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
+    {
+        var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + context.Bonus);
+
+        // ZUS Social Insurance:
+        // Employee: Emerytalne 9.76% + Rentowe 1.50% + Chorobowe 2.45% = 13.71%
+        var zusEe = Math.Round(grossPay * 0.1371m, 2);
+        // Employer: Emerytalne 9.76% + Rentowe 6.50% + Wypadkowe 1.67% + FP/FS 2.45% = 20.38%
+        var zusEr = Math.Round(grossPay * 0.2038m, 2);
+
+        // Health Insurance (Składka zdrowotna NFZ): 9.0% on (Gross - ZUS EE)
+        var healthBase = grossPay - zusEe;
+        var healthEe = Math.Round(healthBase * 0.09m, 2);
+
+        // PIT Income Tax: 12% on taxable base minus tax-reducing amount (kwota zmniejszająca 300 PLN/mo)
+        var pitBase = Math.Max(0.00m, healthBase - 250.00m); // 250 PLN standard tax deductible costs
+        var pitGross = Math.Round(pitBase * 0.12m, 2);
+        var pitWithholding = Math.Max(0.00m, pitGross - 300.00m);
+
+        var payLines = new List<PayrollPayLine>
+        {
+            new("earning", "base_salary", "Wynagrodzenie Zasadnicze", context.BaseSalary, "PLN"),
+            new("deduction", "zus_spoleczne_ee", "Składki na ubezpieczenia społeczne ZUS (13.71%)", zusEe, "PLN"),
+            new("deduction", "skladka_zdrowotna_ee", "Składka na ubezpieczenie zdrowotne NFZ (9.0%)", healthEe, "PLN"),
+            new("deduction", "zaliczka_pit", "Zaliczka na podatek dochodowy PIT (12% - 300 PLN)", pitWithholding, "PLN"),
+            new("employer_contribution", "zus_pracodawca_er", "Składki ZUS finansowane przez pracodawcę (20.38%)", zusEr, "PLN")
+        };
+
+        var totalEe = zusEe + healthEe + pitWithholding;
+        var netPay = Math.Max(0.00m, grossPay - totalEe);
+        return new PayrollCalculationResult(
+            EmployeeId: context.EmployeeId,
+            CountryCode: "PL",
+            WorkJurisdiction: context.WorkJurisdiction ?? "WARSZAWA",
+            GrossPay: grossPay,
+            IncomeTaxWithholding: pitWithholding,
+            EmployeeSocialSecurity: zusEe + healthEe,
+            EmployerSocialSecurity: zusEr,
+            EmployeePension: 0.00m,
+            EmployerPension: 0.00m,
+            OtherDeductions: 0.00m,
+            TotalEmployeeDeductions: totalEe,
+            NetPay: netPay,
+            CurrencyCode: "PLN",
+            StatutoryAuthority: "Zakład Ubezpieczeń Społecznych (ZUS) & Krajowa Administracja Skarbowa (KAS)",
+            StatutoryCitation: "Ustawa o systemie ubezpieczeń społecznych & Ustawa o podatku dochodowym od osób fizycznych (PIT)",
+            MinimumWageCompliant: grossPay >= 4300.00m,
+            ApplicableMinimumWage: 4300.00m,
+            PayLines: payLines);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. Global Dispatching Engine
 // ─────────────────────────────────────────────────────────────────────────────
 public sealed class GlobalPayrollEngine
 {
@@ -905,7 +1536,14 @@ public sealed class GlobalPayrollEngine
             ["GB"] = new UnitedKingdomPayrollAdapter(),
             ["AE"] = new UnitedArabEmiratesPayrollAdapter(),
             ["AU"] = new AustraliaPayrollAdapter(),
-            ["PK"] = new PakistanPayrollAdapter()
+            ["PK"] = new PakistanPayrollAdapter(),
+            ["SA"] = new SaudiArabiaPayrollAdapter(),
+            ["CA"] = new CanadaPayrollAdapter(),
+            ["IN"] = new IndiaPayrollAdapter(),
+            ["NL"] = new NetherlandsPayrollAdapter(),
+            ["ES"] = new SpainPayrollAdapter(),
+            ["IT"] = new ItalyPayrollAdapter(),
+            ["PL"] = new PolandPayrollAdapter()
         };
     }
 

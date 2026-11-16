@@ -378,11 +378,13 @@ public sealed class GlobalTaxEngine
 
             var caRate = (province ?? "FED") switch
             {
-                "ON" => 13.0000m, // Ontario HST
-                "BC" => 12.0000m, // BC GST + PST
-                "QC" => 14.9750m, // Quebec QST
-                "NS" or "NB" or "NL" or "PE" => 15.0000m, // Atlantic HST
-                _ => 5.0000m      // Federal GST only (AB, SK, MB, etc.)
+                "ON" => 13.0000m, // Ontario HST (5% Fed + 8% Prov)
+                "BC" => 12.0000m, // BC GST (5%) + PST (7%)
+                "QC" => 14.9750m, // Quebec GST (5%) + QST (9.975%)
+                "SK" => 11.0000m, // Saskatchewan GST (5%) + PST (6%)
+                "MB" => 12.0000m, // Manitoba GST (5%) + RST (7%)
+                "NS" or "NB" or "NL" or "PE" => 15.0000m, // Atlantic HST (5% Fed + 10% Prov)
+                _ => 5.0000m      // Federal GST only (AB, YT, NT, NU)
             };
 
             return new TaxDeterminationResult(
@@ -633,7 +635,193 @@ public sealed class GlobalTaxEngine
             }
         }
 
-        // 8. Global Default Fallback
+        // 8. India (CBIC Goods & Services Tax - Dual GST Framework)
+        if (customerCountry == "IN")
+        {
+            var isCrossBorder = supplierCountry != "IN";
+            if (isCrossBorder && isB2B && hasVatId)
+            {
+                return new TaxDeterminationResult(
+                    Jurisdiction: "IN-CBIC",
+                    CountryCode: "IN",
+                    ProvinceState: province,
+                    Authority: "CBIC",
+                    TaxSystem: "reverse_charge",
+                    TaxName: "India B2B Import of Services Reverse Charge (RCM)",
+                    TariffOrClassificationCode: request.ProductServiceClassification ?? "SAC-998314",
+                    RatePercentage: 0.0000m,
+                    InputTaxAllowable: true,
+                    IsReverseCharge: true,
+                    IsExempt: false,
+                    StatutoryReference: "Integrated Goods and Services Tax Act 2017, Section 5(3) (Reverse Charge on Imported Services)",
+                    CalculationExplanation: $"Supply from overseas vendor to Indian GST-registered business ({request.CustomerTaxId}). Recipient pays IGST under RCM with 100% ITC.",
+                    AuditEvidenceSummary: $"GSTIN verified: {request.CustomerTaxId}. Reverse charge mechanism (RCM) applies.",
+                    EInvoicingMandatePlatform: "NIC E-Invoice Portal (IRN / Signed QR Code)");
+            }
+
+            if (isCrossBorder)
+            {
+                return new TaxDeterminationResult(
+                    Jurisdiction: "IN-CBIC",
+                    CountryCode: "IN",
+                    ProvinceState: province,
+                    Authority: "CBIC",
+                    TaxSystem: "gst",
+                    TaxName: "India OIDAR Inbound Digital Services IGST (B2C)",
+                    TariffOrClassificationCode: request.ProductServiceClassification ?? "SAC-998314",
+                    RatePercentage: 18.0000m,
+                    InputTaxAllowable: false,
+                    IsReverseCharge: false,
+                    IsExempt: false,
+                    StatutoryReference: "IGST Act 2017, Section 14 (OIDAR Services by Overseas Suppliers to Non-Taxable Online Recipients)",
+                    CalculationExplanation: "18% Integrated GST collected by overseas supplier on B2C digital services supplied to Indian residents.",
+                    AuditEvidenceSummary: "CBIC statutory standard 18% IGST on OIDAR services.",
+                    IsDestinationVat: true,
+                    EInvoicingMandatePlatform: "NIC E-Invoice Portal (IRN / Signed QR Code)");
+            }
+
+            var supplierProvince = "MH"; // Universal ERP India HQ
+            var isIntraState = !string.IsNullOrWhiteSpace(province) && string.Equals(province, supplierProvince, StringComparison.OrdinalIgnoreCase);
+
+            if (isIntraState)
+            {
+                return new TaxDeterminationResult(
+                    Jurisdiction: $"IN-{province}",
+                    CountryCode: "IN",
+                    ProvinceState: province,
+                    Authority: "CBIC_STATE_GST",
+                    TaxSystem: "gst",
+                    TaxName: $"India Dual GST - Intra-State ({province}: 9% CGST + 9% SGST)",
+                    TariffOrClassificationCode: request.ProductServiceClassification ?? "SAC-998314",
+                    RatePercentage: 18.0000m,
+                    InputTaxAllowable: true,
+                    IsReverseCharge: false,
+                    IsExempt: false,
+                    StatutoryReference: "CGST Act 2017 & State SGST Act (SAC 998314 IT/SaaS Services)",
+                    CalculationExplanation: "Intra-state supply in India: 18% GST split into 9% CGST and 9% SGST with full input tax credit allowable.",
+                    AuditEvidenceSummary: $"Intra-state supply in {province}. 9% CGST + 9% SGST.",
+                    EInvoicingMandatePlatform: "NIC E-Invoice Portal (IRN / Signed QR Code)");
+            }
+
+            return new TaxDeterminationResult(
+                Jurisdiction: $"IN-{province ?? "INTERSTATE"}",
+                CountryCode: "IN",
+                ProvinceState: province,
+                Authority: "CBIC",
+                TaxSystem: "gst",
+                TaxName: "India Integrated GST - Inter-State (18% IGST)",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "SAC-998314",
+                RatePercentage: 18.0000m,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: "Integrated Goods and Services Tax Act 2017, Section 5(1)",
+                CalculationExplanation: "Inter-state supply in India: 18% IGST applies with full input tax credit allowable.",
+                AuditEvidenceSummary: "CBIC statutory standard 18% IGST rate.",
+                EInvoicingMandatePlatform: "NIC E-Invoice Portal (IRN / Signed QR Code)");
+        }
+
+        // 9. Additional Extensible Country Packages (Singapore, Switzerland, Japan, Brazil, South Africa)
+        if (customerCountry == "SG")
+        {
+            return new TaxDeterminationResult(
+                Jurisdiction: "SG-IRAS",
+                CountryCode: "SG",
+                ProvinceState: null,
+                Authority: "IRAS",
+                TaxSystem: "gst",
+                TaxName: "Singapore Goods and Services Tax (Standard Rate)",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "DIGITAL-SVC",
+                RatePercentage: 9.0000m,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: "Goods and Services Tax Act 1993 (Singapore), Section 8",
+                CalculationExplanation: "Standard 9% GST rate in Singapore (effective 1 Jan 2024).",
+                AuditEvidenceSummary: "Inland Revenue Authority of Singapore (IRAS) standard 9% GST rate.",
+                EInvoicingMandatePlatform: "InvoiceNow (Peppol)");
+        }
+
+        if (customerCountry == "CH")
+        {
+            return new TaxDeterminationResult(
+                Jurisdiction: "CH-ESTV",
+                CountryCode: "CH",
+                ProvinceState: province,
+                Authority: "ESTV",
+                TaxSystem: "vat",
+                TaxName: "Switzerland Value Added Tax (MWST Normalsatz)",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "SERVICES",
+                RatePercentage: 8.1000m,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: "Bundesgesetz über die Mehrwertsteuer (MWSTG), Art. 25 (Standard 8.1%)",
+                CalculationExplanation: "Standard 8.1% Swiss MWST rate (effective 1 Jan 2024).",
+                AuditEvidenceSummary: "Eidgenössische Steuerverwaltung (ESTV) standard 8.1% rate.",
+                EInvoicingMandatePlatform: "Swiss QR-Bill (ISO 20022)");
+        }
+
+        if (customerCountry == "JP")
+        {
+            return new TaxDeterminationResult(
+                Jurisdiction: "JP-NTA",
+                CountryCode: "JP",
+                ProvinceState: null,
+                Authority: "NTA",
+                TaxSystem: "vat",
+                TaxName: "Japan Consumption Tax (JCT Standard Rate)",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "SERVICES",
+                RatePercentage: 10.0000m,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: "Consumption Tax Act (Japan), Cabinet Order & Qualified Invoice System (QIS)",
+                CalculationExplanation: "Standard 10% Japanese Consumption Tax (7.8% national + 2.2% local).",
+                AuditEvidenceSummary: "National Tax Agency (NTA) standard 10% JCT rate.",
+                EInvoicingMandatePlatform: "Qualified Invoice System (QIS)");
+        }
+
+        if (customerCountry == "BR")
+        {
+            return new TaxDeterminationResult(
+                Jurisdiction: "BR-RFB",
+                CountryCode: "BR",
+                ProvinceState: province,
+                Authority: "RFB_COMITETRIBUTARIO",
+                TaxSystem: "vat",
+                TaxName: "Brazil Dual VAT Reform (Estimated IBS + CBS)",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "SERVICES",
+                RatePercentage: 26.5000m,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: "Constitutional Amendment EC 132/2023 (Tax Reform IBS/CBS)",
+                CalculationExplanation: "Dual VAT reform transitioning PIS/COFINS/ICMS/ISS to federal CBS and state/municipal IBS.",
+                AuditEvidenceSummary: "Receita Federal do Brasil dual VAT transition structure.",
+                EInvoicingMandatePlatform: "Nota Fiscal de Serviço Eletrônica (NFS-e)");
+        }
+
+        if (customerCountry == "ZA")
+        {
+            return new TaxDeterminationResult(
+                Jurisdiction: "ZA-SARS",
+                CountryCode: "ZA",
+                ProvinceState: province,
+                Authority: "SARS",
+                TaxSystem: "vat",
+                TaxName: "South Africa Value Added Tax (Standard Rate)",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "SERVICES",
+                RatePercentage: 15.0000m,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: "Value-Added Tax Act, 1991 (Act No. 89 of 1991), Section 7(1)",
+                CalculationExplanation: "Standard 15% VAT on electronic services supplied to South African residents.",
+                AuditEvidenceSummary: "South African Revenue Service (SARS) standard 15% rate.");
+        }
+
+        // 10. Global Default Fallback
         return new TaxDeterminationResult(
             Jurisdiction: $"{customerCountry}-DEFAULT",
             CountryCode: customerCountry,

@@ -218,6 +218,8 @@ export function calculateGlobalTax(request: GlobalTaxRequest): GlobalTaxResult {
       if (prov === "ON") caRate = 13.0;
       else if (prov === "BC") caRate = 12.0;
       else if (prov === "QC") caRate = 14.975;
+      else if (prov === "SK") caRate = 11.0;
+      else if (prov === "MB") caRate = 12.0;
       else if (["NS", "NB", "NL", "PE"].includes(prov)) caRate = 15.0;
 
       ratePct = caRate;
@@ -382,7 +384,76 @@ export function calculateGlobalTax(request: GlobalTaxRequest): GlobalTaxResult {
     }
   }
 
-  // 9. Generic Fallback
+  // 9. India (CBIC Dual GST Framework)
+  else if (customerCountry === "IN") {
+    tariffCode = tariffCode || "SAC-998314";
+    eInvoicingMandatePlatform = "NIC E-Invoice Portal (IRN / Signed QR Code)";
+
+    if (isCrossBorder && isB2b && hasVatId) {
+      ratePct = 0.0;
+      isReverseCharge = true;
+      taxRegime = "reverse_charge";
+      taxAuthority = "Central Board of Indirect Taxes and Customs (CBIC)";
+      statutoryReference = "Integrated Goods and Services Tax Act 2017, Section 5(3) (Reverse Charge on Imported Services)";
+      explanation = `Cross-border B2B digital service to Indian GST-registered business (${request.customerVatNumber}). Recipient pays IGST under RCM.`;
+    } else if (isCrossBorder) {
+      ratePct = 18.0;
+      isDestinationVat = true;
+      taxAuthority = "Central Board of Indirect Taxes and Customs (CBIC)";
+      statutoryReference = "IGST Act 2017, Section 14 (OIDAR Digital Services to Non-Taxable Online Recipients)";
+      explanation = "18% Integrated GST collected by overseas vendor on B2C digital services supplied to Indian consumers.";
+    } else {
+      const state = rawJurisdiction.replace(/^IN[_-]/, "");
+      const isIntraState = state === "MH"; // Default India HQ in Maharashtra
+      ratePct = 18.0;
+      taxAuthority = isIntraState ? "CBIC & Maharashtra State GST (9% CGST + 9% SGST)" : "CBIC (18% IGST)";
+      statutoryReference = isIntraState
+        ? "CGST Act 2017 & Maharashtra SGST Act (SAC 998314: 9% CGST + 9% SGST)"
+        : "Integrated Goods and Services Tax Act 2017, Section 5(1)";
+      explanation = isIntraState
+        ? "Intra-state supply in India: 18% GST split equally into 9% CGST and 9% SGST with full input tax credit allowable."
+        : `Inter-state supply in India to state ${state}: 18% IGST applies with full input tax credit allowable.`;
+    }
+  }
+
+  // 10. Additional Extensible Country Packages (Singapore, Switzerland, Japan, Brazil, South Africa)
+  else if (customerCountry === "SG") {
+    ratePct = 9.0;
+    tariffCode = tariffCode || "DIGITAL-SVC";
+    eInvoicingMandatePlatform = "InvoiceNow (Peppol)";
+    taxAuthority = "Inland Revenue Authority of Singapore (IRAS)";
+    statutoryReference = "Goods and Services Tax Act 1993 (Singapore), Section 8";
+    explanation = "Standard 9% GST rate in Singapore.";
+  } else if (customerCountry === "CH") {
+    ratePct = 8.1;
+    tariffCode = tariffCode || "SERVICES";
+    eInvoicingMandatePlatform = "Swiss QR-Bill (ISO 20022)";
+    taxAuthority = "Eidgenössische Steuerverwaltung (ESTV)";
+    statutoryReference = "Bundesgesetz über die Mehrwertsteuer (MWSTG), Art. 25";
+    explanation = "Standard 8.1% Swiss MWST rate.";
+  } else if (customerCountry === "JP") {
+    ratePct = 10.0;
+    tariffCode = tariffCode || "SERVICES";
+    eInvoicingMandatePlatform = "Qualified Invoice System (QIS)";
+    taxAuthority = "National Tax Agency (NTA)";
+    statutoryReference = "Consumption Tax Act (Japan) & Qualified Invoice System";
+    explanation = "Standard 10% Japanese Consumption Tax.";
+  } else if (customerCountry === "BR") {
+    ratePct = 26.5;
+    tariffCode = tariffCode || "SERVICES";
+    eInvoicingMandatePlatform = "Nota Fiscal de Serviço Eletrônica (NFS-e)";
+    taxAuthority = "Receita Federal do Brasil (RFB)";
+    statutoryReference = "Constitutional Amendment EC 132/2023 (Dual VAT Reform IBS/CBS)";
+    explanation = "Estimated 26.5% standard rate under Brazilian dual VAT reform.";
+  } else if (customerCountry === "ZA") {
+    ratePct = 15.0;
+    tariffCode = tariffCode || "SERVICES";
+    taxAuthority = "South African Revenue Service (SARS)";
+    statutoryReference = "Value-Added Tax Act, 1991, Section 7(1)";
+    explanation = "Standard 15% VAT on electronic services in South Africa.";
+  }
+
+  // 11. Generic Fallback
   else {
     ratePct = 0.0;
     taxAuthority = `Unregistered Jurisdiction (${customerCountry})`;

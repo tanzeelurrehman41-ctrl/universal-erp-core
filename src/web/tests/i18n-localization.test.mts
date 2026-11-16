@@ -75,10 +75,14 @@ test("validateTaxOrNationalId validates international statutory identifiers", ()
   const uaeInvalid = validateTaxOrNationalId("AE", "200123456789012");
   assert.equal(uaeInvalid.isValid, false);
 
-  // Saudi Arabia VAT/TIN (15 digits starting and ending with 3)
+  // Saudi Arabia VAT/TIN (15 digits starting and ending with 3) and CR (10 digits)
   const saVat = validateTaxOrNationalId("SA", "300123456789013");
   assert.equal(saVat.isValid, true);
   assert.equal(saVat.idType, "VAT_TIN");
+
+  const saCr = validateTaxOrNationalId("SA", "1010123456", "CR");
+  assert.equal(saCr.isValid, true);
+  assert.equal(saCr.idType, "CR");
 
   const saInvalid = validateTaxOrNationalId("SA", "100123456789012");
   assert.equal(saInvalid.isValid, false);
@@ -93,12 +97,34 @@ test("validateTaxOrNationalId validates international statutory identifiers", ()
   assert.equal(pkCnic.idType, "CNIC");
   assert.equal(pkCnic.formattedId, "42101-1234567-1");
 
-  // Australia ABN (11 digits)
+  // Canada BN & SIN
+  const caBn = validateTaxOrNationalId("CA", "123456789RT0001");
+  assert.equal(caBn.isValid, true);
+  assert.equal(caBn.idType, "BN_GST");
+
+  const caSin = validateTaxOrNationalId("CA", "123456789", "SIN");
+  assert.equal(caSin.isValid, true);
+  assert.equal(caSin.idType, "SIN");
+  assert.equal(caSin.formattedId, "123-456-789");
+
+  // Australia ABN (11 digits) & TFN (9 digits)
   const auAbn = validateTaxOrNationalId("AU", "12345678901");
   assert.equal(auAbn.isValid, true);
   assert.equal(auAbn.idType, "ABN");
 
-  // India GSTIN (15 characters)
+  const auTfn = validateTaxOrNationalId("AU", "123456789", "TFN");
+  assert.equal(auTfn.isValid, true);
+  assert.equal(auTfn.idType, "TFN");
+
+  // India PAN, TAN & GSTIN
+  const inPan = validateTaxOrNationalId("IN", "ABCDE1234F");
+  assert.equal(inPan.isValid, true);
+  assert.equal(inPan.idType, "PAN");
+
+  const inTan = validateTaxOrNationalId("IN", "BLRK12345A", "TAN");
+  assert.equal(inTan.isValid, true);
+  assert.equal(inTan.idType, "TAN");
+
   const inGstin = validateTaxOrNationalId("IN", "27AAAAA0000A1Z5");
   assert.equal(inGstin.isValid, true);
   assert.equal(inGstin.idType, "GSTIN");
@@ -205,33 +231,62 @@ test("LOCALIZATION_COVERAGE_MATRIX maintains authoritative status integrity", ()
 
   const ca = getCountryCoverage("CA");
   assert.ok(ca);
-  assert.equal(ca.overallStatus, "Partially implemented");
+  assert.equal(ca.overallStatus, "Implemented and tested");
+  assert.equal(ca.subsystems.payroll.status, "Implemented and tested");
+
+  const au = getCountryCoverage("AU");
+  assert.ok(au);
+  assert.equal(au.overallStatus, "Implemented and tested");
+  assert.equal(au.subsystems.payroll.status, "Implemented and tested");
 
   const inEntry = getCountryCoverage("IN");
   assert.ok(inEntry);
-  assert.equal(inEntry.overallStatus, "Architecture configured only");
+  assert.equal(inEntry.overallStatus, "Implemented and tested");
+  assert.equal(inEntry.subsystems.tax.status, "Implemented and tested");
+  assert.equal(inEntry.subsystems.payroll.status, "Implemented and tested");
+
+  const sa = getCountryCoverage("SA");
+  assert.ok(sa);
+  assert.equal(sa.overallStatus, "Implemented and tested");
+  assert.equal(sa.subsystems.payroll.status, "Implemented and tested");
+
+  const nl = getCountryCoverage("NL");
+  assert.ok(nl);
+  assert.equal(nl.overallStatus, "Implemented and tested");
+
+  const es = getCountryCoverage("ES");
+  assert.ok(es);
+  assert.equal(es.overallStatus, "Implemented and tested");
+
+  const it = getCountryCoverage("IT");
+  assert.ok(it);
+  assert.equal(it.overallStatus, "Implemented and tested");
+
+  const pl = getCountryCoverage("PL");
+  assert.ok(pl);
+  assert.equal(pl.overallStatus, "Implemented and tested");
 
   // Query by status
   const implemented = getCoverageByStatus("Implemented and tested");
-  assert.ok(implemented.length >= 4);
+  assert.ok(implemented.length >= 10);
   const codes = implemented.map(e => e.countryCode);
   assert.ok(codes.includes("PK"));
   assert.ok(codes.includes("US"));
   assert.ok(codes.includes("GB"));
   assert.ok(codes.includes("AE"));
+  assert.ok(codes.includes("SA"));
+  assert.ok(codes.includes("CA"));
+  assert.ok(codes.includes("AU"));
+  assert.ok(codes.includes("IN"));
+  assert.ok(codes.includes("NL"));
+  assert.ok(codes.includes("ES"));
+  assert.ok(codes.includes("IT"));
+  assert.ok(codes.includes("PL"));
 
   const partial = getCoverageByStatus("Partially implemented");
   assert.ok(partial.length >= 3);
   const partialCodes = partial.map(e => e.countryCode);
-  assert.ok(partialCodes.includes("SA"));
-  assert.ok(partialCodes.includes("AU"));
-  assert.ok(partialCodes.includes("CA"));
-
-  // Verify SA and DE payroll subsystem statuses
-  const sa = getCountryCoverage("SA");
-  assert.ok(sa);
-  assert.equal(sa.subsystems.payroll.status, "Architecture configured only");
-  const de = getCountryCoverage("DE");
-  assert.ok(de);
-  assert.equal(de.subsystems.payroll.status, "Architecture configured only");
+  assert.ok(partialCodes.includes("DE"));
+  assert.ok(partialCodes.includes("FR"));
+  assert.ok(partialCodes.includes("IE"));
 });

@@ -242,4 +242,75 @@ public sealed class EnterpriseSecurityTests
         // Expired timestamp (>5 min) must be rejected
         Assert.False(webhookSec.ValidateReplayAndTimestamp(Guid.NewGuid().ToString("N"), now.AddMinutes(-10)));
     }
+
+    [Fact]
+    public void AuditChainCheckpointService_ComputesMerkleRoot_SignsManifest_AndDetectsTampering()
+    {
+        var tenantId = Guid.NewGuid();
+        var companyId = Guid.NewGuid();
+        var branchId = Guid.NewGuid();
+        var actorId = Guid.NewGuid();
+
+        // 1. Build a valid audit chain of 4 events
+        var events = new List<SecurityAuditEvent>();
+        var prev = AuditLogChainService.GenesisHash;
+
+        for (int i = 1; i <= 4; i++)
+        {
+            var ev = AuditLogChainService.CreateEvent(
+                prevHash: prev,
+                tenantId: tenantId,
+                companyId: companyId,
+                branchId: branchId,
+                actorId: actorId,
+                actorUsername: "security_officer",
+                action: $"SECURITY_ACTION_{i}",
+                entityType: "AuditRecord",
+                entityId: $"AUD-{i:D4}",
+                clientIpAddress: "10.0.0.1",
+                beforeState: null,
+                afterState: new { Iteration = i },
+                timestamp: DateTimeOffset.UtcNow.AddMinutes(-10 + i));
+
+            events.Add(ev);
+            prev = ev.RecordHash;
+        }
+
+        // 2. Compute Merkle root directly and verify deterministic binary tree
+        var leafHashes = events.Select(e => e.RecordHash).ToList();
+        var merkleRoot = AuditChainCheckpointService.ComputeMerkleRoot(leafHashes);
+        Assert.False(string.IsNullOrWhiteSpace(merkleRoot));
+        Assert.Equal(64, merkleRoot.Length); // 256-bit hex hash
+
+        // 3. Create signed checkpoint manifest anchored to Cloudflare R2 WORM storage
+        var signingKey = "immutable_checkpoint_signing_secret_2026";
+        var checkpoint = AuditChainCheckpointService.CreateCheckpoint(
+            batch: events,
+            sequence: 101,
+            storageProvider: "cloudflare_r2_worm",
+            anchorUri: "r2://audit-vault/checkpoints/2026/seq-101.json",
+            signingKey: signingKey);
+
+        Assert.Equal(101, checkpoint.CheckpointSequence);
+        Assert.Equal(4, checkpoint.EventCount);
+        Assert.Equal(events[0].EventId, checkpoint.FromEventId);
+        Assert.Equal(events[^1].EventId, checkpoint.ToEventId);
+        Assert.Equal(events[^1].RecordHash, checkpoint.HeadRecordHash);
+        Assert.Equal(merkleRoot, checkpoint.MerkleRootHash);
+        Assert.Equal("ANCHORED", checkpoint.Status);
+
+        // 4. Verify valid checkpoint against intact batch
+        var isValid = AuditChainCheckpointService.VerifyCheckpoint(checkpoint, events, signingKey);
+        Assert.True(isValid);
+
+        // 5. Tamper detection: wrong signing key fails verification
+        Assert.False(AuditChainCheckpointService.VerifyCheckpoint(checkpoint, events, "wrong_signing_key"));
+
+        // 6. Tamper detection: modifying batch event alters Merkle root and fails verification
+        var tamperedEvents = new List<SecurityAuditEvent>(events);
+        var tamperedEv = events[1] with { RecordHash = "0000000000000000000000000000000000000000000000000000000000000000" };
+        tamperedEvents[1] = tamperedEv;
+
+        Assert.False(AuditChainCheckpointService.VerifyCheckpoint(checkpoint, tamperedEvents, signingKey));
+    }
 }

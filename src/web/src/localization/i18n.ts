@@ -161,7 +161,17 @@ export function validateTaxOrNationalId(
     }
 
     case "SA": {
-      // Saudi Arabia VAT/TIN: 15 digits starting and ending with 3
+      // Saudi Arabia CR (Commercial Registration - 10 digits) or VAT/TIN (15 digits starting & ending with 3)
+      if (idTypePreference?.toUpperCase() === "CR" || (/^\d{10}$/.test(cleanId) && idTypePreference)) {
+        const isCr = /^\d{10}$/.test(cleanId);
+        return {
+          isValid: isCr,
+          countryCode: "SA",
+          idType: "CR",
+          formattedId: cleanId,
+          error: isCr ? undefined : "Invalid Saudi Commercial Registration (must be 10 digits).",
+        };
+      }
       const isSaudiVat = /^3\d{13}3$/.test(cleanId);
       return {
         isValid: isSaudiVat,
@@ -195,19 +205,39 @@ export function validateTaxOrNationalId(
     }
 
     case "CA": {
-      // Canadian Business Number (BN / GST): 9 digits optionally followed by RT0001
-      const isBn = /^\d{9}(RT\d{4})?$/i.test(cleanId);
+      // Canadian SIN (Social Insurance Number - 9 digits) or BN (Business Number - 9 digits or with program RT/RP)
+      if (idTypePreference?.toUpperCase() === "SIN") {
+        const isSin = /^\d{9}$/.test(cleanId);
+        return {
+          isValid: isSin,
+          countryCode: "CA",
+          idType: "SIN",
+          formattedId: isSin ? `${cleanId.slice(0, 3)}-${cleanId.slice(3, 6)}-${cleanId.slice(6)}` : rawId,
+          error: isSin ? undefined : "Invalid Canadian Social Insurance Number (must be 9 digits).",
+        };
+      }
+      const isBn = /^\d{9}([A-Z]{2}\d{4})?$/i.test(cleanId);
       return {
         isValid: isBn,
         countryCode: "CA",
         idType: "BN_GST",
         formattedId: cleanId.toUpperCase(),
-        error: isBn ? undefined : "Invalid Canadian Business Number (9 digits or 9 digits + RT0001).",
+        error: isBn ? undefined : "Invalid Canadian Business Number (9 digits or 9 digits + program code e.g. RT0001).",
       };
     }
 
     case "AU": {
-      // Australian Business Number (ABN): 11 digits
+      // Australian TFN (Tax File Number - 8-9 digits) or ABN (11 digits)
+      if (idTypePreference?.toUpperCase() === "TFN") {
+        const isTfn = /^\d{8,9}$/.test(cleanId);
+        return {
+          isValid: isTfn,
+          countryCode: "AU",
+          idType: "TFN",
+          formattedId: cleanId,
+          error: isTfn ? undefined : "Invalid Australian Tax File Number (must be 8 or 9 digits).",
+        };
+      }
       const isAbn = /^\d{11}$/.test(cleanId);
       return {
         isValid: isAbn,
@@ -219,7 +249,27 @@ export function validateTaxOrNationalId(
     }
 
     case "IN": {
-      // India GSTIN: 15 alphanumeric (e.g. 27AAAAA0000A1Z5)
+      // India: PAN (5 letters + 4 digits + 1 letter), TAN (4 letters + 5 digits + 1 letter), GSTIN (15 chars)
+      if (idTypePreference?.toUpperCase() === "PAN" || (/^[A-Z]{5}\d{4}[A-Z]$/i.test(cleanId) && cleanId.length === 10)) {
+        const isPan = /^[A-Z]{5}\d{4}[A-Z]$/i.test(cleanId);
+        return {
+          isValid: isPan,
+          countryCode: "IN",
+          idType: "PAN",
+          formattedId: cleanId.toUpperCase(),
+          error: isPan ? undefined : "Invalid Indian PAN format (e.g. ABCDE1234F).",
+        };
+      }
+      if (idTypePreference?.toUpperCase() === "TAN" || (/^[A-Z]{4}\d{5}[A-Z]$/i.test(cleanId) && cleanId.length === 10)) {
+        const isTan = /^[A-Z]{4}\d{5}[A-Z]$/i.test(cleanId);
+        return {
+          isValid: isTan,
+          countryCode: "IN",
+          idType: "TAN",
+          formattedId: cleanId.toUpperCase(),
+          error: isTan ? undefined : "Invalid Indian TAN format (e.g. ABCD12345E).",
+        };
+      }
       const isGstin = /^\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i.test(cleanId);
       return {
         isValid: isGstin,

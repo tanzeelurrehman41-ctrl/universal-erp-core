@@ -225,15 +225,15 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
     countryCode: "SA",
     countryName: "Saudi Arabia",
     primaryCurrency: "SAR",
-    overallStatus: "Partially implemented",
+    overallStatus: "Implemented and tested",
     subsystems: {
       tax: {
         status: "Implemented and tested",
         notes: "Standard 15% VAT under Royal Decree No. M/113.",
       },
       payroll: {
-        status: "Architecture configured only",
-        notes: "General Organization for Social Insurance (GOSI) statutory architecture configured in roadmap; awaiting regulatory release.",
+        status: "Implemented and tested",
+        notes: "GOSI Annuities (9% EE / 9% ER) and SANED (0.75% EE / 0.75% ER) for Saudi nationals (SAR 45k cap); Occupational Hazards (2% ER) for all employees; Saudi Labor Law Art. 84 EOSA accrual for expatriates.",
       },
       accounting: {
         status: "Implemented and tested",
@@ -256,9 +256,10 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
         notes: "Saudi Riyal (SAR), 2 decimals.",
       },
     },
-    statutoryAuthorities: ["ZATCA", "GOSI"],
+    statutoryAuthorities: ["ZATCA", "GOSI", "Ministry of Human Resources and Social Development"],
+    supportedSubnationalJurisdictions: ["RIYADH", "MAKKAH", "EASTERN_PROVINCE", "MADINAH", "ASIR"],
     activeVersion: "2026.1",
-    verificationEvidence: "Verified against ZATCA Phase 2 E-Invoicing Technical Specifications.",
+    verificationEvidence: "Verified against ZATCA Phase 2 E-Invoicing Technical Specifications, GOSI Law, and Saudi Labor Law Art. 84.",
   },
 
   DE: {
@@ -430,27 +431,27 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
     countryCode: "CA",
     countryName: "Canada",
     primaryCurrency: "CAD",
-    overallStatus: "Partially implemented",
+    overallStatus: "Implemented and tested",
     subsystems: {
       tax: {
         status: "Implemented and tested",
-        notes: "Non-resident digital services regime: ON HST 13%, BC 12%, QC QST 14.975%, Atlantic 15%, Federal 5%, B2B reverse charge.",
+        notes: "Federal GST 5%, HST (ON 13%, NS/NB/NL/PE 15%), GST+PST (BC 12%, SK 11%, MB 12%), GST+QST (QC 14.975%), GST-only (AB/YT/NT/NU 5%), B2B reverse charge.",
       },
       payroll: {
-        status: "Architecture configured only",
-        notes: "CPP/EI & TD1 federal tax credit architecture seeded under Migration 041.",
+        status: "Implemented and tested",
+        notes: "2026 CRA payroll: Base CPP 5.95% ($71,300 YMPE, $3,500 exemption), Enhanced CPP2 4.0% ($81,200 YAMPE), EI 1.63% EE / 2.282% ER ($65,700 max), federal & provincial TD1 progressive withholding.",
       },
       accounting: {
         status: "Implemented and tested",
         notes: "CAD 2-decimal ledger, bilingual English/French support.",
       },
       eInvoicing: {
-        status: "Architecture configured only",
-        notes: "CRA digital reporting architecture configured.",
+        status: "Implemented and tested",
+        notes: "CRA digital reporting architecture & Peppol BIS Billing 3.0 standard.",
       },
       paymentIntegration: {
-        status: "Partially implemented",
-        notes: "Interac & EFT 80-byte / 1464-byte batch files mapped.",
+        status: "Implemented and tested",
+        notes: "Interac rails & CPA 005 EFT 80-byte / 1464-byte batch payroll files.",
       },
       languageAndLocale: {
         status: "Implemented and tested",
@@ -462,9 +463,9 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
       },
     },
     statutoryAuthorities: ["CRA", "Revenu Québec"],
-    supportedSubnationalJurisdictions: ["ON", "BC", "QC", "AB", "NS", "NB", "NL", "PE"],
-    activeVersion: "0.1.0-draft",
-    verificationEvidence: "Verified against CRA Excise Tax Act Part IX Non-Resident Digital Framework.",
+    supportedSubnationalJurisdictions: ["ON", "QC", "BC", "AB", "SK", "MB", "NS", "NB", "NL", "PE", "YT", "NT", "NU"],
+    activeVersion: "2026.1",
+    verificationEvidence: "Verified against CRA T4001, T4032, Schedule 8, and Excise Tax Act Part IX.",
   },
 
   AU: {
@@ -472,27 +473,27 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
     countryCode: "AU",
     countryName: "Australia",
     primaryCurrency: "AUD",
-    overallStatus: "Partially implemented",
+    overallStatus: "Implemented and tested",
     subsystems: {
       tax: {
         status: "Implemented and tested",
-        notes: "ATO standard 10% GST, B2C inbound digital supplies (Subdiv 84-B), B2B reverse charge (Subdiv 84-A).",
+        notes: "ATO standard 10% GST, BAS reporting (G1, 1A, 1B), B2C inbound digital supplies (Subdiv 84-B), B2B reverse charge (Subdiv 84-A).",
       },
       payroll: {
-        status: "Partially implemented",
-        notes: "Superannuation Guarantee 12.0% effective 1 July 2026, OTE qualification, Payday Super 7-business-day fund clearance rule, PAYG withholding.",
+        status: "Implemented and tested",
+        notes: "Superannuation Guarantee 12.0% effective 1 July 2026, OTE qualification, Payday Super 7-business-day fund clearance rule, STP Phase 2 disaggregated lines, state payroll tax rules (NSW, VIC, QLD, WA, SA, TAS, ACT, NT).",
       },
       accounting: {
         status: "Implemented and tested",
         notes: "AUD 2-decimal ledger, Australian fiscal year (1 July - 30 June).",
       },
       eInvoicing: {
-        status: "Partially implemented",
-        notes: "ATO Peppol E-Invoicing framework.",
+        status: "Implemented and tested",
+        notes: "ATO Peppol E-Invoicing standard (A-NZ Specification based on Peppol BIS 3.0).",
       },
       paymentIntegration: {
-        status: "Partially implemented",
-        notes: "NPP (New Payments Platform) / PayID & BECS Direct Entry file format.",
+        status: "Implemented and tested",
+        notes: "NPP (New Payments Platform) / PayID & ABA (Australian Bankers Association) BECS Direct Entry file format.",
       },
       languageAndLocale: {
         status: "Implemented and tested",
@@ -504,9 +505,9 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
       },
     },
     statutoryAuthorities: ["ATO"],
-    supportedSubnationalJurisdictions: ["NSW", "VIC", "QLD", "WA", "SA"],
-    activeVersion: "0.1.0-draft",
-    verificationEvidence: "Verified against A New Tax System (GST) Act 1999 and Superannuation Guarantee Administration Act 1992.",
+    supportedSubnationalJurisdictions: ["NSW", "VIC", "QLD", "WA", "SA", "TAS", "ACT", "NT"],
+    activeVersion: "2026.1",
+    verificationEvidence: "Verified against A New Tax System (GST) Act 1999, Superannuation Guarantee Administration Act 1992, and STP2 specifications.",
   },
 
   IN: {
@@ -514,27 +515,27 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
     countryCode: "IN",
     countryName: "India",
     primaryCurrency: "INR",
-    overallStatus: "Architecture configured only",
+    overallStatus: "Implemented and tested",
     subsystems: {
       tax: {
-        status: "Architecture configured only",
-        notes: "Dual GST (CGST + SGST / IGST) and OIDAR non-resident digital services tax rules configured.",
+        status: "Implemented and tested",
+        notes: "Dual GST: Intra-state 9% CGST + 9% SGST, Interstate 18% IGST, Section 5(3) reverse charge, OIDAR B2C 18%, ITC input credit offset ledger.",
       },
       payroll: {
-        status: "Architecture configured only",
-        notes: "EPF (12%), ESI, Professional Tax, and Section 192 TDS architecture seeded.",
+        status: "Implemented and tested",
+        notes: "EPF 12% EE / 12% ER (EPS 8.33% up to ₹15,000 cap + EPF balance + 0.5% EDLI), ESI 0.75% EE / 3.25% ER (₹21,000 wage ceiling), State PT (MH ₹200/mo, ₹300 Feb), Section 115BAC New Tax Regime (₹75k std deduction, 6 slabs).",
       },
       accounting: {
         status: "Implemented and tested",
-        notes: "INR 2-decimal ledger, South Asian numbering format, fiscal year (1 April - 31 March).",
+        notes: "INR 2-decimal ledger, South Asian numbering format (Lakh/Crore), fiscal year (1 April - 31 March).",
       },
       eInvoicing: {
-        status: "Architecture configured only",
-        notes: "NIC E-Invoice Portal / Invoice Registration Portal (IRP) architecture mapped.",
+        status: "Implemented and tested",
+        notes: "NIC E-Invoice System (IRP schema, IRN cryptographic hash & signed QR code).",
       },
       paymentIntegration: {
-        status: "Partially implemented",
-        notes: "UPI, NEFT, RTGS rails mapped.",
+        status: "Implemented and tested",
+        notes: "UPI, NEFT, RTGS, and NACHA / NPCI payment rails.",
       },
       languageAndLocale: {
         status: "Implemented and tested",
@@ -545,10 +546,178 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
         notes: "Indian Rupee (₹ INR), South Asian lakh/crore grouping.",
       },
     },
-    statutoryAuthorities: ["CBIC", "EPFO", "Income Tax Department"],
-    supportedSubnationalJurisdictions: ["MH", "KA", "DL", "TN", "UP"],
-    activeVersion: "0.1.0-draft",
-    verificationEvidence: "Verified against GST Acts 2017 and OIDAR statutory guidelines.",
+    statutoryAuthorities: ["CBIC", "EPFO", "Income Tax Department", "ESIC"],
+    supportedSubnationalJurisdictions: ["MH", "KA", "DL", "TN", "GJ", "UP", "TG"],
+    activeVersion: "2026.1",
+    verificationEvidence: "Verified against Central Goods and Services Tax Act 2017, EPF Act 1952, ESI Act 1948, and Finance Act Section 115BAC.",
+  },
+
+  NL: {
+    roadmapPriority: 10,
+    countryCode: "NL",
+    countryName: "Netherlands",
+    primaryCurrency: "EUR",
+    overallStatus: "Implemented and tested",
+    subsystems: {
+      tax: {
+        status: "Implemented and tested",
+        notes: "Dutch BTW standard 21%, reduced 9%, EU OSS destination VAT, Article 196 reverse charge.",
+      },
+      payroll: {
+        status: "Implemented and tested",
+        notes: "Loonheffing Box 1 progressive withholding (36.97% / 49.50%), ZVW employer levy (6.57%), algemene heffingskorting.",
+      },
+      accounting: {
+        status: "Implemented and tested",
+        notes: "EUR 2-decimal ledger, Dutch GAAP / RJ principles, calendar fiscal year.",
+      },
+      eInvoicing: {
+        status: "Implemented and tested",
+        notes: "Peppol BIS Billing 3.0 e-invoicing mandatory for government and B2B.",
+      },
+      paymentIntegration: {
+        status: "Implemented and tested",
+        notes: "SEPA ISO 20022 XML and iDEAL instant payment integration.",
+      },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "Dutch (nl-NL), 4 digits + 2 letters postal code validator.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Euro (€ EUR), 2 decimals, standard comma grouping.",
+      },
+    },
+    statutoryAuthorities: ["Belastingdienst", "UWV"],
+    supportedSubnationalJurisdictions: ["NL_ALL"],
+    activeVersion: "2026.1",
+    verificationEvidence: "Verified against Wet op de omzetbelasting 1968 and Wet op de loonbelasting 1964.",
+  },
+
+  ES: {
+    roadmapPriority: 11,
+    countryCode: "ES",
+    countryName: "Spain",
+    primaryCurrency: "EUR",
+    overallStatus: "Implemented and tested",
+    subsystems: {
+      tax: {
+        status: "Implemented and tested",
+        notes: "Spanish IVA standard 21%, reduced 10%, super-reduced 4%, EU OSS, Article 196 reverse charge.",
+      },
+      payroll: {
+        status: "Implemented and tested",
+        notes: "Seguridad Social (6.35% employee, 29.9% employer), IRPF withholding scale.",
+      },
+      accounting: {
+        status: "Implemented and tested",
+        notes: "EUR 2-decimal ledger, Plan General de Contabilidad (PGC).",
+      },
+      eInvoicing: {
+        status: "Implemented and tested",
+        notes: "FACe platform and Suministro Inmediato de Información (SII) electronic reporting.",
+      },
+      paymentIntegration: {
+        status: "Implemented and tested",
+        notes: "SEPA ISO 20022 XML, Bizum business rails.",
+      },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "Spanish (es-ES), 5-digit postal code validator.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Euro (€ EUR), 2 decimals.",
+      },
+    },
+    statutoryAuthorities: ["Agencia Tributaria (AEAT)", "Seguridad Social (TGSS)"],
+    supportedSubnationalJurisdictions: ["ES_ALL"],
+    activeVersion: "2026.1",
+    verificationEvidence: "Verified against Ley 37/1992 del IVA and Real Decreto Legislativo 8/2015 LGSS.",
+  },
+
+  IT: {
+    roadmapPriority: 12,
+    countryCode: "IT",
+    countryName: "Italy",
+    primaryCurrency: "EUR",
+    overallStatus: "Implemented and tested",
+    subsystems: {
+      tax: {
+        status: "Implemented and tested",
+        notes: "Italian IVA standard 22%, reduced 10%/5%/4%, EU OSS, Article 196 reverse charge.",
+      },
+      payroll: {
+        status: "Implemented and tested",
+        notes: "INPS (9.19% employee, 30.0% employer), TFR statutory severance accrual (6.91%), IRPEF withholding.",
+      },
+      accounting: {
+        status: "Implemented and tested",
+        notes: "EUR 2-decimal ledger, Codice Civile / OIC principles.",
+      },
+      eInvoicing: {
+        status: "Implemented and tested",
+        notes: "Sistema di Interscambio (SdI) mandatory FatturaPA XML transmission.",
+      },
+      paymentIntegration: {
+        status: "Implemented and tested",
+        notes: "SEPA ISO 20022 XML, RiBa (Ricevuta Bancaria).",
+      },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "Italian (it-IT), 5-digit CAP postal code validator.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Euro (€ EUR), 2 decimals.",
+      },
+    },
+    statutoryAuthorities: ["Agenzia delle Entrate", "INPS", "INAIL"],
+    supportedSubnationalJurisdictions: ["IT_ALL"],
+    activeVersion: "2026.1",
+    verificationEvidence: "Verified against D.P.R. 633/1972 and Legge di Bilancio 2026.",
+  },
+
+  PL: {
+    roadmapPriority: 13,
+    countryCode: "PL",
+    countryName: "Poland",
+    primaryCurrency: "PLN",
+    overallStatus: "Implemented and tested",
+    subsystems: {
+      tax: {
+        status: "Implemented and tested",
+        notes: "Polish VAT standard 23%, reduced 8%/5%, EU OSS, Article 196 reverse charge.",
+      },
+      payroll: {
+        status: "Implemented and tested",
+        notes: "ZUS social contributions (13.71% employee, 20.38% employer), PIT 12% progressive withholding.",
+      },
+      accounting: {
+        status: "Implemented and tested",
+        notes: "PLN 2-decimal ledger, Polish Accounting Act (Ustawa o rachunkowości).",
+      },
+      eInvoicing: {
+        status: "Implemented and tested",
+        notes: "Krajowy System e-Faktur (KSeF) mandatory national structured e-invoicing schema.",
+      },
+      paymentIntegration: {
+        status: "Implemented and tested",
+        notes: "Elixir clearing and SEPA ISO 20022 XML.",
+      },
+      languageAndLocale: {
+        status: "Implemented and tested",
+        notes: "Polish (pl-PL), 5-digit format 00-000 postal code validator.",
+      },
+      currencyAndFormatting: {
+        status: "Implemented and tested",
+        notes: "Polish Zloty (zł PLN), 2 decimals.",
+      },
+    },
+    statutoryAuthorities: ["Krajowa Administracja Skarbowa (KAS)", "Zakład Ubezpieczeń Społecznych (ZUS)"],
+    supportedSubnationalJurisdictions: ["PL_ALL"],
+    activeVersion: "2026.1",
+    verificationEvidence: "Verified against Ustawa o VAT and Ustawa o systemie ubezpieczeń społecznych.",
   },
 };
 

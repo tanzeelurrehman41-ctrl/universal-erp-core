@@ -674,4 +674,300 @@ public class GlobalLocalizationTests
         var formatted = _currencyFormatter.Format(amount, currency, "en-US");
         Assert.Equal(expectedFormatted, formatted);
     }
+
+    // ── 11. Phase 16: Saudi Arabia Localization (VAT, ZATCA, GOSI & EOSA) ───
+
+    [Fact]
+    public void DetermineTax_SaudiArabia_Applies15PercentVATAndZatcaPhase2Metadata()
+    {
+        var result = _taxEngine.DetermineTax(new TaxDeterminationRequest(
+            SupplierCountryCode: "SA",
+            SupplierTaxId: "300123456789013",
+            CustomerCountryCode: "SA",
+            CustomerProvinceState: "RIYADH",
+            CustomerPostalCode: "12345",
+            CustomerType: "b2b",
+            ProductServiceClassification: "ISIC-6201",
+            IsSaaSOrDigitalService: true));
+
+        Assert.Equal("SA", result.CountryCode);
+        Assert.Equal(15.0000m, result.RatePercentage);
+        Assert.Equal("ZATCA", result.Authority);
+        Assert.NotNull(result.EInvoicingMandatePlatform);
+        Assert.Contains("ZATCA FATOORA Phase 2", result.EInvoicingMandatePlatform);
+    }
+
+    [Fact]
+    public void CalculatePayroll_SaudiArabia_NationalWithinCapAndExpatEOSA()
+    {
+        // 1. National within cap (SAR 20,000 gross)
+        var nationalContext = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "SA",
+            WorkJurisdiction: "RIYADH",
+            SkillCategory: "skilled",
+            BaseSalary: 12000.00m,
+            Allowances: 8000.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 1, 1),
+            CurrencyCode: "SAR",
+            IsNationalEmployee: true);
+
+        var nationalRes = _payrollEngine.CalculatePayroll(nationalContext);
+
+        Assert.Equal("SA", nationalRes.CountryCode);
+        Assert.Equal(20000.00m, nationalRes.GrossPay);
+        // EE: 9% annuities (1800) + 0.75% SANED (150) = 1950
+        Assert.Equal(1950.00m, nationalRes.EmployeePension);
+        // ER: 9% annuities (1800) + 0.75% SANED (150) = 1950
+        Assert.Equal(1950.00m, nationalRes.EmployerPension);
+        // ER hazards: 2% = 400
+        Assert.Equal(400.00m, nationalRes.EmployerSocialSecurity);
+        Assert.Equal(18050.00m, nationalRes.NetPay);
+
+        // 2. Expatriate senior employee (SAR 15,000 gross, 7 years service)
+        var expatContext = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "SA",
+            WorkJurisdiction: "RIYADH",
+            SkillCategory: "skilled",
+            BaseSalary: 15000.00m,
+            Allowances: 0.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 1, 1),
+            CurrencyCode: "SAR",
+            IsNationalEmployee: false,
+            YearsOfService: 7);
+
+        var expatRes = _payrollEngine.CalculatePayroll(expatContext);
+
+        Assert.Equal(0.00m, expatRes.TotalEmployeeDeductions);
+        Assert.Equal(15000.00m, expatRes.NetPay);
+        // Hazards 2% = 300
+        Assert.Equal(300.00m, expatRes.EmployerSocialSecurity);
+        // EOSA senior: 15,000 * 1.0 / 12 = 1,250
+        Assert.Equal(1250.00m, expatRes.EmployerPension);
+    }
+
+    // ── 12. Phase 16: Canada Localization (GST/HST/PST, CPP/CPP2, EI & TD1) ──
+
+    [Theory]
+    [InlineData("ON", 13.0000, "CRA")]
+    [InlineData("QC", 14.9750, "CRA")]
+    [InlineData("BC", 12.0000, "CRA")]
+    [InlineData("SK", 11.0000, "CRA")]
+    [InlineData("MB", 12.0000, "CRA")]
+    [InlineData("AB", 5.0000, "CRA")]
+    public void DetermineTax_Canada_ResolvesProvincialHarmonizedAndDualTaxes(
+        string province, decimal expectedRate, string expectedAuthority)
+    {
+        var result = _taxEngine.DetermineTax(new TaxDeterminationRequest(
+            SupplierCountryCode: "CA",
+            SupplierTaxId: "123456789RT0001",
+            CustomerCountryCode: "CA",
+            CustomerProvinceState: province,
+            CustomerPostalCode: "M5V 2T6",
+            CustomerType: "b2b",
+            ProductServiceClassification: "CPA-62.01",
+            IsSaaSOrDigitalService: true));
+
+        Assert.Equal("CA", result.CountryCode);
+        Assert.Equal(expectedRate, result.RatePercentage);
+        Assert.Equal(expectedAuthority, result.Authority);
+    }
+
+    [Fact]
+    public void CalculatePayroll_Canada_ComputesCppBase_Cpp2_EiAndTd1Withholding()
+    {
+        var context = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "CA",
+            WorkJurisdiction: "ON",
+            SkillCategory: "skilled",
+            BaseSalary: 6000.00m, // CAD 6,000 / month ($72,000 / year)
+            Allowances: 0.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 1, 1),
+            CurrencyCode: "CAD");
+
+        var result = _payrollEngine.CalculatePayroll(context);
+
+        Assert.Equal("CA", result.CountryCode);
+        Assert.Equal(6000.00m, result.GrossPay);
+
+        // CPP Base (336.18) + CPP2 (2.33) = 338.51
+        Assert.Equal(338.51m, result.EmployeePension);
+        Assert.Equal(338.51m, result.EmployerPension);
+
+        // EI Employee (89.24 max capped) and Employer (124.94 max capped)
+        Assert.Equal(89.24m, result.EmployeeSocialSecurity);
+        Assert.Equal(124.94m, result.EmployerSocialSecurity);
+
+        // Income tax withheld > 0
+        Assert.True(result.IncomeTaxWithholding > 0);
+        Assert.True(result.NetPay < result.GrossPay);
+    }
+
+    // ── 13. Phase 16: India Localization (Dual GST, EPF, ESI, PT & 115BAC) ──
+
+    [Fact]
+    public void DetermineTax_India_IntraStateSplitsCgstSgst_AndInterStateAppliesIgst()
+    {
+        // 1. Intra-State (MH to MH): 18% CGST + SGST split
+        var intra = _taxEngine.DetermineTax(new TaxDeterminationRequest(
+            SupplierCountryCode: "IN",
+            SupplierTaxId: "27AAAAA0000A1Z5",
+            CustomerCountryCode: "IN",
+            CustomerProvinceState: "MH",
+            CustomerPostalCode: "400001",
+            CustomerType: "b2b",
+            ProductServiceClassification: "SAC-998314",
+            IsSaaSOrDigitalService: true));
+
+        Assert.Equal("IN", intra.CountryCode);
+        Assert.Equal(18.0000m, intra.RatePercentage);
+        Assert.Contains("9% CGST and 9% SGST", intra.CalculationExplanation);
+
+        // 2. Inter-State (MH to KA): 18% IGST
+        var inter = _taxEngine.DetermineTax(new TaxDeterminationRequest(
+            SupplierCountryCode: "IN",
+            SupplierTaxId: "27AAAAA0000A1Z5",
+            CustomerCountryCode: "IN",
+            CustomerProvinceState: "KA",
+            CustomerPostalCode: "560001",
+            CustomerType: "b2b",
+            ProductServiceClassification: "SAC-998314",
+            IsSaaSOrDigitalService: true));
+
+        Assert.Equal(18.0000m, inter.RatePercentage);
+        Assert.Contains("18% IGST", inter.CalculationExplanation);
+
+        // 3. Section 5(3) Reverse Charge
+        var rcm = _taxEngine.DetermineTax(new TaxDeterminationRequest(
+            SupplierCountryCode: "US",
+            SupplierTaxId: "US-EIN-123456789",
+            CustomerCountryCode: "IN",
+            CustomerProvinceState: "DL",
+            CustomerPostalCode: "110001",
+            CustomerType: "b2b",
+            CustomerTaxId: "07AAAAA0000A1Z5",
+            ProductServiceClassification: "SAC-998314",
+            IsSaaSOrDigitalService: true));
+
+        Assert.Equal(0.0000m, rcm.RatePercentage);
+        Assert.True(rcm.IsReverseCharge);
+        Assert.Contains("Section 5(3)", rcm.StatutoryReference);
+    }
+
+    [Fact]
+    public void CalculatePayroll_India_ComputesEpfSplit_EsiWageCeiling_AndPt()
+    {
+        // 1. Gross ₹60,000, Basic ₹40,000 (exceeds ₹21k ESI ceiling, MH state)
+        var highContext = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "IN",
+            WorkJurisdiction: "MH",
+            SkillCategory: "skilled",
+            BaseSalary: 40000.00m,
+            Allowances: 20000.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 4, 1),
+            CurrencyCode: "INR");
+
+        var highRes = _payrollEngine.CalculatePayroll(highContext);
+
+        Assert.Equal("IN", highRes.CountryCode);
+        Assert.Equal(60000.00m, highRes.GrossPay);
+        // EPF EE: 12% of 40,000 = 4,800
+        Assert.Equal(4800.00m, highRes.EmployeePension);
+        // EPF ER: 12% = 4,800
+        Assert.Equal(4800.00m, highRes.EmployerPension);
+        // EDLI 0.5% = 75
+        Assert.Equal(75.00m, highRes.EmployerSocialSecurity);
+        // Professional tax = 200 (in employee social security)
+        Assert.Equal(200.00m, highRes.EmployeeSocialSecurity);
+        Assert.True(highRes.NetPay > 0);
+    }
+
+    // ── 14. Phase 16: European Expansion Payroll Adapters ────────────────────
+
+    [Fact]
+    public void CalculatePayroll_EuropeanExpansion_ComputesNlEsItPlDeductions()
+    {
+        // 1. Netherlands (Loonheffing & Werkgeverspremies)
+        var nlContext = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "NL",
+            WorkJurisdiction: "NL_ALL",
+            SkillCategory: "skilled",
+            BaseSalary: 4000.00m,
+            Allowances: 0.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 1, 1),
+            CurrencyCode: "EUR");
+
+        var nlRes = _payrollEngine.CalculatePayroll(nlContext);
+        Assert.Equal("NL", nlRes.CountryCode);
+        Assert.True(nlRes.IncomeTaxWithholding > 0);
+        Assert.Equal(740.00m, nlRes.EmployerSocialSecurity); // 18.5%
+
+        // 2. Spain (Seguridad Social 6.35% EE / 29.9% ER)
+        var esContext = nlContext with { CountryCode = "ES", WorkJurisdiction = "ES_ALL", BaseSalary = 3000.00m };
+        var esRes = _payrollEngine.CalculatePayroll(esContext);
+        Assert.Equal("ES", esRes.CountryCode);
+        Assert.Equal(190.50m, esRes.EmployeeSocialSecurity); // 6.35% of 3000
+        Assert.Equal(897.00m, esRes.EmployerSocialSecurity); // 29.9% of 3000
+
+        // 3. Italy (INPS 9.19% EE / 30% ER + TFR 6.91%)
+        var itContext = nlContext with { CountryCode = "IT", WorkJurisdiction = "IT_ALL", BaseSalary = 3000.00m };
+        var itRes = _payrollEngine.CalculatePayroll(itContext);
+        Assert.Equal("IT", itRes.CountryCode);
+        Assert.Equal(275.70m, itRes.EmployeeSocialSecurity); // 9.19% of 3000
+        Assert.Equal(1122.22m, itRes.EmployerSocialSecurity); // 30.0% + TFR 3000 / 13.5
+        Assert.Equal(222.22m, itRes.EmployerPension); // TFR 3000 / 13.5
+
+        // 4. Poland (ZUS 13.71% EE / 20.38% ER)
+        var plContext = nlContext with { CountryCode = "PL", WorkJurisdiction = "PL_ALL", BaseSalary = 8000.00m, CurrencyCode = "PLN" };
+        var plRes = _payrollEngine.CalculatePayroll(plContext);
+        Assert.Equal("PL", plRes.CountryCode);
+        Assert.Equal(1630.40m, plRes.EmployerSocialSecurity); // 20.38% of 8000
+        Assert.True(plRes.EmployeeSocialSecurity > 1000m);
+    }
+
+    // ── 15. Phase 16: Additional Extensible Countries ────────────────────────
+
+    [Theory]
+    [InlineData("SG", 9.0000, "IRAS", "InvoiceNow (Peppol)")]
+    [InlineData("CH", 8.1000, "ESTV", "Swiss QR-Bill (ISO 20022)")]
+    [InlineData("JP", 10.0000, "NTA", "Qualified Invoice System (QIS)")]
+    [InlineData("BR", 26.5000, "RFB_COMITETRIBUTARIO", "Nota Fiscal de Serviço Eletrônica (NFS-e)")]
+    [InlineData("ZA", 15.0000, "SARS", null)]
+    public void DetermineTax_ExtensibleCountries_ResolvesStatutoryRatesAndEInvoicing(
+        string country, decimal expectedRate, string expectedAuthority, string? expectedPlatform)
+    {
+        var result = _taxEngine.DetermineTax(new TaxDeterminationRequest(
+            SupplierCountryCode: country,
+            SupplierTaxId: "SUPPLIER-TAX-001",
+            CustomerCountryCode: country,
+            CustomerProvinceState: null,
+            CustomerPostalCode: "00000",
+            CustomerType: "b2b",
+            ProductServiceClassification: "TECH-SVC",
+            IsSaaSOrDigitalService: true));
+
+        Assert.Equal(country, result.CountryCode);
+        Assert.Equal(expectedRate, result.RatePercentage);
+        Assert.Equal(expectedAuthority, result.Authority);
+        Assert.Equal(expectedPlatform, result.EInvoicingMandatePlatform);
+    }
 }

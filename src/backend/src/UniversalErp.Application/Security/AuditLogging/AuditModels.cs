@@ -160,3 +160,110 @@ public sealed class AuditLogChainService
         return new(IsChainValid: true, TotalEventsChecked: events.Count, TamperedIndex: -1, TamperedEventId: null, FailureReason: null);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 16: External Immutable Audit Checkpoints (S3 Object Lock / WORM / RFC 3161)
+// ─────────────────────────────────────────────────────────────────────────────
+public sealed record AuditChainCheckpointRecord(
+    Guid CheckpointId,
+    long CheckpointSequence,
+    Guid FromEventId,
+    Guid ToEventId,
+    int EventCount,
+    string HeadRecordHash,
+    string MerkleRootHash,
+    string ExternalStorageProvider, // "s3_object_lock", "cloudflare_r2_worm", "rfc3161_tsa", "azure_immutable_blob"
+    string ExternalAnchorUri,
+    string ExternalReceiptSignature,
+    DateTimeOffset AnchoredAt,
+    string Status = "ANCHORED");
+
+public sealed class AuditChainCheckpointService
+{
+    public static string ComputeMerkleRoot(IReadOnlyList<string> hashes)
+    {
+        if (hashes == null || hashes.Count == 0)
+            return "0000000000000000000000000000000000000000000000000000000000000000";
+
+        var currentLevel = new List<string>(hashes);
+
+        while (currentLevel.Count > 1)
+        {
+            var nextLevel = new List<string>();
+            for (int i = 0; i < currentLevel.Count; i += 2)
+            {
+                var left = currentLevel[i];
+                var right = (i + 1 < currentLevel.Count) ? currentLevel[i + 1] : left; // duplicate if odd count
+                var combined = $"{left}:{right}";
+                var combinedHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(combined))).ToLowerInvariant();
+                nextLevel.Add(combinedHash);
+            }
+            currentLevel = nextLevel;
+        }
+
+        return currentLevel[0];
+    }
+
+    public static AuditChainCheckpointRecord CreateCheckpoint(
+        IReadOnlyList<SecurityAuditEvent> batch,
+        long sequence,
+        string storageProvider,
+        string anchorUri,
+        string signingKey)
+    {
+        if (batch == null || batch.Count == 0)
+            throw new ArgumentException("Cannot create checkpoint from empty event batch.", nameof(batch));
+
+        // 1. Verify internal batch chain integrity first
+        var verification = AuditLogChainService.VerifyChain(batch);
+        if (!verification.IsChainValid)
+            throw new InvalidOperationException($"Cannot anchor corrupted audit chain: {verification.FailureReason}");
+
+        var fromId = batch[0].EventId;
+        var toId = batch[^1].EventId;
+        var headHash = batch[^1].RecordHash;
+        var hashes = batch.Select(b => b.RecordHash).ToList();
+        var merkleRoot = ComputeMerkleRoot(hashes);
+
+        // 2. Sign checkpoint manifest
+        var manifest = $"{sequence}|{fromId}|{toId}|{headHash}|{merkleRoot}|{storageProvider}|{anchorUri}";
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(signingKey));
+        var sigBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(manifest));
+        var signature = Convert.ToHexString(sigBytes).ToLowerInvariant();
+
+        return new AuditChainCheckpointRecord(
+            CheckpointId: Guid.NewGuid(),
+            CheckpointSequence: sequence,
+            FromEventId: fromId,
+            ToEventId: toId,
+            EventCount: batch.Count,
+            HeadRecordHash: headHash,
+            MerkleRootHash: merkleRoot,
+            ExternalStorageProvider: storageProvider,
+            ExternalAnchorUri: anchorUri,
+            ExternalReceiptSignature: signature,
+            AnchoredAt: DateTimeOffset.UtcNow,
+            Status: "ANCHORED");
+    }
+
+    public static bool VerifyCheckpoint(
+        AuditChainCheckpointRecord checkpoint,
+        IReadOnlyList<SecurityAuditEvent> batch,
+        string signingKey)
+    {
+        if (batch == null || batch.Count != checkpoint.EventCount) return false;
+        if (batch[0].EventId != checkpoint.FromEventId) return false;
+        if (batch[^1].EventId != checkpoint.ToEventId) return false;
+        if (batch[^1].RecordHash != checkpoint.HeadRecordHash) return false;
+
+        var merkle = ComputeMerkleRoot(batch.Select(b => b.RecordHash).ToList());
+        if (!string.Equals(merkle, checkpoint.MerkleRootHash, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var manifest = $"{checkpoint.CheckpointSequence}|{checkpoint.FromEventId}|{checkpoint.ToEventId}|{checkpoint.HeadRecordHash}|{checkpoint.MerkleRootHash}|{checkpoint.ExternalStorageProvider}|{checkpoint.ExternalAnchorUri}";
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(signingKey));
+        var expectedSig = Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(manifest))).ToLowerInvariant();
+
+        return string.Equals(expectedSig, checkpoint.ExternalReceiptSignature, StringComparison.OrdinalIgnoreCase);
+    }
+}

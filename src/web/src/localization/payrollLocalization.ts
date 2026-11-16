@@ -51,6 +51,9 @@ export type PayrollCalculationRequest = {
   // Australia Superannuation Settings
   australiaPaydaySuper?: boolean;
   ordinaryTimeEarnings?: number;
+  // Saudi Arabia EOSA & International Settings
+  yearsOfService?: number;
+  indiaTaxRegime?: "new" | "old";
 };
 
 export type StatutoryLine = {
@@ -91,6 +94,20 @@ export function calculateGlobalPayroll(request: PayrollCalculationRequest): Payr
       return calculateAustraliaPayroll(request);
     case "PK":
       return calculatePakistanPayroll(request);
+    case "SA":
+      return calculateSaudiArabiaPayroll(request);
+    case "CA":
+      return calculateCanadaPayroll(request);
+    case "IN":
+      return calculateIndiaPayroll(request);
+    case "NL":
+      return calculateNetherlandsPayroll(request);
+    case "ES":
+      return calculateSpainPayroll(request);
+    case "IT":
+      return calculateItalyPayroll(request);
+    case "PL":
+      return calculatePolandPayroll(request);
     default:
       return calculateGenericPayroll(request);
   }
@@ -802,6 +819,611 @@ export function calculatePakistanPayroll(request: PayrollCalculationRequest): Pa
     countryCode: "PK",
     statutoryLines: lines,
     explanation: "Pakistan payroll calculated under FBR Finance Act 2026 / TY2027 rates and EOBI Act 1976.",
+  };
+}
+
+/**
+ * Saudi Arabia Payroll Adapter
+ * - GOSI Social Insurance for Saudi Nationals: Annuities 9.0% EE / 9.0% ER, SANED 0.75% EE / 0.75% ER, Occ Hazards 2.0% ER
+ * - Contribution base capped at SAR 45,000.00/month
+ * - Expatriates: 0% income tax, GOSI Occ Hazards 2.0% ER only
+ * - Saudi Labor Law Art. 84 End of Service Award (EOSA) accrual: 4.167% (<= 5 yrs) or 8.333% (> 5 yrs)
+ */
+export function calculateSaudiArabiaPayroll(request: PayrollCalculationRequest): PayrollCalculationResult {
+  const gross = Math.max(0, request.grossSalary);
+  const basic = Math.max(0, request.basicSalary || gross * 0.6);
+  const allowances = Math.max(0, request.allowances || gross - basic);
+  const currencyCode = request.currencyCode || "SAR";
+  const isNational = request.isExpatriate !== true;
+  const lines: StatutoryLine[] = [];
+
+  let employeePension = 0;
+  let employerPension = 0;
+  let employerSocialSecurity = 0;
+
+  if (isNational) {
+    const pensionableBase = Math.min(basic + allowances, 45000.0);
+    const annuitiesEe = Math.round(pensionableBase * 0.09 * 100) / 100;
+    const annuitiesEr = Math.round(pensionableBase * 0.09 * 100) / 100;
+    const sanedEe = Math.round(pensionableBase * 0.0075 * 100) / 100;
+    const sanedEr = Math.round(pensionableBase * 0.0075 * 100) / 100;
+    const occHazardsEr = Math.round(pensionableBase * 0.02 * 100) / 100;
+
+    employeePension = annuitiesEe + sanedEe;
+    employerPension = annuitiesEr + sanedEr;
+    employerSocialSecurity = occHazardsEr;
+
+    lines.push({
+      code: "SA_GOSI_ANNUITIES",
+      description: "GOSI Annuities Branch (9.0% up to SAR 45k cap)",
+      employeeAmount: annuitiesEe,
+      employerAmount: annuitiesEr,
+      ratePct: 9.0,
+      authority: "General Organization for Social Insurance (GOSI)",
+    });
+
+    lines.push({
+      code: "SA_GOSI_SANED",
+      description: "SANED Unemployment Insurance (0.75% up to SAR 45k cap)",
+      employeeAmount: sanedEe,
+      employerAmount: sanedEr,
+      ratePct: 0.75,
+      authority: "General Organization for Social Insurance (GOSI)",
+    });
+
+    lines.push({
+      code: "SA_GOSI_HAZARDS",
+      description: "GOSI Occupational Hazards (2.0% ER)",
+      employeeAmount: 0,
+      employerAmount: occHazardsEr,
+      ratePct: 2.0,
+      authority: "General Organization for Social Insurance (GOSI)",
+    });
+  } else {
+    // Expatriate: Occupational Hazards 2.0% ER only
+    const occBase = Math.min(basic + allowances, 45000.0);
+    const occHazardsEr = Math.round(occBase * 0.02 * 100) / 100;
+    employerSocialSecurity = occHazardsEr;
+
+    lines.push({
+      code: "SA_GOSI_HAZARDS",
+      description: "GOSI Occupational Hazards ER (2.0%)",
+      employeeAmount: 0,
+      employerAmount: occHazardsEr,
+      ratePct: 2.0,
+      authority: "General Organization for Social Insurance (GOSI)",
+    });
+
+    // Saudi Labor Law Art. 84 End of Service Award (EOSA) accrual
+    const years = request.yearsOfService !== undefined ? request.yearsOfService : 1;
+    const monthlyRate = years > 5 ? (1.0 / 12.0) : (0.5 / 12.0);
+    const eosaAccrual = Math.round(basic * monthlyRate * 100) / 100;
+    employerPension = eosaAccrual;
+
+    lines.push({
+      code: "SA_EOSA",
+      description: `Saudi Labor Law Art 84 EOSA Accrual (${years > 5 ? "Full Month" : "Half Month"} Wage/Yr)`,
+      employeeAmount: 0,
+      employerAmount: eosaAccrual,
+      ratePct: Math.round(monthlyRate * 10000) / 100,
+      authority: "Ministry of Human Resources and Social Development",
+    });
+  }
+
+  const net = Math.max(0, Math.round((gross - employeePension) * 100) / 100);
+
+  return {
+    grossSalary: gross,
+    employeeIncomeTax: 0,
+    employeeStatutoryDeductions: employeePension,
+    employerStatutoryContributions: employerPension + employerSocialSecurity,
+    netSalary: net,
+    currencyCode,
+    countryCode: "SA",
+    statutoryLines: lines,
+    explanation: isNational
+      ? "Saudi National Payroll: GOSI Annuities 9% + SANED 0.75% + Hazards 2% (SAR 45k cap)."
+      : "Saudi Expatriate Payroll: 0% tax, GOSI Hazards 2%, Saudi Labor Law Art 84 EOSA accrual.",
+  };
+}
+
+/**
+ * Canada Payroll Adapter
+ * - CPP 2026: Base 5.95% EE & ER (YMPE $71,300, $3,500 exemption) + CPP2 4.0% (YAMPE $81,200)
+ * - EI 2026: 1.63% EE (max $89.24/mo), 2.282% ER (1.4x matching, max $124.94/mo, limit $65,700)
+ * - Federal & Provincial Income Tax Withholding (TD1 2026)
+ */
+export function calculateCanadaPayroll(request: PayrollCalculationRequest): PayrollCalculationResult {
+  const gross = Math.max(0, request.grossSalary);
+  const currencyCode = request.currencyCode || "CAD";
+  const lines: StatutoryLine[] = [];
+
+  // 1. CPP Base & CPP2
+  const monthlyExemption = 291.67; // $3,500 / 12
+  const monthlyYmpe = 5941.67;     // $71,300 / 12
+  const monthlyYampe = 6766.67;    // $81,200 / 12
+
+  let cppBaseEe = 0;
+  let cppBaseEr = 0;
+  let cpp2Ee = 0;
+  let cpp2Er = 0;
+
+  if (gross > monthlyExemption) {
+    const baseWage = Math.min(gross, monthlyYmpe) - monthlyExemption;
+    cppBaseEe = Math.round(baseWage * 0.0595 * 100) / 100;
+    cppBaseEr = cppBaseEe;
+  }
+
+  if (gross > monthlyYmpe) {
+    const tier2Wage = Math.min(gross, monthlyYampe) - monthlyYmpe;
+    cpp2Ee = Math.round(tier2Wage * 0.04 * 100) / 100;
+    cpp2Er = cpp2Ee;
+  }
+
+  const totalCppEe = cppBaseEe + cpp2Ee;
+  const totalCppEr = cppBaseEr + cpp2Er;
+
+  lines.push({
+    code: "CA_CPP_BASE",
+    description: "Canada Pension Plan Base (CPP 5.95% up to YMPE $71,300)",
+    employeeAmount: cppBaseEe,
+    employerAmount: cppBaseEr,
+    ratePct: 5.95,
+    authority: "Canada Revenue Agency (CRA)",
+  });
+
+  if (cpp2Ee > 0) {
+    lines.push({
+      code: "CA_CPP2_ENHANCED",
+      description: "CPP2 Second Additional Contribution (4.0% on YAMPE band)",
+      employeeAmount: cpp2Ee,
+      employerAmount: cpp2Er,
+      ratePct: 4.0,
+      authority: "Canada Revenue Agency (CRA)",
+    });
+  }
+
+  // 2. Employment Insurance (EI 2026)
+  const monthlyEiMax = 5475.0; // $65,700 / 12
+  const insurableEi = Math.min(gross, monthlyEiMax);
+  const eiEe = Math.round(insurableEi * 0.0163 * 100) / 100;
+  const eiEr = Math.round(insurableEi * 0.02282 * 100) / 100;
+
+  lines.push({
+    code: "CA_EI",
+    description: "Employment Insurance (EI 1.63% EE, 2.282% ER / 1.4x)",
+    employeeAmount: eiEe,
+    employerAmount: eiEr,
+    ratePct: 1.63,
+    authority: "Canada Revenue Agency (CRA) / ESDC",
+  });
+
+  // 3. Federal & Provincial Income Tax (TD1 2026)
+  const annualGross = gross * 12;
+  const federalBpa = 16129.0;
+  const taxableAnnual = Math.max(0, annualGross - federalBpa);
+  let annualFedTax = 0;
+
+  if (taxableAnnual <= 57375) {
+    annualFedTax = taxableAnnual * 0.15;
+  } else if (taxableAnnual <= 114750) {
+    annualFedTax = 8606.25 + (taxableAnnual - 57375) * 0.205;
+  } else if (taxableAnnual <= 177882) {
+    annualFedTax = 20368.13 + (taxableAnnual - 114750) * 0.26;
+  } else if (taxableAnnual <= 253414) {
+    annualFedTax = 36782.45 + (taxableAnnual - 177882) * 0.29;
+  } else {
+    annualFedTax = 58686.73 + (taxableAnnual - 253414) * 0.33;
+  }
+
+  const annualProvTax = taxableAnnual * 0.0505; // Ontario benchmark ~5.05%
+  const monthlyTax = Math.round(((annualFedTax + annualProvTax) / 12) * 100) / 100;
+
+  lines.push({
+    code: "CA_INCOME_TAX",
+    description: "Federal & Provincial Income Tax Withholding (TD1 2026)",
+    employeeAmount: monthlyTax,
+    employerAmount: 0,
+    ratePct: Math.round((monthlyTax / (gross || 1)) * 1000) / 10,
+    authority: "Canada Revenue Agency (CRA)",
+  });
+
+  const totalEmpDed = totalCppEe + eiEe + monthlyTax;
+  const totalEmplr = totalCppEr + eiEr;
+  const net = Math.max(0, Math.round((gross - totalEmpDed) * 100) / 100);
+
+  return {
+    grossSalary: gross,
+    employeeIncomeTax: monthlyTax,
+    employeeStatutoryDeductions: totalEmpDed,
+    employerStatutoryContributions: totalEmplr,
+    netSalary: net,
+    currencyCode,
+    countryCode: "CA",
+    statutoryLines: lines,
+    explanation: "Canada payroll (CRA 2026): Base CPP 5.95%, CPP2 4.0%, EI 1.63%, TD1 Federal & Provincial withholding.",
+  };
+}
+
+/**
+ * India Payroll Adapter
+ * - EPF 12% EE & 12% ER (split into 8.33% EPS capped at ₹15,000 wage = ₹1,250 + EPF balance + 0.5% EDLI)
+ * - ESI: 0.75% EE, 3.25% ER (if gross <= ₹21,000/month)
+ * - State Professional Tax (e.g. Maharashtra ₹200/mo)
+ * - Income Tax TDS under Sec 115BAC New Tax Regime (₹75,000 std deduction, 6 slabs, 4% cess)
+ */
+export function calculateIndiaPayroll(request: PayrollCalculationRequest): PayrollCalculationResult {
+  const gross = Math.max(0, request.grossSalary);
+  const basic = Math.max(0, request.basicSalary || gross * 0.5);
+  const currencyCode = request.currencyCode || "INR";
+  const lines: StatutoryLine[] = [];
+
+  // 1. Employees' Provident Fund (EPF)
+  const pfWage = basic;
+  const epfEe = Math.round(pfWage * 0.12 * 100) / 100;
+
+  const epsBase = Math.min(pfWage, 15000.0);
+  const epsEr = Math.round(epsBase * 0.0833 * 100) / 100; // max ₹1,250.00
+  const epfEr = epfEe - epsEr;
+  const edliEr = Math.round(Math.min(pfWage, 15000.0) * 0.005 * 100) / 100;
+
+  lines.push({
+    code: "IN_EPF_EE",
+    description: "Employees' Provident Fund EE (12.0% on Basic/PF Wage)",
+    employeeAmount: epfEe,
+    employerAmount: 0,
+    ratePct: 12.0,
+    authority: "Employees' Provident Fund Organisation (EPFO)",
+  });
+
+  lines.push({
+    code: "IN_EPF_ER",
+    description: "EPF & EPS Employer Contribution (12.0% total)",
+    employeeAmount: 0,
+    employerAmount: epfEr + epsEr + edliEr,
+    ratePct: 12.5,
+    authority: "Employees' Provident Fund Organisation (EPFO)",
+  });
+
+  // 2. Employees' State Insurance (ESI)
+  let esiEe = 0;
+  let esiEr = 0;
+  if (gross <= 21000.0) {
+    esiEe = Math.round(gross * 0.0075 * 100) / 100;
+    esiEr = Math.round(gross * 0.0325 * 100) / 100;
+
+    lines.push({
+      code: "IN_ESI",
+      description: "Employees' State Insurance (ESI: 0.75% EE, 3.25% ER on gross <= ₹21,000)",
+      employeeAmount: esiEe,
+      employerAmount: esiEr,
+      ratePct: 0.75,
+      authority: "Employees' State Insurance Corporation (ESIC)",
+    });
+  }
+
+  // 3. State Professional Tax (PT)
+  let profTax = 0;
+  const state = (request.jurisdiction || "MH").trim().toUpperCase();
+  if (gross > 10000.0) {
+    const isFeb = request.effectiveDate && request.effectiveDate.endsWith("-02");
+    profTax = (state === "MH" && isFeb) ? 300.0 : 200.0;
+
+    lines.push({
+      code: "IN_PT",
+      description: `State Professional Tax (${state})`,
+      employeeAmount: profTax,
+      employerAmount: 0,
+      ratePct: 0,
+      authority: "State Commercial Tax Department",
+    });
+  }
+
+  // 4. Income Tax TDS (Sec 115BAC New Tax Regime)
+  const annualGross = gross * 12;
+  const taxableAnnual = Math.max(0, annualGross - 75000.0); // Standard deduction ₹75,000
+  let annualTax = 0;
+
+  if (taxableAnnual > 300000) {
+    if (taxableAnnual <= 700000) {
+      annualTax = 0; // Sec 87A rebate
+    } else {
+      annualTax += 20000; // 3-7L @ 5%
+      let rem = taxableAnnual - 700000;
+
+      if (rem <= 300000) {
+        annualTax += rem * 0.10;
+      } else {
+        annualTax += 30000; // 7-10L @ 10%
+        rem -= 300000;
+
+        if (rem <= 200000) {
+          annualTax += rem * 0.15;
+        } else {
+          annualTax += 30000; // 10-12L @ 15%
+          rem -= 200000;
+
+          if (rem <= 300000) {
+            annualTax += rem * 0.20;
+          } else {
+            annualTax += 60000; // 12-15L @ 20%
+            rem -= 300000;
+            annualTax += rem * 0.30; // >15L @ 30%
+          }
+        }
+      }
+
+      annualTax = Math.round(annualTax * 1.04 * 100) / 100; // 4% Cess
+    }
+  }
+
+  const monthlyTds = Math.round((annualTax / 12) * 100) / 100;
+  if (monthlyTds > 0) {
+    lines.push({
+      code: "IN_TDS",
+      description: "Income Tax TDS (Section 115BAC New Tax Regime with 4% Cess)",
+      employeeAmount: monthlyTds,
+      employerAmount: 0,
+      ratePct: Math.round((monthlyTds / (gross || 1)) * 1000) / 10,
+      authority: "Income Tax Department (CBDT)",
+    });
+  }
+
+  const totalEmpDed = epfEe + esiEe + profTax + monthlyTds;
+  const totalEmplr = epfEr + epsEr + edliEr + esiEr;
+  const net = Math.max(0, Math.round((gross - totalEmpDed) * 100) / 100);
+
+  return {
+    grossSalary: gross,
+    employeeIncomeTax: monthlyTds,
+    employeeStatutoryDeductions: totalEmpDed,
+    employerStatutoryContributions: totalEmplr,
+    netSalary: net,
+    currencyCode,
+    countryCode: "IN",
+    statutoryLines: lines,
+    explanation: "India payroll: EPF 12%, ESI (if <= ₹21k), Professional Tax, Sec 115BAC New Tax Regime (₹75k std ded).",
+  };
+}
+
+/**
+ * Netherlands Payroll Adapter (Loonheffing & Werkgeverspremies)
+ */
+export function calculateNetherlandsPayroll(request: PayrollCalculationRequest): PayrollCalculationResult {
+  const gross = Math.max(0, request.grossSalary);
+  const currencyCode = request.currencyCode || "EUR";
+  const annualGross = gross * 12;
+
+  let annualTax = 0;
+  if (annualGross <= 75518) {
+    annualTax = annualGross * 0.3697;
+  } else {
+    annualTax = 75518 * 0.3697 + (annualGross - 75518) * 0.4950;
+  }
+
+  const generalCredit = Math.max(0, 3362 - Math.max(0, annualGross - 24812) * 0.0663);
+  const netAnnualTax = Math.max(0, annualTax - generalCredit);
+  const monthlyTax = Math.round((netAnnualTax / 12) * 100) / 100;
+
+  const erPremiums = Math.round(gross * 0.185 * 100) / 100;
+
+  const lines: StatutoryLine[] = [
+    {
+      code: "NL_LOONHEFFING",
+      description: "Loonheffing (Wage Tax & National Insurance)",
+      employeeAmount: monthlyTax,
+      employerAmount: 0,
+      ratePct: Math.round((monthlyTax / (gross || 1)) * 1000) / 10,
+      authority: "Belastingdienst",
+    },
+    {
+      code: "NL_WERKGEVERSPREMIES",
+      description: "Werkgeverspremies (AOF / Awf / Whk ~18.5%)",
+      employeeAmount: 0,
+      employerAmount: erPremiums,
+      ratePct: 18.5,
+      authority: "UWV / Belastingdienst",
+    },
+  ];
+
+  const net = Math.max(0, Math.round((gross - monthlyTax) * 100) / 100);
+  return {
+    grossSalary: gross,
+    employeeIncomeTax: monthlyTax,
+    employeeStatutoryDeductions: monthlyTax,
+    employerStatutoryContributions: erPremiums,
+    netSalary: net,
+    currencyCode,
+    countryCode: "NL",
+    statutoryLines: lines,
+    explanation: "Netherlands payroll: Loonheffing progressive brackets and general tax credit.",
+  };
+}
+
+/**
+ * Spain Payroll Adapter (Seguridad Social & IRPF)
+ */
+export function calculateSpainPayroll(request: PayrollCalculationRequest): PayrollCalculationResult {
+  const gross = Math.max(0, request.grossSalary);
+  const currencyCode = request.currencyCode || "EUR";
+
+  const baseCotizacion = Math.min(gross, 4720.50);
+  const ssEe = Math.round(baseCotizacion * 0.0635 * 100) / 100;
+  const ssEr = Math.round(baseCotizacion * 0.2990 * 100) / 100;
+
+  const irpfRate = gross > 5000 ? 0.30 : gross > 3000 ? 0.19 : 0.15;
+  const irpfWithholding = Math.round(gross * irpfRate * 100) / 100;
+
+  const lines: StatutoryLine[] = [
+    {
+      code: "ES_SEG_SOCIAL_EE",
+      description: "Seguridad Social Trabajador (6.35%)",
+      employeeAmount: ssEe,
+      employerAmount: 0,
+      ratePct: 6.35,
+      authority: "Tesorería General de la Seguridad Social (TGSS)",
+    },
+    {
+      code: "ES_SEG_SOCIAL_ER",
+      description: "Seguridad Social Empresa (29.90%)",
+      employeeAmount: 0,
+      employerAmount: ssEr,
+      ratePct: 29.9,
+      authority: "Tesorería General de la Seguridad Social (TGSS)",
+    },
+    {
+      code: "ES_IRPF",
+      description: `Retención IRPF (${(irpfRate * 100).toFixed(1)}%)`,
+      employeeAmount: irpfWithholding,
+      employerAmount: 0,
+      ratePct: irpfRate * 100,
+      authority: "Agencia Estatal de Administración Tributaria (AEAT)",
+    },
+  ];
+
+  const totalEe = ssEe + irpfWithholding;
+  const net = Math.max(0, Math.round((gross - totalEe) * 100) / 100);
+  return {
+    grossSalary: gross,
+    employeeIncomeTax: irpfWithholding,
+    employeeStatutoryDeductions: totalEe,
+    employerStatutoryContributions: ssEr,
+    netSalary: net,
+    currencyCode,
+    countryCode: "ES",
+    statutoryLines: lines,
+    explanation: "Spain payroll: Seguridad Social (6.35% EE, 29.9% ER) and IRPF withholding.",
+  };
+}
+
+/**
+ * Italy Payroll Adapter (INPS, IRPEF & TFR)
+ */
+export function calculateItalyPayroll(request: PayrollCalculationRequest): PayrollCalculationResult {
+  const gross = Math.max(0, request.grossSalary);
+  const currencyCode = request.currencyCode || "EUR";
+
+  const inpsEe = Math.round(gross * 0.0919 * 100) / 100;
+  const inpsEr = Math.round(gross * 0.3000 * 100) / 100;
+  const tfrAccrual = Math.round((gross / 13.5) * 100) / 100;
+
+  const taxableMonthly = Math.max(0, gross - inpsEe);
+  const irpefWithholding = Math.round(taxableMonthly * 0.23 * 100) / 100;
+
+  const lines: StatutoryLine[] = [
+    {
+      code: "IT_INPS_EE",
+      description: "Contributi Previdenziali INPS (9.19%)",
+      employeeAmount: inpsEe,
+      employerAmount: 0,
+      ratePct: 9.19,
+      authority: "Istituto Nazionale Previdenza Sociale (INPS)",
+    },
+    {
+      code: "IT_INPS_ER",
+      description: "Contributi Previdenziali INPS Datore (30.0%)",
+      employeeAmount: 0,
+      employerAmount: inpsEr,
+      ratePct: 30.0,
+      authority: "Istituto Nazionale Previdenza Sociale (INPS)",
+    },
+    {
+      code: "IT_TFR",
+      description: "Accantonamento Trattamento di Fine Rapporto (TFR / 13.5)",
+      employeeAmount: 0,
+      employerAmount: tfrAccrual,
+      ratePct: 7.41,
+      authority: "Codice Civile Art. 2120",
+    },
+    {
+      code: "IT_IRPEF",
+      description: "Ritenute Fiscali IRPEF (Scaglione Base 23%)",
+      employeeAmount: irpefWithholding,
+      employerAmount: 0,
+      ratePct: 23.0,
+      authority: "Agenzia delle Entrate",
+    },
+  ];
+
+  const totalEe = inpsEe + irpefWithholding;
+  const net = Math.max(0, Math.round((gross - totalEe) * 100) / 100);
+  return {
+    grossSalary: gross,
+    employeeIncomeTax: irpefWithholding,
+    employeeStatutoryDeductions: totalEe,
+    employerStatutoryContributions: inpsEr + tfrAccrual,
+    netSalary: net,
+    currencyCode,
+    countryCode: "IT",
+    statutoryLines: lines,
+    explanation: "Italy payroll: INPS social contributions, IRPEF withholding, and TFR accrual.",
+  };
+}
+
+/**
+ * Poland Payroll Adapter (ZUS, NFZ & PIT)
+ */
+export function calculatePolandPayroll(request: PayrollCalculationRequest): PayrollCalculationResult {
+  const gross = Math.max(0, request.grossSalary);
+  const currencyCode = request.currencyCode || "PLN";
+
+  const zusEe = Math.round(gross * 0.1371 * 100) / 100;
+  const zusEr = Math.round(gross * 0.2038 * 100) / 100;
+
+  const healthBase = gross - zusEe;
+  const healthEe = Math.round(healthBase * 0.09 * 100) / 100;
+
+  const pitBase = Math.max(0, healthBase - 250.0);
+  const pitGross = Math.round(pitBase * 0.12 * 100) / 100;
+  const pitWithholding = Math.max(0, pitGross - 300.0);
+
+  const lines: StatutoryLine[] = [
+    {
+      code: "PL_ZUS_EE",
+      description: "Składki na ubezpieczenia społeczne ZUS (13.71%)",
+      employeeAmount: zusEe,
+      employerAmount: 0,
+      ratePct: 13.71,
+      authority: "Zakład Ubezpieczeń Społecznych (ZUS)",
+    },
+    {
+      code: "PL_NFZ",
+      description: "Składka na ubezpieczenie zdrowotne NFZ (9.0%)",
+      employeeAmount: healthEe,
+      employerAmount: 0,
+      ratePct: 9.0,
+      authority: "Narodowy Fundusz Zdrowia (NFZ)",
+    },
+    {
+      code: "PL_PIT",
+      description: "Zaliczka na podatek dochodowy PIT (12% minus kwota zmniejszająca)",
+      employeeAmount: pitWithholding,
+      employerAmount: 0,
+      ratePct: 12.0,
+      authority: "Krajowa Administracja Skarbowa (KAS)",
+    },
+    {
+      code: "PL_ZUS_ER",
+      description: "Składki ZUS pracodawca (20.38%)",
+      employeeAmount: 0,
+      employerAmount: zusEr,
+      ratePct: 20.38,
+      authority: "Zakład Ubezpieczeń Społecznych (ZUS)",
+    },
+  ];
+
+  const totalEe = zusEe + healthEe + pitWithholding;
+  const net = Math.max(0, Math.round((gross - totalEe) * 100) / 100);
+  return {
+    grossSalary: gross,
+    employeeIncomeTax: pitWithholding,
+    employeeStatutoryDeductions: totalEe,
+    employerStatutoryContributions: zusEr,
+    netSalary: net,
+    currencyCode,
+    countryCode: "PL",
+    statutoryLines: lines,
+    explanation: "Poland payroll: ZUS social insurance (13.71% EE, 20.38% ER), NFZ health, PIT 12%.",
   };
 }
 
