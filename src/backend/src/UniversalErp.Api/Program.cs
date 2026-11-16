@@ -46,6 +46,15 @@ using UniversalErp.Infrastructure.Sales;
 using UniversalErp.Infrastructure.Sync;
 using UniversalErp.Infrastructure.Tenancy;
 using UniversalErp.Api.Foundation;
+using UniversalErp.Api.Branches;
+using UniversalErp.Api.Consolidations;
+using UniversalErp.Api.Integrations;
+using UniversalErp.Application.Branches;
+using UniversalErp.Application.Consolidations;
+using UniversalErp.Application.Integrations;
+using UniversalErp.Infrastructure.Branches;
+using UniversalErp.Infrastructure.Consolidations;
+using UniversalErp.Infrastructure.Integrations;
 
 var builder = WebApplication.CreateBuilder(args);
 var isDevelopment = builder.Environment.IsDevelopment();
@@ -119,6 +128,14 @@ builder.Services.AddScoped<ISalesRepository, PostgresSalesRepository>();
 builder.Services.AddScoped<SalesService>();
 builder.Services.AddScoped<IFoundationRepository, PostgresFoundationRepository>();
 builder.Services.AddScoped<FoundationService>();
+builder.Services.AddScoped<IBranchesRepository, PostgresBranchesRepository>();
+builder.Services.AddScoped<BranchService>();
+builder.Services.AddSingleton<ConsolidationEliminationEngine>();
+builder.Services.AddScoped<IConsolidationsRepository, PostgresConsolidationsRepository>();
+builder.Services.AddScoped<ConsolidationService>();
+builder.Services.AddSingleton<WebhookSigningEngine>();
+builder.Services.AddScoped<IIntegrationsRepository, PostgresIntegrationsRepository>();
+builder.Services.AddScoped<IntegrationsService>();
 
 var authProvider = builder.Configuration["Authentication:Provider"]?.Trim();
 var isAuthExplicitlyConfigured = !string.IsNullOrWhiteSpace(authProvider);
@@ -388,6 +405,10 @@ else
             "analytics.dashboard.view", "analytics.financial.view",
             "analytics.supply_chain.view", "analytics.workforce.view",
             "analytics.kpi.manage", "analytics.export",
+            "branch.view", "branch.manage", "branch.switch",
+            "intercompany.transfer.create", "intercompany.transfer.receive",
+            "consolidation.run", "consolidation.view",
+            "integrations.webhook.manage", "integrations.partner.manage",
         })
         {
             options.AddPolicy(permissionCode, policy => policy
@@ -426,6 +447,9 @@ var moduleCatalog = new[]
     new { id = "offline", name = "Offline sync", status = "In progress", description = "Encrypted local journals, authenticated device grants, a durable receipt operation inbox, atomic snapshot cursors, and a paged change feed; event-level merge and product inbox processing remain." },
     new { id = "reporting", name = "Reporting", status = "Architecture only", description = "Approved datasets, dashboards, exports, and scheduled reports." },
     new { id = "saas", name = "SaaS platform", status = "In progress", description = "Tenant provisioning, plans, entitlements, subscriptions, and billing." },
+    new { id = "branches", name = "Multi-Branch Operations", status = "Active", description = "Hierarchical branch master, operating locations, POS terminal binding, and branch switcher." },
+    new { id = "consolidation", name = "Intercompany & Group Consolidation", status = "Active", description = "Intercompany relationships, stock transfers, reciprocal Due-To/Due-From clearing, and multi-entity elimination engine." },
+    new { id = "integrations", name = "External Integrations Hub", status = "Active", description = "HMAC-SHA256 authenticated webhooks, exponential retry backoff, dead-letter state, and API partner access." },
 };
 
 app.UseExceptionHandler();
@@ -591,6 +615,9 @@ app.MapManufacturingEndpoints(isDevelopment);
 app.MapWarehouseEndpoints(isDevelopment);
 app.MapHrPayrollEndpoints(isDevelopment);
 app.MapAnalyticsEndpoints(isDevelopment);
+app.MapBranchEndpoints(isDevelopment);
+app.MapConsolidationEndpoints(isDevelopment);
+app.MapIntegrationEndpoints(isDevelopment);
 productApi.MapFoundationEndpoints();
 
 app.MapGet("/", () => Results.Ok(new

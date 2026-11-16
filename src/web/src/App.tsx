@@ -9,6 +9,8 @@ import ManufacturingWorkspace from "./ManufacturingWorkspace";
 import FoundationWorkspace from "./FoundationWorkspace";
 import HRWorkspace from "./HRWorkspace";
 import { AnalyticsWorkspace } from "./AnalyticsWorkspace";
+import { ConsolidationWorkspace } from "./ConsolidationWorkspace";
+import { BranchDto } from "./branchHelpers";
 import {
   apiFetch,
   apiUrl,
@@ -114,9 +116,12 @@ export default function App() {
     | "foundation"
     | "hr"
     | "analytics"
+    | "consolidation"
     | "saas"
     | "all"
   >("inventory");
+  const [activeBranchId, setActiveBranchId] = useState<string>("");
+  const [branches, setBranches] = useState<BranchDto[]>([]);
 
   useEffect(() => {
     if (!oidcConfigured) return;
@@ -298,6 +303,29 @@ export default function App() {
 
   useEffect(() => {
     if (oidcConfigured) setProducts([]);
+  }, [activeWorkspaceKey]);
+
+  useEffect(() => {
+    if (!activeWorkspace) {
+      setBranches([]);
+      setActiveBranchId("");
+      return;
+    }
+    const loadBranches = async () => {
+      try {
+        const res = await apiFetch("/api/v1/branches", {}, activeWorkspace);
+        if (res.ok) {
+          const data: BranchDto[] = await res.json();
+          setBranches(data);
+          if (data.length > 0 && !activeBranchId) {
+            setActiveBranchId(data[0].id);
+          }
+        }
+      } catch {
+        // Fallback
+      }
+    };
+    loadBranches();
   }, [activeWorkspaceKey]);
 
   const createProduct = async (event: FormEvent<HTMLFormElement>) => {
@@ -618,6 +646,23 @@ export default function App() {
               </option>
             ))}
           </select>
+          {branches.length > 0 && (
+            <>
+              <label htmlFor="branch-select" style={{ marginLeft: "12px" }}>Branch</label>
+              <select
+                id="branch-select"
+                value={activeBranchId}
+                onChange={(event) => setActiveBranchId(event.target.value)}
+              >
+                <option value="">All Branches / HQ</option>
+                {branches.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.branchCode} · {b.branchName}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
           <span>{authUser.expired ? "Session expired. Sign in again to sync saved work." : "Changes are checked against your current membership."}</span>
         </section>
       )}
@@ -793,6 +838,23 @@ export default function App() {
           }}
         >
           📊 Analytics & BI
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveNavTab("consolidation")}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid",
+            borderColor: activeNavTab === "consolidation" ? "#2563eb" : "#e2e8f0",
+            background: activeNavTab === "consolidation" ? "#2563eb" : "#f8fafc",
+            color: activeNavTab === "consolidation" ? "#ffffff" : "#1e293b",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}
+        >
+          🌐 Multi-Branch & Consolidation
         </button>
         <button
           type="button"
@@ -1012,6 +1074,14 @@ export default function App() {
         <AnalyticsWorkspace
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
+        />
+      )}
+
+      {(activeNavTab === "consolidation" || activeNavTab === "all") && (
+        <ConsolidationWorkspace
+          tenantId={activeWorkspace?.tenantId ?? "development-tenant"}
+          companyId={activeWorkspace?.companyId ?? "development-company"}
+          userId={queueOwnerKey ?? "development-user"}
         />
       )}
 
