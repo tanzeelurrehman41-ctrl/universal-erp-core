@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using UniversalErp.Application.Localization;
 
 namespace UniversalErp.Application.HrPayroll;
 
@@ -33,6 +34,12 @@ public record ComputedPayLine(
 
 public class PayrollCalculationEngine
 {
+    private static readonly GlobalPayrollEngine _globalPayrollEngine = new();
+
+    public static GlobalPayrollEngine GlobalEngine => _globalPayrollEngine;
+
+    public static PayrollCalculationResult CalculateGlobalPayroll(PayrollCalculationContext context) =>
+        _globalPayrollEngine.CalculatePayroll(context);
     /// <summary>
     /// Computes monthly income tax withholding according to Pakistan Income Tax Ordinance 2001 (Salaried Individual Slabs).
     /// Annualizes monthly taxable income, locates the bracket, calculates annual tax, and divides by 12.

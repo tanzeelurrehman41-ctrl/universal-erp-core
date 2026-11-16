@@ -1,7 +1,13 @@
+using System;
+using UniversalErp.Application.Localization;
+
 namespace UniversalErp.Application.SaaS;
 
 public sealed class BillingEngine
 {
+    private static readonly GlobalTaxEngine _globalTaxEngine = new();
+
+    public GlobalTaxEngine GlobalTaxEngine => _globalTaxEngine;
     public sealed record ProrationResult(
         decimal UnusedOldPlanCredit,
         decimal NewPlanCharge,
@@ -79,33 +85,48 @@ public sealed class BillingEngine
     }
 
     /// <summary>
-    /// Resolves statutory sales tax rate by jurisdiction.
-    /// Standard Sindh rate is verified at 15.00% under Sindh Finance Act 2024 / SSTS Act 2011 Sec 8(1).
+    /// Resolves statutory sales tax rate by jurisdiction supporting global multi-country operations.
     /// </summary>
     public decimal ResolveTaxRate(string countryCode, string? provinceState)
     {
-        if (!string.Equals(countryCode, "PK", StringComparison.OrdinalIgnoreCase))
-        {
-            return 0.00m; // International or export zero-rate
-        }
+        var country = (countryCode ?? "US").ToUpperInvariant().Trim();
+        var province = provinceState?.ToUpperInvariant().Trim();
 
-        var province = provinceState?.ToUpperInvariant().Trim() ?? "FEDERAL";
-        return province switch
+        return country switch
         {
-            "PUNJAB" => 16.0000m,                               // PRA Punjab Sales Tax on Services (Standard SaaS)
-            "SINDH" => 15.0000m,                                // SRB Sindh Sales Tax on Services (Standard SaaS, Sindh Finance Act 2024)
-            "KP" or "KPK" or "KHYBER_PAKHTUNKHWA" => 15.0000m,  // KPRA Sales Tax on Services
-            "BALOCHISTAN" => 15.0000m,                          // BRA Balochistan Sales Tax on Services
-            _ => 15.0000m                                       // ICT Federal Sales Tax on Services
+            "PK" => (province ?? "FEDERAL") switch
+            {
+                "PUNJAB" => 16.0000m,                               // PRA Punjab Sales Tax on Services (Standard SaaS)
+                "SINDH" => 15.0000m,                                // SRB Sindh Sales Tax on Services (Standard SaaS, Sindh Finance Act 2024)
+                "KP" or "KPK" or "KHYBER_PAKHTUNKHWA" => 15.0000m,  // KPRA Sales Tax on Services
+                "BALOCHISTAN" => 15.0000m,                          // BRA Balochistan Sales Tax on Services
+                _ => 15.0000m                                       // ICT Federal Sales Tax on Services
+            },
+            "US" => province switch
+            {
+                "NY" => 8.8750m,
+                "TX" => 6.6000m,
+                "CA" => 0.0000m,
+                "WA" => 6.5000m,
+                _ => 6.0000m
+            },
+            "GB" => 20.0000m,
+            "AE" => 5.0000m,
+            "SA" => 15.0000m,
+            "DE" => 19.0000m,
+            "FR" => 20.0000m,
+            "IE" => 23.0000m,
+            _ => 0.00m
         };
     }
 
     /// <summary>
     /// Comprehensive statutory tax resolution engine taking into account:
-    /// - Service classification (Tariff heading 9815.6000 / SaaS)
+    /// - Service classification (Tariff heading 9815.6000 / 9850.0000 / 9868.0000 / NAICS / CPA)
     /// - Place of provision (Customer jurisdiction)
+    /// - Multi-country tax determination (US, UK, EU, UAE, Saudi Arabia, Pakistan, Export)
     /// - Standard vs. conditional reduced rate (with vs. without input tax credit)
-    /// - Effective-dated intervals (e.g. Sindh 13% pre-July 2024 vs 15% post-July 2024)
+    /// - Effective-dated intervals (e.g. Sindh 13% pre-July 2024 vs 15% post-July 2024, Balochistan 6% post-July 2026 vs 3% pre-2026)
     /// - Export of services zero-rating (remittance in foreign exchange)
     /// </summary>
     public TaxResolutionResult ResolveStatutoryTaxRule(TaxResolutionRequest request)
@@ -114,24 +135,47 @@ public sealed class BillingEngine
         var province = request.ProvinceState?.ToUpperInvariant().Trim() ?? "FEDERAL";
         var asOf = request.AsOfDate ?? DateTimeOffset.UtcNow;
 
-        // 1. Export of Services Check (Place of provision outside Pakistan + foreign exchange proceeds)
-        if (request.IsExport || country != "PK")
+        // 1. Export of Services Check (Place of provision outside Pakistan / cross-border export)
+        if (request.IsExport || country == "EXPORT" || country == "ALL")
         {
-            if (request.HasValidForeignRemittanceProof || country != "PK")
-            {
-                return new TaxResolutionResult(
-                    Jurisdiction: "EXPORT",
-                    Authority: "FBR_PROVINCIAL_HARMONIZED",
-                    StatutoryReference: "SRB / PRA / KPRA / FBR Place of Provision of Services Rules (Export Zero-Rating)",
-                    TariffCode: !string.IsNullOrWhiteSpace(request.TariffCode) ? request.TariffCode : "9815.6000",
-                    TaxRegime: "export_zero_rated",
-                    RatePercentage: 0.0000m,
-                    InputTaxAllowable: true,
-                    EligibilityConditions: "Customer located outside Pakistan, benefit consumed outside Pakistan, and proceeds received via banking channel in convertible foreign exchange (SBP e-PRC).");
-            }
+            return new TaxResolutionResult(
+                Jurisdiction: "EXPORT",
+                Authority: "FBR_PROVINCIAL_HARMONIZED",
+                StatutoryReference: "SRB / PRA / KPRA / FBR Place of Provision of Services Rules (Export Zero-Rating)",
+                TariffCode: !string.IsNullOrWhiteSpace(request.TariffCode) ? request.TariffCode : "9815.6000",
+                TaxRegime: "export_zero_rated",
+                RatePercentage: 0.0000m,
+                InputTaxAllowable: true,
+                EligibilityConditions: "Customer located outside Pakistan, benefit consumed outside Pakistan, and proceeds received via banking channel in convertible foreign exchange (SBP e-PRC).");
         }
 
-        // 2. Provincial & Federal Jurisdictional Resolution
+        // 2. International Country Resolution (US, GB, AE, SA, EU, etc.)
+        if (country != "PK")
+        {
+            var globalRes = _globalTaxEngine.DetermineTax(new TaxDeterminationRequest(
+                SupplierCountryCode: country,
+                SupplierTaxId: null,
+                CustomerCountryCode: country,
+                CustomerProvinceState: province,
+                CustomerPostalCode: null,
+                CustomerType: "all",
+                ProductServiceClassification: request.TariffCode,
+                IsSaaSOrDigitalService: true,
+                IsExport: false,
+                AsOfDate: asOf));
+
+            return new TaxResolutionResult(
+                Jurisdiction: globalRes.Jurisdiction,
+                Authority: globalRes.Authority,
+                StatutoryReference: globalRes.StatutoryReference,
+                TariffCode: globalRes.TariffOrClassificationCode,
+                TaxRegime: globalRes.TaxSystem,
+                RatePercentage: globalRes.RatePercentage,
+                InputTaxAllowable: globalRes.InputTaxAllowable,
+                EligibilityConditions: globalRes.CalculationExplanation);
+        }
+
+        // 3. Pakistan Provincial & Federal Jurisdictional Resolution
         switch (province)
         {
             case "SINDH":

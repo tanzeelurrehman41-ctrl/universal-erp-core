@@ -3,6 +3,38 @@
  * Statutory tax rules, proration engines, entitlement evaluation, and status formatters.
  */
 
+import {
+  calculateGlobalTax,
+  SUPPORTED_COUNTRIES,
+  type CountryPackage,
+  type CountryJurisdiction,
+  getSupportedCountries,
+  getCountryByCode,
+  getJurisdictionsForCountry,
+  formatCurrency,
+  getCurrencySymbol,
+  getCurrencyDecimals,
+  calculateGlobalPayroll,
+  type PayrollCalculationRequest,
+  type PayrollCalculationResult,
+} from "./localization/index.ts";
+
+export {
+  calculateGlobalTax,
+  SUPPORTED_COUNTRIES,
+  type CountryPackage,
+  type CountryJurisdiction,
+  getSupportedCountries,
+  getCountryByCode,
+  getJurisdictionsForCountry,
+  formatCurrency,
+  getCurrencySymbol,
+  getCurrencyDecimals,
+  calculateGlobalPayroll,
+  type PayrollCalculationRequest,
+  type PayrollCalculationResult,
+};
+
 export type PlanPricing = {
   planId: string;
   billingInterval: "month" | "year";
@@ -141,14 +173,20 @@ export type JurisdictionalTaxRate = {
   isTaxInclusive?: boolean;
   taxRegime?: string;
   statutoryReference?: string;
+  countryCode?: string;
+  inputTaxRecoverable?: boolean;
+  explanation?: string;
 };
 
 export type TaxCalculationOptions = {
-  regime?: "standard_with_input_tax" | "reduced_without_input_tax" | "export_zero_rated" | string;
+  regime?: "standard_with_input_tax" | "reduced_without_input_tax" | "export_zero_rated" | "reverse_charge" | string;
   isTaxInclusive?: boolean;
   effectiveDate?: string;
   isExport?: boolean;
   tariffCode?: string;
+  customerCountryCode?: string;
+  supplierCountryCode?: string;
+  customerType?: "b2b" | "b2c" | string;
 };
 
 /**
@@ -198,6 +236,54 @@ export function calculateJurisdictionalTax(
 ): JurisdictionalTaxRate {
   const norm = jurisdiction.trim().toUpperCase();
   const isExport = Boolean(options.isExport || norm === "EXPORT" || norm === "INTERNATIONAL");
+
+  // Check for International Country or Subnational Jurisdiction
+  const isUsState = ["NY", "TX", "WA", "CA", "IL"].includes(norm);
+  const isIntlCountry = ["US", "GB", "UK", "DE", "FR", "IE", "AE", "UAE", "SA", "KSA", "CA", "AU"].includes(norm);
+  const explicitCountry = options.customerCountryCode && options.customerCountryCode.trim().toUpperCase() !== "PK";
+
+  if (isUsState || isIntlCountry || explicitCountry) {
+    const customerCountry = explicitCountry
+      ? options.customerCountryCode!
+      : isUsState
+      ? "US"
+      : norm === "UK"
+      ? "GB"
+      : norm === "UAE"
+      ? "AE"
+      : norm === "KSA"
+      ? "SA"
+      : norm;
+
+    const res = calculateGlobalTax({
+      amount,
+      customerCountryCode: customerCountry,
+      supplierCountryCode: options.supplierCountryCode || customerCountry,
+      customerJurisdictionCode: isUsState ? norm : jurisdiction,
+      customerType: options.customerType || "b2b",
+      taxRegime: options.regime,
+      isTaxInclusive: options.isTaxInclusive,
+      effectiveDate: options.effectiveDate,
+      tariffCode: options.tariffCode,
+      isExport: options.isExport,
+    });
+
+    return {
+      ratePct: res.ratePct,
+      taxAmount: res.taxAmount,
+      totalAmount: res.totalAmount,
+      taxAuthority: res.taxAuthority,
+      jurisdiction: res.jurisdiction,
+      tariffCode: res.tariffCode,
+      taxableBase: res.taxableAmount,
+      isTaxInclusive: res.isTaxInclusive,
+      taxRegime: res.taxRegime,
+      statutoryReference: res.statutoryReference,
+      countryCode: customerCountry,
+      inputTaxRecoverable: res.inputTaxRecoverable,
+      explanation: res.explanation,
+    };
+  }
 
   let ratePct = 15.0;
   let taxAuthority = "FBR ICT Sales Tax on Services";
@@ -323,7 +409,9 @@ export function calculateJurisdictionalTax(
     taxableBase,
     isTaxInclusive: Boolean(options.isTaxInclusive),
     taxRegime,
-    statutoryReference
+    statutoryReference,
+    countryCode: "PK",
+    inputTaxRecoverable: taxRegime !== "reduced_without_input_tax",
   };
 }
 

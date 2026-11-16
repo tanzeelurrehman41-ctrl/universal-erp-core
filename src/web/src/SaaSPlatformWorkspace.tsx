@@ -10,6 +10,10 @@ import {
   getPaymentStatusBadge,
   calculateInvoiceTotals,
   formatCurrencyPkr,
+  formatCurrency,
+  SUPPORTED_COUNTRIES,
+  getCountryByCode,
+  getJurisdictionsForCountry,
   type SubscriptionPlan,
   type TenantBrief,
   type TenantEntitlement,
@@ -53,18 +57,32 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
   const [searchQuery, setSearchQuery] = useState<string>("");
 
   // Tab 2: Onboarding Form State
-  const [onboardCode, setOnboardCode] = useState("apex-pk");
-  const [onboardName, setOnboardName] = useState("Apex Distribution Pakistan");
-  const [onboardLegalName, setOnboardLegalName] = useState("Apex Distribution Pvt. Ltd.");
+  const [onboardCountry, setOnboardCountry] = useState("US");
+  const [onboardCurrency, setOnboardCurrency] = useState("USD");
+  const [onboardTimezone, setOnboardTimezone] = useState("America/New_York");
+  const [onboardCode, setOnboardCode] = useState("apex-global");
+  const [onboardName, setOnboardName] = useState("Apex Global Enterprises");
+  const [onboardLegalName, setOnboardLegalName] = useState("Apex Global Technologies Inc.");
   const [onboardPlan, setOnboardPlan] = useState("starter");
   const [onboardInterval, setOnboardInterval] = useState<"month" | "year">("month");
-  const [onboardCompanyCode, setOnboardCompanyCode] = useState("APEX-PK");
-  const [onboardBranchCode, setOnboardBranchCode] = useState("HQ-KHI");
-  const [onboardBranchName, setOnboardBranchName] = useState("Headquarters Karachi");
-  const [onboardAdminName, setOnboardAdminName] = useState("Muhammad Harris");
-  const [onboardAdminEmail, setOnboardAdminEmail] = useState("harris@apex-pk.example.com");
-  const [onboardJurisdiction, setOnboardJurisdiction] = useState("SINDH");
+  const [onboardCompanyCode, setOnboardCompanyCode] = useState("APEX-US");
+  const [onboardBranchCode, setOnboardBranchCode] = useState("HQ-NYC");
+  const [onboardBranchName, setOnboardBranchName] = useState("New York Global HQ");
+  const [onboardAdminName, setOnboardAdminName] = useState("Alex Morgan");
+  const [onboardAdminEmail, setOnboardAdminEmail] = useState("alex@apex-global.example.com");
+  const [onboardJurisdiction, setOnboardJurisdiction] = useState("NY");
   const [lastProvisionResult, setLastProvisionResult] = useState<Record<string, unknown> | null>(null);
+
+  function handleCountryChange(newCountryCode: string) {
+    setOnboardCountry(newCountryCode);
+    const country = getCountryByCode(newCountryCode);
+    if (country) {
+      setOnboardCurrency(country.defaultCurrencyCode);
+      setOnboardTimezone(country.defaultTimezone);
+      const jur = country.jurisdictions[0];
+      setOnboardJurisdiction(jur ? jur.code : "STANDARD");
+    }
+  }
 
   // Tab 3: Plans & Pricing State
   const [billingCycle, setBillingCycle] = useState<"month" | "year">("month");
@@ -419,9 +437,9 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
       branchName: onboardBranchName,
       adminFullName: onboardAdminName,
       adminEmail: onboardAdminEmail,
-      countryCode: "PK",
-      baseCurrencyCode: "PKR",
-      timezone: "Asia/Karachi",
+      countryCode: onboardCountry,
+      baseCurrencyCode: onboardCurrency,
+      timezone: onboardTimezone,
       jurisdiction: onboardJurisdiction
     };
 
@@ -475,9 +493,9 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
           displayName: simulatedResult.displayName,
           legalName: onboardLegalName,
           status: "active",
-          defaultCountryCode: "PK",
-          defaultCurrencyCode: "PKR",
-          defaultTimezone: "Asia/Karachi",
+          defaultCountryCode: onboardCountry,
+          defaultCurrencyCode: onboardCurrency,
+          defaultTimezone: onboardTimezone,
           createdAt: simulatedResult.createdAt
         },
         ...prev
@@ -1068,6 +1086,41 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "10px" }}>
               <div>
                 <label style={{ display: "block", fontSize: "12px", fontWeight: "600", marginBottom: "4px", color: "#334155" }}>
+                  Country / Legal Framework *
+                </label>
+                <select
+                  value={onboardCountry}
+                  onChange={(e) => handleCountryChange(e.target.value)}
+                  style={{ width: "100%", padding: "6px 10px", border: "1px solid #cbd5e1", borderRadius: "6px", fontSize: "13px" }}
+                >
+                  {Object.values(SUPPORTED_COUNTRIES).map((c) => (
+                    <option key={c.countryCode} value={c.countryCode}>
+                      {c.countryName} ({c.countryCode}) — {c.defaultCurrencyCode} / {c.taxSystemName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: "12px", fontWeight: "600", marginBottom: "4px", color: "#334155" }}>
+                  Tax Jurisdiction *
+                </label>
+                <select
+                  value={onboardJurisdiction}
+                  onChange={(e) => setOnboardJurisdiction(e.target.value)}
+                  style={{ width: "100%", padding: "6px 10px", border: "1px solid #cbd5e1", borderRadius: "6px", fontSize: "13px" }}
+                >
+                  {getJurisdictionsForCountry(onboardCountry).map((j) => (
+                    <option key={j.code} value={j.code}>
+                      {j.name} ({j.standardTaxRatePct}% {j.reducedTaxRatePct !== undefined ? `/ ${j.reducedTaxRatePct}%` : ""})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "10px" }}>
+              <div>
+                <label style={{ display: "block", fontSize: "12px", fontWeight: "600", marginBottom: "4px", color: "#334155" }}>
                   Initial Company Code
                 </label>
                 <input
@@ -1079,19 +1132,14 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
               </div>
               <div>
                 <label style={{ display: "block", fontSize: "12px", fontWeight: "600", marginBottom: "4px", color: "#334155" }}>
-                  Jurisdiction (Sales Tax)
+                  Currency & Timezone
                 </label>
-                <select
-                  value={onboardJurisdiction}
-                  onChange={(e) => setOnboardJurisdiction(e.target.value)}
-                  style={{ width: "100%", padding: "6px 10px", border: "1px solid #cbd5e1", borderRadius: "6px", fontSize: "13px" }}
-                >
-                  <option value="FEDERAL">Federal / ICT — Tariff 9815.6000 (15% Standard / 5% PSEB)</option>
-                  <option value="PUNJAB">Punjab PRA — Tariff 9815.6000 (16% Standard / 5% Reduced)</option>
-                  <option value="SINDH">Sindh SRB — Tariff 9815.6000 (15% Standard / 3% Reduced)</option>
-                  <option value="KP">Khyber Pakhtunkhwa KPRA — Tariff 9850.0000 (15% Standard / 2% Reduced)</option>
-                  <option value="BALOCHISTAN">Balochistan BRA — Tariff 9868.0000 (15% Standard / 6% Reduced)</option>
-                </select>
+                <input
+                  type="text"
+                  disabled
+                  value={`${onboardCurrency} • ${onboardTimezone}`}
+                  style={{ width: "100%", padding: "6px 10px", border: "1px solid #e2e8f0", backgroundColor: "#f8fafc", borderRadius: "6px", fontSize: "13px", color: "#64748b" }}
+                />
               </div>
             </div>
 
