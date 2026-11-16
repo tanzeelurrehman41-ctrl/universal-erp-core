@@ -21,7 +21,7 @@ public sealed class BillingEngine
     public sealed record TaxResolutionRequest(
         string CountryCode,
         string? ProvinceState,
-        string TariffCode = "9815.6000",
+        string? TariffCode = null,
         string TaxRegime = "standard_with_input_tax",
         bool IsExport = false,
         bool HasValidForeignRemittanceProof = false,
@@ -123,7 +123,7 @@ public sealed class BillingEngine
                     Jurisdiction: "EXPORT",
                     Authority: "FBR_PROVINCIAL_HARMONIZED",
                     StatutoryReference: "SRB / PRA / KPRA / FBR Place of Provision of Services Rules (Export Zero-Rating)",
-                    TariffCode: request.TariffCode,
+                    TariffCode: !string.IsNullOrWhiteSpace(request.TariffCode) ? request.TariffCode : "9815.6000",
                     TaxRegime: "export_zero_rated",
                     RatePercentage: 0.0000m,
                     InputTaxAllowable: true,
@@ -135,6 +135,7 @@ public sealed class BillingEngine
         switch (province)
         {
             case "SINDH":
+                var sindhTariff = !string.IsNullOrWhiteSpace(request.TariffCode) ? request.TariffCode : "9815.6000";
                 // Historical interval check (Pre-July 1, 2024 Sindh standard rate was 13%)
                 if (asOf < new DateTimeOffset(2024, 7, 1, 0, 0, 0, TimeSpan.Zero))
                 {
@@ -142,7 +143,7 @@ public sealed class BillingEngine
                         Jurisdiction: "SINDH",
                         Authority: "SRB",
                         StatutoryReference: "Sindh Sales Tax on Services Act, 2011, Sec 8(1) (pre-2024 interval)",
-                        TariffCode: request.TariffCode,
+                        TariffCode: sindhTariff,
                         TaxRegime: "standard_with_input_tax",
                         RatePercentage: 13.0000m,
                         InputTaxAllowable: true,
@@ -156,11 +157,11 @@ public sealed class BillingEngine
                         Jurisdiction: "SINDH",
                         Authority: "SRB",
                         StatutoryReference: "SRB Notification No. SRB-3-4/7/2013 as amended & Second Schedule Heading 9815.6000",
-                        TariffCode: request.TariffCode,
+                        TariffCode: sindhTariff,
                         TaxRegime: "reduced_without_input_tax",
                         RatePercentage: 3.0000m,
                         InputTaxAllowable: false,
-                        EligibilityConditions: "Mandatory conditions: Service provider must formally elect this regime and surrender all input tax credit, adjustments, and refunds. Cannot be automatically assigned.");
+                        EligibilityConditions: "Requires formal election on monthly tax return and complete surrender of input tax adjustment and refund rights under SRB Special Procedure Rules. Does NOT apply automatically to every SaaS subscription.");
                 }
 
                 // Standard Rate: 15.00% under Sindh Finance Act 2024
@@ -168,20 +169,21 @@ public sealed class BillingEngine
                     Jurisdiction: "SINDH",
                     Authority: "SRB",
                     StatutoryReference: "Sindh Sales Tax on Services Act, 2011, Sec 8(1) as amended by Sindh Finance Act 2024",
-                    TariffCode: request.TariffCode,
+                    TariffCode: sindhTariff,
                     TaxRegime: "standard_with_input_tax",
                     RatePercentage: 15.0000m,
                     InputTaxAllowable: true,
                     EligibilityConditions: "Standard statutory rate with full input tax credit and adjustment rights under SRB rules.");
 
             case "PUNJAB":
+                var punjabTariff = !string.IsNullOrWhiteSpace(request.TariffCode) ? request.TariffCode : "9815.6000";
                 if (request.ProviderElectedReducedRateWithoutInputTax)
                 {
                     return new TaxResolutionResult(
                         Jurisdiction: "PUNJAB",
                         Authority: "PRA",
                         StatutoryReference: "PRA Notification No. SO(TAX)1-1/2020 & Second Schedule Heading 9815.6000",
-                        TariffCode: request.TariffCode,
+                        TariffCode: punjabTariff,
                         TaxRegime: "reduced_without_input_tax",
                         RatePercentage: 5.0000m,
                         InputTaxAllowable: false,
@@ -192,79 +194,96 @@ public sealed class BillingEngine
                     Jurisdiction: "PUNJAB",
                     Authority: "PRA",
                     StatutoryReference: "Punjab Sales Tax on Services Act, 2012, Second Schedule, Heading 9815.6000",
-                    TariffCode: request.TariffCode,
+                    TariffCode: punjabTariff,
                     TaxRegime: "standard_with_input_tax",
                     RatePercentage: 16.0000m,
                     InputTaxAllowable: true,
                     EligibilityConditions: "Standard statutory rate with full input tax credit.");
 
             case "KP" or "KPK" or "KHYBER_PAKHTUNKHWA":
+                var kpTariff = !string.IsNullOrWhiteSpace(request.TariffCode) ? request.TariffCode : "9850.0000";
                 if (request.ProviderElectedReducedRateWithoutInputTax)
                 {
                     return new TaxResolutionResult(
                         Jurisdiction: "KP",
                         Authority: "KPRA",
-                        StatutoryReference: "Khyber Pakhtunkhwa Sales Tax on Services Act, 2022, Second Schedule, Heading 9815.6000 Reduced Column",
-                        TariffCode: request.TariffCode,
+                        StatutoryReference: "KP Finance Act 2026 & Second Schedule Heading 9850.0000 Reduced Column",
+                        TariffCode: kpTariff,
                         TaxRegime: "reduced_without_input_tax",
                         RatePercentage: 2.0000m,
                         InputTaxAllowable: false,
-                        EligibilityConditions: "Conditional on no input tax credit claimed.");
+                        EligibilityConditions: "Applies strictly to qualifying digital and IT-based services under tariff heading 9850.0000 without input tax credit. Not automatically assigned.");
                 }
 
                 return new TaxResolutionResult(
                     Jurisdiction: "KP",
                     Authority: "KPRA",
-                    StatutoryReference: "Khyber Pakhtunkhwa Sales Tax on Services Act, 2022, Second Schedule, Heading 9815.6000",
-                    TariffCode: request.TariffCode,
+                    StatutoryReference: "Khyber Pakhtunkhwa Sales Tax on Services Act, 2022, Second Schedule, Heading 9850.0000 as amended by KP Finance Act 2026",
+                    TariffCode: kpTariff,
                     TaxRegime: "standard_with_input_tax",
                     RatePercentage: 15.0000m,
                     InputTaxAllowable: true,
-                    EligibilityConditions: "Standard rate with input tax credit.");
+                    EligibilityConditions: "Standard statutory rate with full input tax credit.");
 
             case "BALOCHISTAN":
+                var balochistanTariff = !string.IsNullOrWhiteSpace(request.TariffCode) ? request.TariffCode : "9868.0000";
                 if (request.ProviderElectedReducedRateWithoutInputTax)
                 {
+                    // Check historical interval prior to Balochistan Finance Act 2026 (2026-07-01)
+                    if (asOf < new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.Zero))
+                    {
+                        return new TaxResolutionResult(
+                            Jurisdiction: "BALOCHISTAN",
+                            Authority: "BRA",
+                            StatutoryReference: "Balochistan Sales Tax on Services Act, 2015, Second Schedule (historical interval prior to Finance Act 2026)",
+                            TariffCode: balochistanTariff,
+                            TaxRegime: "reduced_without_input_tax",
+                            RatePercentage: 3.0000m,
+                            InputTaxAllowable: false,
+                            EligibilityConditions: "Historical reduced rate interval prior to Balochistan Finance Act 2026. Input tax credit barred.");
+                    }
+
                     return new TaxResolutionResult(
                         Jurisdiction: "BALOCHISTAN",
                         Authority: "BRA",
-                        StatutoryReference: "Balochistan Sales Tax on Services Act, 2015, Second Schedule, Heading 9815.6000 Reduced Rate",
-                        TariffCode: request.TariffCode,
+                        StatutoryReference: "Balochistan Finance Act 2026 & Second Schedule Heading 9868.0000 Reduced Rate Column",
+                        TariffCode: balochistanTariff,
                         TaxRegime: "reduced_without_input_tax",
-                        RatePercentage: 3.0000m,
+                        RatePercentage: 6.0000m,
                         InputTaxAllowable: false,
-                        EligibilityConditions: "Conditional on no input tax credit claimed.");
+                        EligibilityConditions: "Applies strictly to qualifying IT/software services under tariff heading 9868.0000 where provider formally elects no input tax adjustment. Input tax credit is strictly barred.");
                 }
 
                 return new TaxResolutionResult(
                     Jurisdiction: "BALOCHISTAN",
                     Authority: "BRA",
-                    StatutoryReference: "Balochistan Sales Tax on Services Act, 2015, Second Schedule, Heading 9815.6000",
-                    TariffCode: request.TariffCode,
+                    StatutoryReference: "Balochistan Sales Tax on Services Act, 2015, Second Schedule, Heading 9868.0000 as amended by Balochistan Finance Act 2026",
+                    TariffCode: balochistanTariff,
                     TaxRegime: "standard_with_input_tax",
                     RatePercentage: 15.0000m,
                     InputTaxAllowable: true,
-                    EligibilityConditions: "Standard rate with input tax credit.");
+                    EligibilityConditions: "Standard statutory rate with full input tax credit under BRA rules.");
 
             default: // FEDERAL / ICT
+                var federalTariff = !string.IsNullOrWhiteSpace(request.TariffCode) ? request.TariffCode : "9815.6000";
                 if (request.ProviderElectedReducedRateWithoutInputTax)
                 {
                     return new TaxResolutionResult(
                         Jurisdiction: "FEDERAL",
                         Authority: "FBR_ICT",
                         StatutoryReference: "ICT Ordinance 2001, Table-II & S.R.O. Notifications for IT-enabled services",
-                        TariffCode: request.TariffCode,
+                        TariffCode: federalTariff,
                         TaxRegime: "reduced_without_input_tax",
                         RatePercentage: 5.0000m,
                         InputTaxAllowable: false,
-                        EligibilityConditions: "Requires valid Pakistan Software Export Board (PSEB) registration and surrender of input tax adjustments.");
+                        EligibilityConditions: "Applies strictly to qualifying software/IT development consultants and PSEB-registered entities who forgo input tax credit. Does NOT apply automatically to general SaaS subscriptions.");
                 }
 
                 return new TaxResolutionResult(
                     Jurisdiction: "FEDERAL",
                     Authority: "FBR_ICT",
                     StatutoryReference: "Islamabad Capital Territory (Tax on Services) Ordinance, 2001, Schedule Table, Heading 9815.6000",
-                    TariffCode: request.TariffCode,
+                    TariffCode: federalTariff,
                     TaxRegime: "standard_with_input_tax",
                     RatePercentage: 15.0000m,
                     InputTaxAllowable: true,

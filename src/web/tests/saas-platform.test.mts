@@ -43,40 +43,45 @@ test("calculateNetUpgradePayable calculates net payable and applies billing cred
 });
 
 test("calculateJurisdictionalTax resolves Pakistani provincial standard rates and verified Sindh 15%", () => {
-  // Federal / ICT - 15%
+  // Federal / ICT - 15% (Tariff 9815.6000)
   const fed = calculateJurisdictionalTax(100000, "FEDERAL");
   assert.equal(fed.ratePct, 15.0);
   assert.equal(fed.taxAmount, 15000.0);
   assert.equal(fed.totalAmount, 115000.0);
+  assert.equal(fed.tariffCode, "9815.6000");
   assert.match(fed.taxAuthority, /ICT/);
 
-  // Punjab (PRA) - 16%
+  // Punjab (PRA) - 16% (Tariff 9815.6000)
   const punjab = calculateJurisdictionalTax(50000, "PUNJAB");
   assert.equal(punjab.ratePct, 16.0);
   assert.equal(punjab.taxAmount, 8000.0);
   assert.equal(punjab.totalAmount, 58000.0);
+  assert.equal(punjab.tariffCode, "9815.6000");
   assert.match(punjab.taxAuthority, /PRA/);
 
-  // Sindh (SRB) Standard Rate - 15.0% (Verified under Sindh Finance Act 2024 / SSTS Act 2011 Sec 8(1))
+  // Sindh (SRB) Standard Rate - 15.0% (Verified under Sindh Finance Act 2024 / SSTS Act 2011 Sec 8(1), Tariff 9815.6000)
   const sindh = calculateJurisdictionalTax(100000, "SINDH");
   assert.equal(sindh.ratePct, 15.0);
   assert.equal(sindh.taxAmount, 15000.0);
   assert.equal(sindh.totalAmount, 115000.0);
+  assert.equal(sindh.tariffCode, "9815.6000");
   assert.match(sindh.taxAuthority, /SRB/);
   assert.match(sindh.statutoryReference!, /Sindh Finance Act 2024/);
 
-  // Khyber Pakhtunkhwa (KPRA) - 15%
+  // Khyber Pakhtunkhwa (KPRA) - 15% (Tariff 9850.0000 under KP Finance Act 2026)
   const kp = calculateJurisdictionalTax(40000, "KP");
   assert.equal(kp.ratePct, 15.0);
   assert.equal(kp.taxAmount, 6000.0);
   assert.equal(kp.totalAmount, 46000.0);
+  assert.equal(kp.tariffCode, "9850.0000");
   assert.match(kp.taxAuthority, /KPRA/);
 
-  // Balochistan (BRA) - 15%
+  // Balochistan (BRA) - 15% (Tariff 9868.0000 under Balochistan Finance Act 2026)
   const balochistan = calculateJurisdictionalTax(20000, "BALOCHISTAN");
   assert.equal(balochistan.ratePct, 15.0);
   assert.equal(balochistan.taxAmount, 3000.0);
   assert.equal(balochistan.totalAmount, 23000.0);
+  assert.equal(balochistan.tariffCode, "9868.0000");
   assert.match(balochistan.taxAuthority, /BRA/);
 });
 
@@ -86,27 +91,39 @@ test("calculateJurisdictionalTax resolves conditional reduced rates when opted w
   assert.equal(srbReduced.ratePct, 3.0);
   assert.equal(srbReduced.taxAmount, 3000.0);
   assert.equal(srbReduced.totalAmount, 103000.0);
+  assert.equal(srbReduced.tariffCode, "9815.6000");
   assert.equal(srbReduced.taxRegime, "reduced_without_input_tax");
 
   // Punjab PRA 5% reduced rate without input tax credit
   const praReduced = calculateJurisdictionalTax(100000, "PUNJAB", { regime: "reduced_without_input_tax" });
   assert.equal(praReduced.ratePct, 5.0);
   assert.equal(praReduced.taxAmount, 5000.0);
+  assert.equal(praReduced.tariffCode, "9815.6000");
 
   // Federal ICT 5% reduced rate for certified IT services
   const ictReduced = calculateJurisdictionalTax(100000, "FEDERAL", { regime: "reduced_without_input_tax" });
   assert.equal(ictReduced.ratePct, 5.0);
   assert.equal(ictReduced.taxAmount, 5000.0);
+  assert.equal(ictReduced.tariffCode, "9815.6000");
 
-  // KP KPRA 2% reduced rate
+  // KP KPRA 2% reduced rate under KP Finance Act 2026 (Tariff 9850.0000)
   const kpReduced = calculateJurisdictionalTax(100000, "KP", { regime: "reduced_without_input_tax" });
   assert.equal(kpReduced.ratePct, 2.0);
   assert.equal(kpReduced.taxAmount, 2000.0);
+  assert.equal(kpReduced.tariffCode, "9850.0000");
 
-  // Balochistan BRA 3% reduced rate
+  // Balochistan BRA 6% reduced rate under Balochistan Finance Act 2026 (Tariff 9868.0000)
   const braReduced = calculateJurisdictionalTax(100000, "BALOCHISTAN", { regime: "reduced_without_input_tax" });
-  assert.equal(braReduced.ratePct, 3.0);
-  assert.equal(braReduced.taxAmount, 3000.0);
+  assert.equal(braReduced.ratePct, 6.0);
+  assert.equal(braReduced.taxAmount, 6000.0);
+  assert.equal(braReduced.totalAmount, 106000.0);
+  assert.equal(braReduced.tariffCode, "9868.0000");
+
+  // Balochistan BRA historical pre-2026 3% reduced rate
+  const braHistorical = calculateJurisdictionalTax(100000, "BALOCHISTAN", { regime: "reduced_without_input_tax", effectiveDate: "2026-05-15" });
+  assert.equal(braHistorical.ratePct, 3.0);
+  assert.equal(braHistorical.taxAmount, 3000.0);
+  assert.equal(braHistorical.tariffCode, "9868.0000");
 });
 
 test("calculateJurisdictionalTax resolves historical rate intervals and export zero-rating", () => {

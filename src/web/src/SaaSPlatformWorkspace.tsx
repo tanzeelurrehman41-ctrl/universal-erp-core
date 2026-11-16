@@ -1086,11 +1086,11 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
                   onChange={(e) => setOnboardJurisdiction(e.target.value)}
                   style={{ width: "100%", padding: "6px 10px", border: "1px solid #cbd5e1", borderRadius: "6px", fontSize: "13px" }}
                 >
-                  <option value="FEDERAL">Federal / ICT (15%)</option>
-                  <option value="PUNJAB">Punjab PRA (16%)</option>
-                  <option value="SINDH">Sindh SRB (15% Standard / 3% Conditional Reduced)</option>
-                  <option value="KP">Khyber Pakhtunkhwa KPRA (15%)</option>
-                  <option value="BALOCHISTAN">Balochistan BRA (15%)</option>
+                  <option value="FEDERAL">Federal / ICT — Tariff 9815.6000 (15% Standard / 5% PSEB)</option>
+                  <option value="PUNJAB">Punjab PRA — Tariff 9815.6000 (16% Standard / 5% Reduced)</option>
+                  <option value="SINDH">Sindh SRB — Tariff 9815.6000 (15% Standard / 3% Reduced)</option>
+                  <option value="KP">Khyber Pakhtunkhwa KPRA — Tariff 9850.0000 (15% Standard / 2% Reduced)</option>
+                  <option value="BALOCHISTAN">Balochistan BRA — Tariff 9868.0000 (15% Standard / 6% Reduced)</option>
                 </select>
               </div>
             </div>

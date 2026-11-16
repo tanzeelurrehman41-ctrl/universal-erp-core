@@ -136,6 +136,7 @@ export type JurisdictionalTaxRate = {
   totalAmount: number;
   taxAuthority: string;
   jurisdiction: string;
+  tariffCode?: string;
   taxableBase?: number;
   isTaxInclusive?: boolean;
   taxRegime?: string;
@@ -147,6 +148,7 @@ export type TaxCalculationOptions = {
   isTaxInclusive?: boolean;
   effectiveDate?: string;
   isExport?: boolean;
+  tariffCode?: string;
 };
 
 /**
@@ -182,11 +184,11 @@ export function calculateNetUpgradePayable(
 
 /**
  * Resolves statutory sales tax on software/SaaS services across all 5 Pakistani jurisdictions and exports:
- * - Sindh SRB: 15% standard (Sindh Finance Act 2024 / SSTS Act 2011 Sec 8(1)); 3% conditional reduced rate without input tax.
- * - Punjab PRA: 16% standard; 5% conditional reduced rate without input tax.
- * - Federal ICT: 15% standard; 5% conditional reduced rate for PSEB certified providers.
- * - KP KPRA: 15% standard; 2% conditional reduced rate.
- * - Balochistan BRA: 15% standard; 3% conditional reduced rate.
+ * - Sindh SRB: 15% standard (Sindh Finance Act 2024 / SSTS Act 2011 Sec 8(1)); 3% conditional reduced rate without input tax. Tariff heading 9815.6000.
+ * - Punjab PRA: 16% standard; 5% conditional reduced rate without input tax. Tariff heading 9815.6000.
+ * - Federal ICT: 15% standard; 5% conditional reduced rate for PSEB certified providers. Tariff heading 9815.6000.
+ * - KP KPRA: 15% standard; 2% conditional reduced rate under KP Finance Act 2026. Tariff heading 9850.0000.
+ * - Balochistan BRA: 15% standard; 6% conditional reduced rate under Balochistan Finance Act 2026 (historical 3% pre-2026). Tariff heading 9868.0000.
  * - Export of Services: 0% zero-rated / exempt under provincial Place of Provision of Services Rules.
  */
 export function calculateJurisdictionalTax(
@@ -201,13 +203,16 @@ export function calculateJurisdictionalTax(
   let taxAuthority = "FBR ICT Sales Tax on Services";
   let statutoryReference = "Islamabad Capital Territory (Tax on Services) Ordinance, 2001, Schedule Table, Heading 9815.6000";
   let taxRegime = "standard_with_input_tax";
+  let tariffCode = options.tariffCode || "9815.6000";
 
   if (isExport) {
     ratePct = 0.0;
+    tariffCode = options.tariffCode || "9815.6000";
     taxAuthority = "FBR / Provincial Harmonized Place of Provision Rules";
     statutoryReference = "SRB / PRA / KPRA / FBR Place of Provision of Services Rules (Export Zero-Rating)";
     taxRegime = "export_zero_rated";
   } else if (norm === "SINDH") {
+    tariffCode = options.tariffCode || "9815.6000";
     // Check historical rate interval (Pre-July 1, 2024 was 13%)
     if (options.effectiveDate && options.effectiveDate < "2024-07-01") {
       ratePct = 13.0;
@@ -227,6 +232,7 @@ export function calculateJurisdictionalTax(
       taxRegime = "standard_with_input_tax";
     }
   } else if (norm === "PUNJAB") {
+    tariffCode = options.tariffCode || "9815.6000";
     if (options.regime === "reduced_without_input_tax") {
       ratePct = 5.0;
       taxAuthority = "PRA Reduced Rate for IT/Software (No Input Credit)";
@@ -239,31 +245,41 @@ export function calculateJurisdictionalTax(
       taxRegime = "standard_with_input_tax";
     }
   } else if (norm === "KP" || norm === "KHYBER PAKHTUNKHWA" || norm === "KPK") {
+    tariffCode = options.tariffCode || "9850.0000";
     if (options.regime === "reduced_without_input_tax") {
       ratePct = 2.0;
       taxAuthority = "KPRA Reduced Rate for IT/Software (No Input Credit)";
-      statutoryReference = "KPRA Act 2022, Second Schedule Heading 9815.6000 Reduced Column";
+      statutoryReference = "KP Finance Act 2026 & Second Schedule Heading 9850.0000 Reduced Column";
       taxRegime = "reduced_without_input_tax";
     } else {
       ratePct = 15.0;
       taxAuthority = "KPRA Khyber Pakhtunkhwa Sales Tax on Services (Standard)";
-      statutoryReference = "Khyber Pakhtunkhwa Sales Tax on Services Act, 2022, Second Schedule, Heading 9815.6000";
+      statutoryReference = "Khyber Pakhtunkhwa Sales Tax on Services Act, 2022, Second Schedule, Heading 9850.0000 as amended by KP Finance Act 2026";
       taxRegime = "standard_with_input_tax";
     }
   } else if (norm === "BALOCHISTAN") {
+    tariffCode = options.tariffCode || "9868.0000";
     if (options.regime === "reduced_without_input_tax") {
-      ratePct = 3.0;
-      taxAuthority = "BRA Reduced Rate for IT/Software (No Input Credit)";
-      statutoryReference = "BRA Act 2015, Second Schedule Heading 9815.6000";
-      taxRegime = "reduced_without_input_tax";
+      if (options.effectiveDate && options.effectiveDate < "2026-07-01") {
+        ratePct = 3.0;
+        taxAuthority = "BRA Historical Reduced Rate for IT/Software (Pre-2026)";
+        statutoryReference = "Balochistan Sales Tax on Services Act, 2015, Second Schedule (historical interval prior to Finance Act 2026)";
+        taxRegime = "reduced_without_input_tax";
+      } else {
+        ratePct = 6.0;
+        taxAuthority = "BRA Reduced Rate for IT/Software (No Input Credit)";
+        statutoryReference = "Balochistan Finance Act 2026 & Second Schedule Heading 9868.0000 Reduced Rate Column";
+        taxRegime = "reduced_without_input_tax";
+      }
     } else {
       ratePct = 15.0;
-      taxAuthority = "BRA Balochistan Sales Tax on Services (Standard)";
-      statutoryReference = "Balochistan Sales Tax on Services Act, 2015, Second Schedule, Heading 9815.6000";
+      taxAuthority = "BRA Balochistan Sales Tax on Services (Standard SaaS)";
+      statutoryReference = "Balochistan Sales Tax on Services Act, 2015, Second Schedule, Heading 9868.0000 as amended by Balochistan Finance Act 2026";
       taxRegime = "standard_with_input_tax";
     }
   } else {
     // Federal / ICT
+    tariffCode = options.tariffCode || "9815.6000";
     if (options.regime === "reduced_without_input_tax") {
       ratePct = 5.0;
       taxAuthority = "ICT Reduced Rate for IT Services (PSEB Certified)";
@@ -303,6 +319,7 @@ export function calculateJurisdictionalTax(
     totalAmount,
     taxAuthority,
     jurisdiction: isExport ? "EXPORT" : norm,
+    tariffCode,
     taxableBase,
     isTaxInclusive: Boolean(options.isTaxInclusive),
     taxRegime,

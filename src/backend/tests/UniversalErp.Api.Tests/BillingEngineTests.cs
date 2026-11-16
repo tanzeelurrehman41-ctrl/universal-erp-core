@@ -67,62 +67,116 @@ public sealed class BillingEngineTests
     // ── Service-Specific Statutory Classification & Place of Provision Tests ─
 
     [Theory]
-    [InlineData("SINDH", "SRB", 15.0, "Sindh Sales Tax on Services Act, 2011, Sec 8(1) as amended by Sindh Finance Act 2024")]
-    [InlineData("PUNJAB", "PRA", 16.0, "Punjab Sales Tax on Services Act, 2012, Second Schedule, Heading 9815.6000")]
-    [InlineData("FEDERAL", "FBR_ICT", 15.0, "Islamabad Capital Territory (Tax on Services) Ordinance, 2001, Schedule Table, Heading 9815.6000")]
-    [InlineData("KP", "KPRA", 15.0, "Khyber Pakhtunkhwa Sales Tax on Services Act, 2022, Second Schedule, Heading 9815.6000")]
-    [InlineData("BALOCHISTAN", "BRA", 15.0, "Balochistan Sales Tax on Services Act, 2015, Second Schedule, Heading 9815.6000")]
+    [InlineData("SINDH", "SRB", 15.0, "9815.6000", "Sindh Sales Tax on Services Act, 2011, Sec 8(1) as amended by Sindh Finance Act 2024")]
+    [InlineData("PUNJAB", "PRA", 16.0, "9815.6000", "Punjab Sales Tax on Services Act, 2012, Second Schedule, Heading 9815.6000")]
+    [InlineData("FEDERAL", "FBR_ICT", 15.0, "9815.6000", "Islamabad Capital Territory (Tax on Services) Ordinance, 2001, Schedule Table, Heading 9815.6000")]
+    [InlineData("KP", "KPRA", 15.0, "9850.0000", "Khyber Pakhtunkhwa Sales Tax on Services Act, 2022, Second Schedule, Heading 9850.0000 as amended by KP Finance Act 2026")]
+    [InlineData("BALOCHISTAN", "BRA", 15.0, "9868.0000", "Balochistan Sales Tax on Services Act, 2015, Second Schedule, Heading 9868.0000 as amended by Balochistan Finance Act 2026")]
     public void ResolveStatutoryTaxRule_StandardSaaSWithInputTax_ResolvesCorrectJurisdictionAndAuthority(
-        string province, string expectedAuthority, decimal expectedRate, string expectedRef)
+        string province, string expectedAuthority, decimal expectedRate, string expectedTariff, string expectedRef)
     {
         var result = _billing.ResolveStatutoryTaxRule(new BillingEngine.TaxResolutionRequest(
             CountryCode: "PK",
             ProvinceState: province,
-            TariffCode: "9815.6000",
+            TariffCode: null,
             ProviderElectedReducedRateWithoutInputTax: false));
 
         Assert.Equal(expectedAuthority, result.Authority);
         Assert.Equal(expectedRate, result.RatePercentage);
+        Assert.Equal(expectedTariff, result.TariffCode);
         Assert.Equal("standard_with_input_tax", result.TaxRegime);
         Assert.True(result.InputTaxAllowable);
         Assert.Contains(expectedRef, result.StatutoryReference);
     }
 
     [Theory]
-    [InlineData("SINDH", "SRB", 3.0)]       // SRB 3% without input tax credit
-    [InlineData("PUNJAB", "PRA", 5.0)]     // PRA 5% without input tax credit
-    [InlineData("FEDERAL", "FBR_ICT", 5.0)] // ICT 5% for PSEB certified IT services
-    [InlineData("KP", "KPRA", 2.0)]        // KPRA 2% without input tax credit
-    [InlineData("BALOCHISTAN", "BRA", 3.0)] // BRA 3% without input tax credit
+    [InlineData("SINDH", "SRB", 3.0, "9815.6000")]       // SRB 3% without input tax credit
+    [InlineData("PUNJAB", "PRA", 5.0, "9815.6000")]     // PRA 5% without input tax credit
+    [InlineData("FEDERAL", "FBR_ICT", 5.0, "9815.6000")] // ICT 5% for PSEB certified IT services
+    [InlineData("KP", "KPRA", 2.0, "9850.0000")]        // KPRA 2% under KP Finance Act 2026 Heading 9850.0000
+    [InlineData("BALOCHISTAN", "BRA", 6.0, "9868.0000")] // BRA 6% under Balochistan Finance Act 2026 Heading 9868.0000
     public void ResolveStatutoryTaxRule_ConditionalReducedRates_AppliesWhenElectedWithoutInputCredit(
-        string province, string expectedAuthority, decimal expectedRate)
+        string province, string expectedAuthority, decimal expectedRate, string expectedTariff)
     {
+        var modernDate = new DateTimeOffset(2026, 11, 16, 0, 0, 0, TimeSpan.Zero);
         var result = _billing.ResolveStatutoryTaxRule(new BillingEngine.TaxResolutionRequest(
             CountryCode: "PK",
             ProvinceState: province,
-            TariffCode: "9815.6000",
-            ProviderElectedReducedRateWithoutInputTax: true));
+            TariffCode: null,
+            ProviderElectedReducedRateWithoutInputTax: true,
+            AsOfDate: modernDate));
 
         Assert.Equal(expectedAuthority, result.Authority);
         Assert.Equal(expectedRate, result.RatePercentage);
+        Assert.Equal(expectedTariff, result.TariffCode);
         Assert.Equal("reduced_without_input_tax", result.TaxRegime);
         Assert.False(result.InputTaxAllowable);
         Assert.NotNull(result.EligibilityConditions);
     }
 
     [Fact]
-    public void ResolveStatutoryTaxRule_IneligibleOrUnelectedReducedRate_FallsBackToStandard15PercentSindh()
+    public void ResolveStatutoryTaxRule_BalochistanHistoricalPre2026_ResolvesHistorical3Percent()
     {
-        // Provider does NOT elect to surrender input tax credit -> MUST NOT receive 3% reduced rate
+        var historicalDate = new DateTimeOffset(2026, 5, 15, 0, 0, 0, TimeSpan.Zero);
         var result = _billing.ResolveStatutoryTaxRule(new BillingEngine.TaxResolutionRequest(
             CountryCode: "PK",
-            ProvinceState: "SINDH",
-            TariffCode: "9815.6000",
-            ProviderElectedReducedRateWithoutInputTax: false));
+            ProvinceState: "BALOCHISTAN",
+            ProviderElectedReducedRateWithoutInputTax: true,
+            AsOfDate: historicalDate));
 
-        Assert.Equal(15.0m, result.RatePercentage);
-        Assert.Equal("standard_with_input_tax", result.TaxRegime);
-        Assert.True(result.InputTaxAllowable);
+        Assert.Equal("BRA", result.Authority);
+        Assert.Equal(3.0m, result.RatePercentage);
+        Assert.Equal("9868.0000", result.TariffCode);
+        Assert.Equal("reduced_without_input_tax", result.TaxRegime);
+        Assert.False(result.InputTaxAllowable);
+        Assert.Contains("historical interval prior to Finance Act 2026", result.StatutoryReference);
+    }
+
+    [Fact]
+    public void ResolveStatutoryTaxRule_BalochistanFinanceAct2026_ResolvesModern6PercentReducedRate()
+    {
+        var modernDate = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var result = _billing.ResolveStatutoryTaxRule(new BillingEngine.TaxResolutionRequest(
+            CountryCode: "PK",
+            ProvinceState: "BALOCHISTAN",
+            ProviderElectedReducedRateWithoutInputTax: true,
+            AsOfDate: modernDate));
+
+        Assert.Equal("BRA", result.Authority);
+        Assert.Equal(6.0m, result.RatePercentage);
+        Assert.Equal("9868.0000", result.TariffCode);
+        Assert.Equal("reduced_without_input_tax", result.TaxRegime);
+        Assert.False(result.InputTaxAllowable);
+        Assert.Contains("Balochistan Finance Act 2026", result.StatutoryReference);
+    }
+
+    [Fact]
+    public void ResolveStatutoryTaxRule_IneligibleOrUnelectedReducedRate_FallsBackToStandardRates()
+    {
+        // Provider does NOT elect to surrender input tax credit -> MUST NOT receive reduced rates
+        var sindhResult = _billing.ResolveStatutoryTaxRule(new BillingEngine.TaxResolutionRequest(
+            CountryCode: "PK",
+            ProvinceState: "SINDH",
+            ProviderElectedReducedRateWithoutInputTax: false));
+        Assert.Equal(15.0m, sindhResult.RatePercentage);
+        Assert.Equal("9815.6000", sindhResult.TariffCode);
+        Assert.True(sindhResult.InputTaxAllowable);
+
+        var balochistanResult = _billing.ResolveStatutoryTaxRule(new BillingEngine.TaxResolutionRequest(
+            CountryCode: "PK",
+            ProvinceState: "BALOCHISTAN",
+            ProviderElectedReducedRateWithoutInputTax: false));
+        Assert.Equal(15.0m, balochistanResult.RatePercentage);
+        Assert.Equal("9868.0000", balochistanResult.TariffCode);
+        Assert.True(balochistanResult.InputTaxAllowable);
+
+        var kpResult = _billing.ResolveStatutoryTaxRule(new BillingEngine.TaxResolutionRequest(
+            CountryCode: "PK",
+            ProvinceState: "KP",
+            ProviderElectedReducedRateWithoutInputTax: false));
+        Assert.Equal(15.0m, kpResult.RatePercentage);
+        Assert.Equal("9850.0000", kpResult.TariffCode);
+        Assert.True(kpResult.InputTaxAllowable);
     }
 
     [Fact]
