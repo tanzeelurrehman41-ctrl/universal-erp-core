@@ -15,7 +15,35 @@ public sealed class BillingEngine
         decimal CreditsApplied,
         decimal TaxRatePercentage,
         decimal TaxAmount,
-        decimal TotalAmount);
+        decimal TotalAmount,
+        bool IsTaxInclusive = false);
+
+    public sealed record TaxResolutionRequest(
+        string CountryCode,
+        string? ProvinceState,
+        string TariffCode = "9815.6000",
+        string TaxRegime = "standard_with_input_tax",
+        bool IsExport = false,
+        bool HasValidForeignRemittanceProof = false,
+        bool ProviderElectedReducedRateWithoutInputTax = false,
+        DateTimeOffset? AsOfDate = null);
+
+    public sealed record TaxResolutionResult(
+        string Jurisdiction,
+        string Authority,
+        string StatutoryReference,
+        string TariffCode,
+        string TaxRegime,
+        decimal RatePercentage,
+        bool InputTaxAllowable,
+        string? EligibilityConditions);
+
+    public sealed record CreditNoteCalculationResult(
+        decimal RefundSubtotal,
+        decimal TaxReversed,
+        decimal TotalCreditNoteAmount,
+        decimal TaxRatePercentage,
+        bool IsTaxInclusive);
 
     public ProrationResult CalculateProration(
         decimal oldBasePrice,
@@ -50,6 +78,10 @@ public sealed class BillingEngine
             TotalPeriodDays: totalDays);
     }
 
+    /// <summary>
+    /// Resolves statutory sales tax rate by jurisdiction.
+    /// Standard Sindh rate is verified at 15.00% under Sindh Finance Act 2024 / SSTS Act 2011 Sec 8(1).
+    /// </summary>
     public decimal ResolveTaxRate(string countryCode, string? provinceState)
     {
         if (!string.Equals(countryCode, "PK", StringComparison.OrdinalIgnoreCase))
@@ -60,30 +92,230 @@ public sealed class BillingEngine
         var province = provinceState?.ToUpperInvariant().Trim() ?? "FEDERAL";
         return province switch
         {
-            "PUNJAB" => 16.0000m,      // Punjab Revenue Authority (PRA)
-            "SINDH" => 13.0000m,       // Sindh Revenue Board (SRB)
-            "KP" or "KPK" or "KHYBER_PAKHTUNKHWA" => 15.0000m, // KPRA
-            "BALOCHISTAN" => 15.0000m, // BRA
-            _ => 15.0000m              // ICT Federal Sales Tax on Services
+            "PUNJAB" => 16.0000m,                               // PRA Punjab Sales Tax on Services (Standard SaaS)
+            "SINDH" => 15.0000m,                                // SRB Sindh Sales Tax on Services (Standard SaaS, Sindh Finance Act 2024)
+            "KP" or "KPK" or "KHYBER_PAKHTUNKHWA" => 15.0000m,  // KPRA Sales Tax on Services
+            "BALOCHISTAN" => 15.0000m,                          // BRA Balochistan Sales Tax on Services
+            _ => 15.0000m                                       // ICT Federal Sales Tax on Services
         };
     }
 
+    /// <summary>
+    /// Comprehensive statutory tax resolution engine taking into account:
+    /// - Service classification (Tariff heading 9815.6000 / SaaS)
+    /// - Place of provision (Customer jurisdiction)
+    /// - Standard vs. conditional reduced rate (with vs. without input tax credit)
+    /// - Effective-dated intervals (e.g. Sindh 13% pre-July 2024 vs 15% post-July 2024)
+    /// - Export of services zero-rating (remittance in foreign exchange)
+    /// </summary>
+    public TaxResolutionResult ResolveStatutoryTaxRule(TaxResolutionRequest request)
+    {
+        var country = request.CountryCode.ToUpperInvariant().Trim();
+        var province = request.ProvinceState?.ToUpperInvariant().Trim() ?? "FEDERAL";
+        var asOf = request.AsOfDate ?? DateTimeOffset.UtcNow;
+
+        // 1. Export of Services Check (Place of provision outside Pakistan + foreign exchange proceeds)
+        if (request.IsExport || country != "PK")
+        {
+            if (request.HasValidForeignRemittanceProof || country != "PK")
+            {
+                return new TaxResolutionResult(
+                    Jurisdiction: "EXPORT",
+                    Authority: "FBR_PROVINCIAL_HARMONIZED",
+                    StatutoryReference: "SRB / PRA / KPRA / FBR Place of Provision of Services Rules (Export Zero-Rating)",
+                    TariffCode: request.TariffCode,
+                    TaxRegime: "export_zero_rated",
+                    RatePercentage: 0.0000m,
+                    InputTaxAllowable: true,
+                    EligibilityConditions: "Customer located outside Pakistan, benefit consumed outside Pakistan, and proceeds received via banking channel in convertible foreign exchange (SBP e-PRC).");
+            }
+        }
+
+        // 2. Provincial & Federal Jurisdictional Resolution
+        switch (province)
+        {
+            case "SINDH":
+                // Historical interval check (Pre-July 1, 2024 Sindh standard rate was 13%)
+                if (asOf < new DateTimeOffset(2024, 7, 1, 0, 0, 0, TimeSpan.Zero))
+                {
+                    return new TaxResolutionResult(
+                        Jurisdiction: "SINDH",
+                        Authority: "SRB",
+                        StatutoryReference: "Sindh Sales Tax on Services Act, 2011, Sec 8(1) (pre-2024 interval)",
+                        TariffCode: request.TariffCode,
+                        TaxRegime: "standard_with_input_tax",
+                        RatePercentage: 13.0000m,
+                        InputTaxAllowable: true,
+                        EligibilityConditions: "Historical rate interval prior to Sindh Finance Act 2024.");
+                }
+
+                // Reduced rate election check (3% without input tax credit)
+                if (request.ProviderElectedReducedRateWithoutInputTax)
+                {
+                    return new TaxResolutionResult(
+                        Jurisdiction: "SINDH",
+                        Authority: "SRB",
+                        StatutoryReference: "SRB Notification No. SRB-3-4/7/2013 as amended & Second Schedule Heading 9815.6000",
+                        TariffCode: request.TariffCode,
+                        TaxRegime: "reduced_without_input_tax",
+                        RatePercentage: 3.0000m,
+                        InputTaxAllowable: false,
+                        EligibilityConditions: "Mandatory conditions: Service provider must formally elect this regime and surrender all input tax credit, adjustments, and refunds. Cannot be automatically assigned.");
+                }
+
+                // Standard Rate: 15.00% under Sindh Finance Act 2024
+                return new TaxResolutionResult(
+                    Jurisdiction: "SINDH",
+                    Authority: "SRB",
+                    StatutoryReference: "Sindh Sales Tax on Services Act, 2011, Sec 8(1) as amended by Sindh Finance Act 2024",
+                    TariffCode: request.TariffCode,
+                    TaxRegime: "standard_with_input_tax",
+                    RatePercentage: 15.0000m,
+                    InputTaxAllowable: true,
+                    EligibilityConditions: "Standard statutory rate with full input tax credit and adjustment rights under SRB rules.");
+
+            case "PUNJAB":
+                if (request.ProviderElectedReducedRateWithoutInputTax)
+                {
+                    return new TaxResolutionResult(
+                        Jurisdiction: "PUNJAB",
+                        Authority: "PRA",
+                        StatutoryReference: "PRA Notification No. SO(TAX)1-1/2020 & Second Schedule Heading 9815.6000",
+                        TariffCode: request.TariffCode,
+                        TaxRegime: "reduced_without_input_tax",
+                        RatePercentage: 5.0000m,
+                        InputTaxAllowable: false,
+                        EligibilityConditions: "Conditional upon formal election to forgo input tax credit under PRA Special Procedure Rules.");
+                }
+
+                return new TaxResolutionResult(
+                    Jurisdiction: "PUNJAB",
+                    Authority: "PRA",
+                    StatutoryReference: "Punjab Sales Tax on Services Act, 2012, Second Schedule, Heading 9815.6000",
+                    TariffCode: request.TariffCode,
+                    TaxRegime: "standard_with_input_tax",
+                    RatePercentage: 16.0000m,
+                    InputTaxAllowable: true,
+                    EligibilityConditions: "Standard statutory rate with full input tax credit.");
+
+            case "KP" or "KPK" or "KHYBER_PAKHTUNKHWA":
+                if (request.ProviderElectedReducedRateWithoutInputTax)
+                {
+                    return new TaxResolutionResult(
+                        Jurisdiction: "KP",
+                        Authority: "KPRA",
+                        StatutoryReference: "Khyber Pakhtunkhwa Sales Tax on Services Act, 2022, Second Schedule, Heading 9815.6000 Reduced Column",
+                        TariffCode: request.TariffCode,
+                        TaxRegime: "reduced_without_input_tax",
+                        RatePercentage: 2.0000m,
+                        InputTaxAllowable: false,
+                        EligibilityConditions: "Conditional on no input tax credit claimed.");
+                }
+
+                return new TaxResolutionResult(
+                    Jurisdiction: "KP",
+                    Authority: "KPRA",
+                    StatutoryReference: "Khyber Pakhtunkhwa Sales Tax on Services Act, 2022, Second Schedule, Heading 9815.6000",
+                    TariffCode: request.TariffCode,
+                    TaxRegime: "standard_with_input_tax",
+                    RatePercentage: 15.0000m,
+                    InputTaxAllowable: true,
+                    EligibilityConditions: "Standard rate with input tax credit.");
+
+            case "BALOCHISTAN":
+                if (request.ProviderElectedReducedRateWithoutInputTax)
+                {
+                    return new TaxResolutionResult(
+                        Jurisdiction: "BALOCHISTAN",
+                        Authority: "BRA",
+                        StatutoryReference: "Balochistan Sales Tax on Services Act, 2015, Second Schedule, Heading 9815.6000 Reduced Rate",
+                        TariffCode: request.TariffCode,
+                        TaxRegime: "reduced_without_input_tax",
+                        RatePercentage: 3.0000m,
+                        InputTaxAllowable: false,
+                        EligibilityConditions: "Conditional on no input tax credit claimed.");
+                }
+
+                return new TaxResolutionResult(
+                    Jurisdiction: "BALOCHISTAN",
+                    Authority: "BRA",
+                    StatutoryReference: "Balochistan Sales Tax on Services Act, 2015, Second Schedule, Heading 9815.6000",
+                    TariffCode: request.TariffCode,
+                    TaxRegime: "standard_with_input_tax",
+                    RatePercentage: 15.0000m,
+                    InputTaxAllowable: true,
+                    EligibilityConditions: "Standard rate with input tax credit.");
+
+            default: // FEDERAL / ICT
+                if (request.ProviderElectedReducedRateWithoutInputTax)
+                {
+                    return new TaxResolutionResult(
+                        Jurisdiction: "FEDERAL",
+                        Authority: "FBR_ICT",
+                        StatutoryReference: "ICT Ordinance 2001, Table-II & S.R.O. Notifications for IT-enabled services",
+                        TariffCode: request.TariffCode,
+                        TaxRegime: "reduced_without_input_tax",
+                        RatePercentage: 5.0000m,
+                        InputTaxAllowable: false,
+                        EligibilityConditions: "Requires valid Pakistan Software Export Board (PSEB) registration and surrender of input tax adjustments.");
+                }
+
+                return new TaxResolutionResult(
+                    Jurisdiction: "FEDERAL",
+                    Authority: "FBR_ICT",
+                    StatutoryReference: "Islamabad Capital Territory (Tax on Services) Ordinance, 2001, Schedule Table, Heading 9815.6000",
+                    TariffCode: request.TariffCode,
+                    TaxRegime: "standard_with_input_tax",
+                    RatePercentage: 15.0000m,
+                    InputTaxAllowable: true,
+                    EligibilityConditions: "Standard rate for services rendered or consumed in Islamabad Capital Territory.");
+        }
+    }
+
+    /// <summary>
+    /// Computes full invoice figures supporting tax-exclusive and tax-inclusive pricing.
+    /// </summary>
     public InvoiceCalculationResult CalculateInvoice(
         decimal basePrice,
         decimal overageCharges,
         decimal discountAmount,
         decimal availableCredits,
-        decimal taxRatePct)
+        decimal taxRatePct,
+        bool isTaxInclusive = false)
     {
         var subtotal = Math.Max(0.00m, basePrice + overageCharges);
         var totalDiscount = Math.Min(subtotal, Math.Max(0.00m, discountAmount));
         var afterDiscount = subtotal - totalDiscount;
 
         var creditsApplied = Math.Min(afterDiscount, Math.Max(0.00m, availableCredits));
-        var taxableBase = Math.Max(0.00m, afterDiscount - creditsApplied);
+        var netChargeable = Math.Max(0.00m, afterDiscount - creditsApplied);
 
-        var taxAmount = Math.Round(taxableBase * (taxRatePct / 100.0m), 2);
-        var total = taxableBase + taxAmount;
+        decimal taxableBase;
+        decimal taxAmount;
+        decimal total;
+
+        if (isTaxInclusive)
+        {
+            if (taxRatePct > 0)
+            {
+                // NetChargeable is inclusive of tax: TaxableBase = NetChargeable / (1 + Rate / 100)
+                taxableBase = Math.Round(netChargeable / (1.0m + (taxRatePct / 100.0m)), 2);
+                taxAmount = netChargeable - taxableBase;
+                total = netChargeable;
+            }
+            else
+            {
+                taxableBase = netChargeable;
+                taxAmount = 0.00m;
+                total = netChargeable;
+            }
+        }
+        else
+        {
+            taxableBase = netChargeable;
+            taxAmount = Math.Round(taxableBase * (taxRatePct / 100.0m), 2);
+            total = taxableBase + taxAmount;
+        }
 
         return new InvoiceCalculationResult(
             Subtotal: subtotal,
@@ -91,7 +323,50 @@ public sealed class BillingEngine
             CreditsApplied: creditsApplied,
             TaxRatePercentage: taxRatePct,
             TaxAmount: taxAmount,
-            TotalAmount: total);
+            TotalAmount: total,
+            IsTaxInclusive: isTaxInclusive);
+    }
+
+    /// <summary>
+    /// Computes formal credit note figures for service refunds or proration credit adjustments.
+    /// </summary>
+    public CreditNoteCalculationResult CalculateCreditNote(
+        decimal refundAmount,
+        decimal taxRatePercentage,
+        bool isTaxInclusive = false)
+    {
+        decimal refundSubtotal;
+        decimal taxReversed;
+        decimal totalCreditNote;
+
+        if (isTaxInclusive)
+        {
+            if (taxRatePercentage > 0)
+            {
+                refundSubtotal = Math.Round(refundAmount / (1.0m + (taxRatePercentage / 100.0m)), 2);
+                taxReversed = refundAmount - refundSubtotal;
+                totalCreditNote = refundAmount;
+            }
+            else
+            {
+                refundSubtotal = refundAmount;
+                taxReversed = 0.00m;
+                totalCreditNote = refundAmount;
+            }
+        }
+        else
+        {
+            refundSubtotal = refundAmount;
+            taxReversed = Math.Round(refundSubtotal * (taxRatePercentage / 100.0m), 2);
+            totalCreditNote = refundSubtotal + taxReversed;
+        }
+
+        return new CreditNoteCalculationResult(
+            RefundSubtotal: refundSubtotal,
+            TaxReversed: taxReversed,
+            TotalCreditNoteAmount: totalCreditNote,
+            TaxRatePercentage: taxRatePercentage,
+            IsTaxInclusive: isTaxInclusive);
     }
 
     public string GenerateInvoiceNumber(string tenantCode, DateTimeOffset asOfDate)

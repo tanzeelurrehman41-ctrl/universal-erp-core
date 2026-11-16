@@ -283,3 +283,24 @@ public sealed record SaaSPlatformAlertDto(
     string Message,
     bool IsAcknowledged,
     DateTimeOffset CreatedAt);
+
+// ── Statutory Tax Classification Records ────────────────────────────────────
+
+public sealed record BillingTaxRuleDto(
+    Guid Id,
+    string CountryCode,
+    string ProvinceState,
+    string TariffCode,
+    string ServiceCategory,
+    string TaxName,
+    decimal RatePercentage,
+    string TaxRegime,
+    string CustomerType,
+    string StatutoryAuthority,
+    string StatutoryReference,
+    string? EligibilityConditions,
+    bool InputTaxAllowable,
+    decimal WithholdingRatePercentage,
+    DateTimeOffset EffectiveFrom,
+    DateTimeOffset? EffectiveUntil,
+    bool IsActive);

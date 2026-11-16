@@ -343,10 +343,10 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
             tenantId: id,
             invoiceNumber: "INV-2026-0001",
             subtotal: 15000,
-            taxAmount: 1950,
+            taxAmount: 2250,
             discountAmount: 0,
             creditsApplied: 0,
-            totalAmount: 16950,
+            totalAmount: 17250,
             currencyCode: "PKR",
             status: "paid",
             issuedAt: "2026-11-01T00:00:00Z",
@@ -354,7 +354,7 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
             paidAt: "2026-11-02T14:20:00Z",
             lines: [
               { lineNumber: 1, description: "Starter SME Plan Subscription (1 Month)", lineType: "base_plan", quantity: 1, unitPrice: 15000, amount: 15000 },
-              { lineNumber: 2, description: "SRB Sindh Sales Tax on Services (13%)", lineType: "tax", quantity: 1, unitPrice: 1950, amount: 1950 }
+              { lineNumber: 2, description: "SRB Sindh Sales Tax on Services (15% Standard)", lineType: "tax", quantity: 1, unitPrice: 2250, amount: 2250 }
             ]
           },
           {
@@ -362,17 +362,17 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
             tenantId: id,
             invoiceNumber: "INV-2026-0002",
             subtotal: 30000,
-            taxAmount: 3900,
+            taxAmount: 4500,
             discountAmount: 0,
             creditsApplied: 0,
-            totalAmount: 33900,
+            totalAmount: 34500,
             currencyCode: "PKR",
             status: "issued",
             issuedAt: "2026-11-16T00:00:00Z",
             dueAt: "2026-11-30T00:00:00Z",
             lines: [
               { lineNumber: 1, description: "Professional Growth Plan Upgrade Proration", lineType: "proration", quantity: 1, unitPrice: 30000, amount: 30000 },
-              { lineNumber: 2, description: "SRB Sindh Sales Tax on Services (13%)", lineType: "tax", quantity: 1, unitPrice: 3900, amount: 3900 }
+              { lineNumber: 2, description: "SRB Sindh Sales Tax on Services (15% Standard)", lineType: "tax", quantity: 1, unitPrice: 4500, amount: 4500 }
             ]
           }
         ];
@@ -1088,7 +1088,7 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
                 >
                   <option value="FEDERAL">Federal / ICT (15%)</option>
                   <option value="PUNJAB">Punjab PRA (16%)</option>
-                  <option value="SINDH">Sindh SRB (13%)</option>
+                  <option value="SINDH">Sindh SRB (15% Standard / 3% Conditional Reduced)</option>
                   <option value="KP">Khyber Pakhtunkhwa KPRA (15%)</option>
                   <option value="BALOCHISTAN">Balochistan BRA (15%)</option>
                 </select>
@@ -1339,7 +1339,7 @@ export const SaaSPlatformWorkspace: React.FC<SaaSPlatformWorkspaceProps> = ({
                     <div style={{ fontSize: "15px", fontWeight: "700", color: "#0f172a" }}>{formatCurrencyPkr(netPayable)}</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: "11px", color: "#64748b" }}>With Sindh SRB Tax (13%)</div>
+                    <div style={{ fontSize: "11px", color: "#64748b" }}>With Sindh SRB Tax (15% Standard)</div>
                     <div style={{ fontSize: "15px", fontWeight: "700", color: "#2563eb" }}>{formatCurrencyPkr(tax.totalAmount)}</div>
                   </div>
                 </div>

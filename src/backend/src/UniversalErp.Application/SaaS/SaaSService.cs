@@ -310,6 +310,9 @@ public sealed class SaaSService(
     public Task<IReadOnlyList<SaaSPlatformAlertDto>> ListPlatformAlertsAsync(Guid? tenantId, bool unacknowledgedOnly, CancellationToken cancellationToken) =>
         repository.ListPlatformAlertsAsync(tenantId, unacknowledgedOnly, cancellationToken);
 
+    public Task<IReadOnlyList<BillingTaxRuleDto>> ListTaxRulesAsync(string? countryCode, string? provinceState, CancellationToken cancellationToken) =>
+        repository.ListTaxRulesAsync(countryCode, provinceState, cancellationToken);
+
     private static bool MatchesMetricCode(string metricCode, string featureCode)
     {
         if (string.Equals(metricCode, featureCode, StringComparison.OrdinalIgnoreCase))

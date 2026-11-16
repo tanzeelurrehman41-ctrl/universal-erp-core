@@ -4,6 +4,7 @@ import {
   calculateProrationCredit,
   calculateNetUpgradePayable,
   calculateJurisdictionalTax,
+  calculateCreditNote,
   evaluateQuotaStatus,
   getTenantStatusBadge,
   getSubscriptionStatusBadge,
@@ -41,7 +42,7 @@ test("calculateNetUpgradePayable calculates net payable and applies billing cred
   assert.equal(excess.excessCreditRemaining, 5000);
 });
 
-test("calculateJurisdictionalTax resolves Pakistani provincial and ICT sales tax rates", () => {
+test("calculateJurisdictionalTax resolves Pakistani provincial standard rates and verified Sindh 15%", () => {
   // Federal / ICT - 15%
   const fed = calculateJurisdictionalTax(100000, "FEDERAL");
   assert.equal(fed.ratePct, 15.0);
@@ -56,12 +57,13 @@ test("calculateJurisdictionalTax resolves Pakistani provincial and ICT sales tax
   assert.equal(punjab.totalAmount, 58000.0);
   assert.match(punjab.taxAuthority, /PRA/);
 
-  // Sindh (SRB) - 13%
+  // Sindh (SRB) Standard Rate - 15.0% (Verified under Sindh Finance Act 2024 / SSTS Act 2011 Sec 8(1))
   const sindh = calculateJurisdictionalTax(100000, "SINDH");
-  assert.equal(sindh.ratePct, 13.0);
-  assert.equal(sindh.taxAmount, 13000.0);
-  assert.equal(sindh.totalAmount, 113000.0);
+  assert.equal(sindh.ratePct, 15.0);
+  assert.equal(sindh.taxAmount, 15000.0);
+  assert.equal(sindh.totalAmount, 115000.0);
   assert.match(sindh.taxAuthority, /SRB/);
+  assert.match(sindh.statutoryReference!, /Sindh Finance Act 2024/);
 
   // Khyber Pakhtunkhwa (KPRA) - 15%
   const kp = calculateJurisdictionalTax(40000, "KP");
@@ -76,6 +78,84 @@ test("calculateJurisdictionalTax resolves Pakistani provincial and ICT sales tax
   assert.equal(balochistan.taxAmount, 3000.0);
   assert.equal(balochistan.totalAmount, 23000.0);
   assert.match(balochistan.taxAuthority, /BRA/);
+});
+
+test("calculateJurisdictionalTax resolves conditional reduced rates when opted without input tax", () => {
+  // Sindh SRB 3% reduced rate without input tax credit (SRB Notification No. SRB-3-4/7/2013)
+  const srbReduced = calculateJurisdictionalTax(100000, "SINDH", { regime: "reduced_without_input_tax" });
+  assert.equal(srbReduced.ratePct, 3.0);
+  assert.equal(srbReduced.taxAmount, 3000.0);
+  assert.equal(srbReduced.totalAmount, 103000.0);
+  assert.equal(srbReduced.taxRegime, "reduced_without_input_tax");
+
+  // Punjab PRA 5% reduced rate without input tax credit
+  const praReduced = calculateJurisdictionalTax(100000, "PUNJAB", { regime: "reduced_without_input_tax" });
+  assert.equal(praReduced.ratePct, 5.0);
+  assert.equal(praReduced.taxAmount, 5000.0);
+
+  // Federal ICT 5% reduced rate for certified IT services
+  const ictReduced = calculateJurisdictionalTax(100000, "FEDERAL", { regime: "reduced_without_input_tax" });
+  assert.equal(ictReduced.ratePct, 5.0);
+  assert.equal(ictReduced.taxAmount, 5000.0);
+
+  // KP KPRA 2% reduced rate
+  const kpReduced = calculateJurisdictionalTax(100000, "KP", { regime: "reduced_without_input_tax" });
+  assert.equal(kpReduced.ratePct, 2.0);
+  assert.equal(kpReduced.taxAmount, 2000.0);
+
+  // Balochistan BRA 3% reduced rate
+  const braReduced = calculateJurisdictionalTax(100000, "BALOCHISTAN", { regime: "reduced_without_input_tax" });
+  assert.equal(braReduced.ratePct, 3.0);
+  assert.equal(braReduced.taxAmount, 3000.0);
+});
+
+test("calculateJurisdictionalTax resolves historical rate intervals and export zero-rating", () => {
+  // Historical Sindh rate before 2024-07-01: 13.0%
+  const historical = calculateJurisdictionalTax(100000, "SINDH", { effectiveDate: "2024-05-15" });
+  assert.equal(historical.ratePct, 13.0);
+  assert.equal(historical.taxAmount, 13000.0);
+  assert.match(historical.statutoryReference!, /pre-2024 interval/);
+
+  // Export of Services (Foreign customer / remittance in foreign exchange): 0.0%
+  const exportTax = calculateJurisdictionalTax(100000, "SINDH", { isExport: true });
+  assert.equal(exportTax.ratePct, 0.0);
+  assert.equal(exportTax.taxAmount, 0.0);
+  assert.equal(exportTax.totalAmount, 100000.0);
+  assert.equal(exportTax.taxRegime, "export_zero_rated");
+});
+
+test("calculateJurisdictionalTax handles tax-inclusive pricing without rounding leakage", () => {
+  // Total PKR 115,000 tax-inclusive on 15% Sindh standard rate
+  // Base = 115,000 / 1.15 = 100,000
+  // Tax = 15,000
+  const inclusive = calculateJurisdictionalTax(115000, "SINDH", { isTaxInclusive: true });
+  assert.equal(inclusive.isTaxInclusive, true);
+  assert.equal(inclusive.taxableBase, 100000.0);
+  assert.equal(inclusive.taxAmount, 15000.0);
+  assert.equal(inclusive.totalAmount, 115000.0);
+
+  // Uneven fraction: Total PKR 100,000 tax-inclusive on 15% rate
+  // Base = round(100,000 / 1.15) = 86,956.52
+  // Tax = 100,000 - 86,956.52 = 13,043.48
+  // Total = exactly 100,000.00
+  const uneven = calculateJurisdictionalTax(100000, "SINDH", { isTaxInclusive: true });
+  assert.equal(uneven.taxableBase, 86956.52);
+  assert.equal(uneven.taxAmount, 13043.48);
+  assert.equal(uneven.totalAmount, 100000.0);
+});
+
+test("calculateCreditNote reverses subtotal and proportional sales tax", () => {
+  // Tax-exclusive credit note for PKR 20,000 refund at 15% rate
+  const creditEx = calculateCreditNote(20000, "SINDH");
+  assert.equal(creditEx.refundSubtotal, 20000.0);
+  assert.equal(creditEx.taxReversed, 3000.0);
+  assert.equal(creditEx.totalCreditNote, 23000.0);
+
+  // Tax-inclusive credit note for PKR 23,000 refund at 15% rate
+  const creditInc = calculateCreditNote(23000, "SINDH", { isTaxInclusive: true });
+  assert.equal(creditInc.refundSubtotal, 20000.0);
+  assert.equal(creditInc.taxReversed, 3000.0);
+  assert.equal(creditInc.totalCreditNote, 23000.0);
 });
 
 test("evaluateQuotaStatus evaluates limits, 80% soft warning and hard quota blocks", () => {
@@ -139,7 +219,7 @@ test("calculateInvoiceTotals computes subtotal, discounts, credits, and net paya
     { lineType: "overage", amount: 2000 },
     { lineType: "discount", amount: 2000 },
     { lineType: "credit", amount: 3000 },
-    { lineType: "tax", amount: 4320 }
+    { lineType: "tax", amount: 4500 }
   ];
 
   const totals = calculateInvoiceTotals(lines);
@@ -147,9 +227,9 @@ test("calculateInvoiceTotals computes subtotal, discounts, credits, and net paya
   assert.equal(totals.subtotal, 32000);
   assert.equal(totals.discount, 2000);
   assert.equal(totals.credit, 3000);
-  assert.equal(totals.tax, 4320);
-  // netPayable: 32000 - 2000 - 3000 + 4320 = 31320
-  assert.equal(totals.netPayable, 31320);
+  assert.equal(totals.tax, 4500);
+  // netPayable: 32000 - 2000 - 3000 + 4500 = 31500
+  assert.equal(totals.netPayable, 31500);
 });
 
 test("formatCurrencyPkr formats currency amounts with PKR identifier", () => {

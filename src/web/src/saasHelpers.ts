@@ -136,6 +136,17 @@ export type JurisdictionalTaxRate = {
   totalAmount: number;
   taxAuthority: string;
   jurisdiction: string;
+  taxableBase?: number;
+  isTaxInclusive?: boolean;
+  taxRegime?: string;
+  statutoryReference?: string;
+};
+
+export type TaxCalculationOptions = {
+  regime?: "standard_with_input_tax" | "reduced_without_input_tax" | "export_zero_rated" | string;
+  isTaxInclusive?: boolean;
+  effectiveDate?: string;
+  isExport?: boolean;
 };
 
 /**
@@ -170,40 +181,167 @@ export function calculateNetUpgradePayable(
 }
 
 /**
- * Resolves Pakistani provincial & federal sales tax on software/SaaS services.
- * FBR ICT (15%), PRA Punjab (16%), SRB Sindh (13%), KPRA KP (15%), BRA Balochistan (15%).
+ * Resolves statutory sales tax on software/SaaS services across all 5 Pakistani jurisdictions and exports:
+ * - Sindh SRB: 15% standard (Sindh Finance Act 2024 / SSTS Act 2011 Sec 8(1)); 3% conditional reduced rate without input tax.
+ * - Punjab PRA: 16% standard; 5% conditional reduced rate without input tax.
+ * - Federal ICT: 15% standard; 5% conditional reduced rate for PSEB certified providers.
+ * - KP KPRA: 15% standard; 2% conditional reduced rate.
+ * - Balochistan BRA: 15% standard; 3% conditional reduced rate.
+ * - Export of Services: 0% zero-rated / exempt under provincial Place of Provision of Services Rules.
  */
 export function calculateJurisdictionalTax(
-  subtotal: number,
-  jurisdiction = "FEDERAL"
+  amount: number,
+  jurisdiction = "FEDERAL",
+  options: TaxCalculationOptions = {}
 ): JurisdictionalTaxRate {
   const norm = jurisdiction.trim().toUpperCase();
+  const isExport = Boolean(options.isExport || norm === "EXPORT" || norm === "INTERNATIONAL");
+
   let ratePct = 15.0;
   let taxAuthority = "FBR ICT Sales Tax on Services";
+  let statutoryReference = "Islamabad Capital Territory (Tax on Services) Ordinance, 2001, Schedule Table, Heading 9815.6000";
+  let taxRegime = "standard_with_input_tax";
 
-  if (norm === "PUNJAB") {
-    ratePct = 16.0;
-    taxAuthority = "PRA Punjab Sales Tax on Services";
+  if (isExport) {
+    ratePct = 0.0;
+    taxAuthority = "FBR / Provincial Harmonized Place of Provision Rules";
+    statutoryReference = "SRB / PRA / KPRA / FBR Place of Provision of Services Rules (Export Zero-Rating)";
+    taxRegime = "export_zero_rated";
   } else if (norm === "SINDH") {
-    ratePct = 13.0;
-    taxAuthority = "SRB Sindh Sales Tax on Services";
-  } else if (norm === "KP" || norm === "KHYBER PAKHTUNKHWA") {
-    ratePct = 15.0;
-    taxAuthority = "KPRA Khyber Pakhtunkhwa Sales Tax on Services";
+    // Check historical rate interval (Pre-July 1, 2024 was 13%)
+    if (options.effectiveDate && options.effectiveDate < "2024-07-01") {
+      ratePct = 13.0;
+      taxAuthority = "SRB Sindh Sales Tax on Services (Historical Standard)";
+      statutoryReference = "Sindh Sales Tax on Services Act, 2011, Sec 8(1) (pre-2024 interval)";
+      taxRegime = "standard_with_input_tax";
+    } else if (options.regime === "reduced_without_input_tax") {
+      ratePct = 3.0;
+      taxAuthority = "SRB Reduced Rate for IT/Software (No Input Credit)";
+      statutoryReference = "SRB Notification No. SRB-3-4/7/2013 as amended & Second Schedule Heading 9815.6000";
+      taxRegime = "reduced_without_input_tax";
+    } else {
+      // Standard Sindh rate verified at 15.0% under Sindh Finance Act 2024
+      ratePct = 15.0;
+      taxAuthority = "SRB Sindh Sales Tax on Services (Standard SaaS)";
+      statutoryReference = "Sindh Sales Tax on Services Act, 2011, Sec 8(1) as amended by Sindh Finance Act 2024";
+      taxRegime = "standard_with_input_tax";
+    }
+  } else if (norm === "PUNJAB") {
+    if (options.regime === "reduced_without_input_tax") {
+      ratePct = 5.0;
+      taxAuthority = "PRA Reduced Rate for IT/Software (No Input Credit)";
+      statutoryReference = "PRA Notification No. SO(TAX)1-1/2020 & Second Schedule Heading 9815.6000";
+      taxRegime = "reduced_without_input_tax";
+    } else {
+      ratePct = 16.0;
+      taxAuthority = "PRA Punjab Sales Tax on Services (Standard SaaS)";
+      statutoryReference = "Punjab Sales Tax on Services Act, 2012, Second Schedule, Heading 9815.6000";
+      taxRegime = "standard_with_input_tax";
+    }
+  } else if (norm === "KP" || norm === "KHYBER PAKHTUNKHWA" || norm === "KPK") {
+    if (options.regime === "reduced_without_input_tax") {
+      ratePct = 2.0;
+      taxAuthority = "KPRA Reduced Rate for IT/Software (No Input Credit)";
+      statutoryReference = "KPRA Act 2022, Second Schedule Heading 9815.6000 Reduced Column";
+      taxRegime = "reduced_without_input_tax";
+    } else {
+      ratePct = 15.0;
+      taxAuthority = "KPRA Khyber Pakhtunkhwa Sales Tax on Services (Standard)";
+      statutoryReference = "Khyber Pakhtunkhwa Sales Tax on Services Act, 2022, Second Schedule, Heading 9815.6000";
+      taxRegime = "standard_with_input_tax";
+    }
   } else if (norm === "BALOCHISTAN") {
-    ratePct = 15.0;
-    taxAuthority = "BRA Balochistan Sales Tax on Services";
+    if (options.regime === "reduced_without_input_tax") {
+      ratePct = 3.0;
+      taxAuthority = "BRA Reduced Rate for IT/Software (No Input Credit)";
+      statutoryReference = "BRA Act 2015, Second Schedule Heading 9815.6000";
+      taxRegime = "reduced_without_input_tax";
+    } else {
+      ratePct = 15.0;
+      taxAuthority = "BRA Balochistan Sales Tax on Services (Standard)";
+      statutoryReference = "Balochistan Sales Tax on Services Act, 2015, Second Schedule, Heading 9815.6000";
+      taxRegime = "standard_with_input_tax";
+    }
+  } else {
+    // Federal / ICT
+    if (options.regime === "reduced_without_input_tax") {
+      ratePct = 5.0;
+      taxAuthority = "ICT Reduced Rate for IT Services (PSEB Certified)";
+      statutoryReference = "ICT Ordinance 2001, Table-II & S.R.O. Notifications for IT-enabled services";
+      taxRegime = "reduced_without_input_tax";
+    } else {
+      ratePct = 15.0;
+      taxAuthority = "ICT Sales Tax on IT/SaaS Services (Standard)";
+      statutoryReference = "Islamabad Capital Territory (Tax on Services) Ordinance, 2001, Schedule Table, Heading 9815.6000";
+      taxRegime = "standard_with_input_tax";
+    }
   }
 
-  const taxAmount = Math.round(subtotal * (ratePct / 100) * 100) / 100;
-  const totalAmount = Math.round((subtotal + taxAmount) * 100) / 100;
+  let taxableBase = amount;
+  let taxAmount = 0;
+  let totalAmount = amount;
+
+  if (options.isTaxInclusive) {
+    if (ratePct > 0) {
+      taxableBase = Math.round((amount / (1 + ratePct / 100)) * 100) / 100;
+      taxAmount = Math.round((amount - taxableBase) * 100) / 100;
+      totalAmount = amount;
+    } else {
+      taxableBase = amount;
+      taxAmount = 0;
+      totalAmount = amount;
+    }
+  } else {
+    taxableBase = amount;
+    taxAmount = Math.round(amount * (ratePct / 100) * 100) / 100;
+    totalAmount = Math.round((amount + taxAmount) * 100) / 100;
+  }
 
   return {
     ratePct,
     taxAmount,
     totalAmount,
     taxAuthority,
-    jurisdiction: norm
+    jurisdiction: isExport ? "EXPORT" : norm,
+    taxableBase,
+    isTaxInclusive: Boolean(options.isTaxInclusive),
+    taxRegime,
+    statutoryReference
+  };
+}
+
+/**
+ * Computes formal credit note figures for service refunds or proration credit adjustments.
+ */
+export function calculateCreditNote(
+  refundAmount: number,
+  jurisdiction = "FEDERAL",
+  options: TaxCalculationOptions = {}
+): {
+  refundSubtotal: number;
+  taxReversed: number;
+  totalCreditNote: number;
+  ratePct: number;
+  taxAuthority: string;
+} {
+  const tax = calculateJurisdictionalTax(refundAmount, jurisdiction, options);
+
+  if (options.isTaxInclusive) {
+    return {
+      refundSubtotal: tax.taxableBase ?? refundAmount,
+      taxReversed: tax.taxAmount,
+      totalCreditNote: refundAmount,
+      ratePct: tax.ratePct,
+      taxAuthority: tax.taxAuthority
+    };
+  }
+
+  return {
+    refundSubtotal: refundAmount,
+    taxReversed: tax.taxAmount,
+    totalCreditNote: tax.totalAmount,
+    ratePct: tax.ratePct,
+    taxAuthority: tax.taxAuthority
   };
 }
 

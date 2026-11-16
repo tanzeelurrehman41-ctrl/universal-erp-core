@@ -194,6 +194,18 @@ public static class SaaSPlatformEndpoints
             return Results.Ok(alerts);
         });
 
+        // ── Statutory Tax Rules & Classification Matrix ─────────────────────
+
+        group.MapGet("/tax-rules", async (
+            string? countryCode,
+            string? provinceState,
+            SaaSService service,
+            CancellationToken ct) =>
+        {
+            var rules = await service.ListTaxRulesAsync(countryCode, provinceState, ct);
+            return Results.Ok(rules);
+        });
+
         return app;
     }
 

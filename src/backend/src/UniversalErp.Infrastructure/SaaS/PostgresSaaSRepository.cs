@@ -1422,4 +1422,67 @@ public sealed class PostgresSaaSRepository : ISaaSRepository
 
         return new AdminUserBriefDto(Guid.Empty, "admin@example.com", "Administrator", "active");
     }
+
+    public async Task<IReadOnlyList<BillingTaxRuleDto>> ListTaxRulesAsync(
+        string? countryCode,
+        string? provinceState,
+        CancellationToken cancellationToken)
+    {
+        await using var conn = await OpenConnectionAsync(null, cancellationToken);
+
+        var sql = """
+            SELECT id, country_code, province_state, tariff_code, service_category, tax_name, rate_percentage,
+                   tax_regime, customer_type, statutory_authority, statutory_reference, eligibility_conditions,
+                   input_tax_allowable, withholding_rate_percentage, effective_from, effective_until, is_active
+            FROM platform.billing_tax_rules
+            WHERE 1=1
+            """;
+
+        if (!string.IsNullOrWhiteSpace(countryCode))
+        {
+            sql += " AND (country_code = @country OR country_code = 'ALL')";
+        }
+        if (!string.IsNullOrWhiteSpace(provinceState))
+        {
+            sql += " AND (province_state = @province OR province_state = 'EXPORT')";
+        }
+        sql += " ORDER BY province_state, rate_percentage DESC;";
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        if (!string.IsNullOrWhiteSpace(countryCode))
+        {
+            cmd.Parameters.AddWithValue("country", countryCode.Trim().ToUpperInvariant());
+        }
+        if (!string.IsNullOrWhiteSpace(provinceState))
+        {
+            cmd.Parameters.AddWithValue("province", provinceState.Trim().ToUpperInvariant());
+        }
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        var rules = new List<BillingTaxRuleDto>();
+
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rules.Add(new BillingTaxRuleDto(
+                Id: reader.GetGuid(0),
+                CountryCode: reader.GetString(1),
+                ProvinceState: reader.GetString(2),
+                TariffCode: reader.GetString(3),
+                ServiceCategory: reader.GetString(4),
+                TaxName: reader.GetString(5),
+                RatePercentage: reader.GetDecimal(6),
+                TaxRegime: reader.GetString(7),
+                CustomerType: reader.GetString(8),
+                StatutoryAuthority: reader.GetString(9),
+                StatutoryReference: reader.GetString(10),
+                EligibilityConditions: reader.IsDBNull(11) ? null : reader.GetString(11),
+                InputTaxAllowable: reader.GetBoolean(12),
+                WithholdingRatePercentage: reader.GetDecimal(13),
+                EffectiveFrom: reader.GetFieldValue<DateTimeOffset>(14),
+                EffectiveUntil: reader.IsDBNull(15) ? null : (DateTimeOffset?)reader.GetFieldValue<DateTimeOffset>(15),
+                IsActive: reader.GetBoolean(16)));
+        }
+
+        return rules;
+    }
 }

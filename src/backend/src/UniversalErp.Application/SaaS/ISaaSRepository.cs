@@ -52,6 +52,7 @@ public interface ISaaSRepository
     Task<SubscriptionInvoiceDto?> GetInvoiceByIdAsync(Guid invoiceId, CancellationToken cancellationToken);
     Task<SubscriptionPaymentDto> RecordPaymentAsync(SubscriptionPaymentDto payment, CancellationToken cancellationToken);
     Task<SubscriptionCreditNoteDto> IssueCreditNoteAsync(SubscriptionCreditNoteDto creditNote, CancellationToken cancellationToken);
+    Task<IReadOnlyList<BillingTaxRuleDto>> ListTaxRulesAsync(string? countryCode, string? provinceState, CancellationToken cancellationToken);
 
     // Support Access & System Alerts
     Task<SupportAccessGrantDto> GrantSupportAccessAsync(SupportAccessGrantRequest request, Guid tenantId, CancellationToken cancellationToken);
