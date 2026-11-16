@@ -4,6 +4,7 @@ import WarehouseWorkspace from "./WarehouseWorkspace";
 import PurchasingWorkspace from "./PurchasingWorkspace";
 import SalesWorkspace from "./SalesWorkspace";
 import TenancyWorkspace from "./TenancyWorkspace";
+import SaaSPlatformWorkspace from "./SaaSPlatformWorkspace";
 import FinanceWorkspace from "./FinanceWorkspace";
 import ManufacturingWorkspace from "./ManufacturingWorkspace";
 import FoundationWorkspace from "./FoundationWorkspace";
@@ -1086,7 +1087,10 @@ export default function App() {
       )}
 
       {(activeNavTab === "saas" || activeNavTab === "all") && (
-        <TenancyWorkspace />
+        <SaaSPlatformWorkspace
+          tenantId={activeWorkspace?.tenantId}
+          companyId={activeWorkspace?.companyId}
+        />
       )}
 
       {apiStatus === "offline" && (

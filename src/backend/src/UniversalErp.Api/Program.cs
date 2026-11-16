@@ -49,12 +49,15 @@ using UniversalErp.Api.Foundation;
 using UniversalErp.Api.Branches;
 using UniversalErp.Api.Consolidations;
 using UniversalErp.Api.Integrations;
+using UniversalErp.Api.SaaS;
 using UniversalErp.Application.Branches;
 using UniversalErp.Application.Consolidations;
 using UniversalErp.Application.Integrations;
+using UniversalErp.Application.SaaS;
 using UniversalErp.Infrastructure.Branches;
 using UniversalErp.Infrastructure.Consolidations;
 using UniversalErp.Infrastructure.Integrations;
+using UniversalErp.Infrastructure.SaaS;
 
 var builder = WebApplication.CreateBuilder(args);
 var isDevelopment = builder.Environment.IsDevelopment();
@@ -136,6 +139,11 @@ builder.Services.AddScoped<ConsolidationService>();
 builder.Services.AddSingleton<WebhookSigningEngine>();
 builder.Services.AddScoped<IIntegrationsRepository, PostgresIntegrationsRepository>();
 builder.Services.AddScoped<IntegrationsService>();
+builder.Services.AddSingleton<EntitlementEnforcementEngine>();
+builder.Services.AddSingleton<BillingEngine>();
+builder.Services.AddSingleton<IPaymentProvider, SandboxPaymentProvider>();
+builder.Services.AddScoped<ISaaSRepository, PostgresSaaSRepository>();
+builder.Services.AddScoped<SaaSService>();
 
 var authProvider = builder.Configuration["Authentication:Provider"]?.Trim();
 var isAuthExplicitlyConfigured = !string.IsNullOrWhiteSpace(authProvider);
@@ -446,7 +454,7 @@ var moduleCatalog = new[]
     new { id = "security", name = "Security and access", status = "In progress", description = "OIDC bearer validation and live membership/permission checks; user provisioning and client sign-in remain." },
     new { id = "offline", name = "Offline sync", status = "In progress", description = "Encrypted local journals, authenticated device grants, a durable receipt operation inbox, atomic snapshot cursors, and a paged change feed; event-level merge and product inbox processing remain." },
     new { id = "reporting", name = "Reporting", status = "Architecture only", description = "Approved datasets, dashboards, exports, and scheduled reports." },
-    new { id = "saas", name = "SaaS platform", status = "In progress", description = "Tenant provisioning, plans, entitlements, subscriptions, and billing." },
+    new { id = "saas", name = "SaaS Platform & Tenant Management", status = "Active", description = "Automated tenant provisioning, subscription lifecycle, entitlement enforcement, usage metering, and billing engine." },
     new { id = "branches", name = "Multi-Branch Operations", status = "Active", description = "Hierarchical branch master, operating locations, POS terminal binding, and branch switcher." },
     new { id = "consolidation", name = "Intercompany & Group Consolidation", status = "Active", description = "Intercompany relationships, stock transfers, reciprocal Due-To/Due-From clearing, and multi-entity elimination engine." },
     new { id = "integrations", name = "External Integrations Hub", status = "Active", description = "HMAC-SHA256 authenticated webhooks, exponential retry backoff, dead-letter state, and API partner access." },
@@ -618,6 +626,7 @@ app.MapAnalyticsEndpoints(isDevelopment);
 app.MapBranchEndpoints(isDevelopment);
 app.MapConsolidationEndpoints(isDevelopment);
 app.MapIntegrationEndpoints(isDevelopment);
+app.MapSaaSEndpoints(isDevelopment);
 productApi.MapFoundationEndpoints();
 
 app.MapGet("/", () => Results.Ok(new
