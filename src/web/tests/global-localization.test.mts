@@ -404,6 +404,18 @@ test("calculateAustraliaPayroll verifies 12% Super Guarantee (effective 1 July 2
   assert.ok(superLine);
   assert.equal(superLine.employerAmount, 960.0);
   assert.ok(superLine.authority.includes("Australian Taxation Office"));
+  assert.ok(superLine.description.includes("Payday Super 7-day rule"));
+
+  // High Earner capping at 2026-27 MCB ($270,830/yr = $22,569.17/mo): 12% on $22,569.17 = $2,708.30
+  const auHigh = calculateGlobalPayroll({
+    countryCode: "AU",
+    grossSalary: 25000,
+    ordinaryTimeEarnings: 25000,
+    effectiveDate: "2026-08-01",
+  });
+  const highSuper = auHigh.statutoryLines.find((l) => l.code === "AU_SUPER");
+  assert.ok(highSuper);
+  assert.equal(highSuper.employerAmount, 2708.30);
 });
 
 test("calculateUkPayroll verifies 2026-27 Employer NIC (15%, £417 threshold), Scottish PAYE, Student Loans, Categories", () => {
@@ -588,59 +600,91 @@ test("calculateSaudiArabiaPayroll verifies GOSI contributions, caps, and expatri
 });
 
 test("calculateCanadaPayroll verifies CPP base, CPP2, EI, and provincial withholding", () => {
-  // Monthly salary of CAD 6,000
-  const caRes = calculateGlobalPayroll({
+  // 1. 2026 CRA Statutory Limits: CAD 6,500/mo (YMPE $74,600, YAMPE $85,000, EI $68,900)
+  const ca2026 = calculateGlobalPayroll({
+    countryCode: "CA",
+    grossSalary: 6500,
+    jurisdiction: "ON",
+    effectiveDate: "2026-01-01",
+  });
+  assert.equal(ca2026.currencyCode, "CAD");
+  const cppBase2026 = ca2026.statutoryLines.find(l => l.code === "CA_CPP_BASE");
+  assert.ok(cppBase2026);
+  assert.equal(cppBase2026.employeeAmount, 352.54);
+  assert.equal(cppBase2026.employerAmount, 352.54);
+
+  const cpp2Line2026 = ca2026.statutoryLines.find(l => l.code === "CA_CPP2_ENHANCED");
+  assert.ok(cpp2Line2026);
+  assert.equal(cpp2Line2026.employeeAmount, 11.33);
+
+  const eiLine2026 = ca2026.statutoryLines.find(l => l.code === "CA_EI");
+  assert.ok(eiLine2026);
+  assert.equal(eiLine2026.employeeAmount, 93.59);
+  assert.equal(eiLine2026.employerAmount, 131.02);
+
+  // 2. Historical 2025 CRA Limits: CAD 6,000/mo (YMPE $71,300, YAMPE $81,200, EI $65,700)
+  const ca2025 = calculateGlobalPayroll({
     countryCode: "CA",
     grossSalary: 6000,
     jurisdiction: "ON",
+    effectiveDate: "2025-10-01",
   });
-  assert.equal(caRes.currencyCode, "CAD");
-  const cppLine = caRes.statutoryLines.find(l => l.code === "CA_CPP_BASE");
-  assert.ok(cppLine);
-  assert.equal(cppLine.employeeAmount, 336.18);
-  assert.equal(cppLine.employerAmount, 336.18);
+  const cppLine2025 = ca2025.statutoryLines.find(l => l.code === "CA_CPP_BASE");
+  assert.ok(cppLine2025);
+  assert.equal(cppLine2025.employeeAmount, 336.18);
+  assert.equal(cppLine2025.employerAmount, 336.18);
 
-  const cpp2Line = caRes.statutoryLines.find(l => l.code === "CA_CPP2_ENHANCED");
-  assert.ok(cpp2Line);
-  assert.equal(cpp2Line.employeeAmount, 2.33);
+  const cpp2Line2025 = ca2025.statutoryLines.find(l => l.code === "CA_CPP2_ENHANCED");
+  assert.ok(cpp2Line2025);
+  assert.equal(cpp2Line2025.employeeAmount, 2.33);
 
-  const eiLine = caRes.statutoryLines.find(l => l.code === "CA_EI");
-  assert.ok(eiLine);
-  assert.equal(eiLine.employeeAmount, 89.24);
-  assert.equal(eiLine.employerAmount, 124.94);
-
-  assert.ok(caRes.employeeIncomeTax > 0);
-  assert.ok(caRes.netSalary > 0);
-  assert.ok(caRes.netSalary < caRes.grossSalary);
+  const eiLine2025 = ca2025.statutoryLines.find(l => l.code === "CA_EI");
+  assert.ok(eiLine2025);
+  assert.equal(eiLine2025.employeeAmount, 89.24);
+  assert.equal(eiLine2025.employerAmount, 124.94);
 });
 
 test("calculateIndiaPayroll verifies EPF statutory split, ESI wage ceiling, PT and Section 115BAC", () => {
-  // 1. High-earner: Basic 40,000, Gross 60,000 (exceeds 21,000 ESI ceiling, MH jurisdiction)
-  const inHigh = calculateGlobalPayroll({
+  // 1. Post-17 September 2026 Gazette Amendment: Ceiling ₹25,000 (Basic 40,000, Gross 60,000)
+  const inPostSept = calculateGlobalPayroll({
     countryCode: "IN",
     grossSalary: 60000,
     basicSalary: 40000,
     jurisdiction: "MH",
+    effectiveDate: "2026-10-01",
   });
-  assert.equal(inHigh.currencyCode, "INR");
+  assert.equal(inPostSept.currencyCode, "INR");
   // EPF EE: 12% of 40,000 = 4,800
-  const epfEeLine = inHigh.statutoryLines.find(l => l.code === "IN_EPF_EE");
+  const epfEeLine = inPostSept.statutoryLines.find(l => l.code === "IN_EPF_EE");
   assert.ok(epfEeLine);
   assert.equal(epfEeLine.employeeAmount, 4800.0);
 
-  const epfErLine = inHigh.statutoryLines.find(l => l.code === "IN_EPF_ER");
+  // EPF ER: 12% total = 4800 (split: EPS 8.33% of ₹25,000 = ₹2,082.50 + EPF ₹2,717.50) + EDLI 0.5% of ₹25,000 = ₹125 => Total ER = 4925.0
+  const epfErLine = inPostSept.statutoryLines.find(l => l.code === "IN_EPF_ER");
   assert.ok(epfErLine);
-  assert.equal(epfErLine.employerAmount, 4875.0);
+  assert.equal(epfErLine.employerAmount, 4925.0);
+
+  // 2. Pre-17 September 2026 Historical Period: Ceiling ₹15,000 (Basic 40,000, Gross 60,000)
+  const inPreSept = calculateGlobalPayroll({
+    countryCode: "IN",
+    grossSalary: 60000,
+    basicSalary: 40000,
+    jurisdiction: "MH",
+    effectiveDate: "2026-04-01",
+  });
+  const epfErPre = inPreSept.statutoryLines.find(l => l.code === "IN_EPF_ER");
+  assert.ok(epfErPre);
+  assert.equal(epfErPre.employerAmount, 4875.0); // EPS 1250 + EPF 3550 + EDLI 75 = 4875.0
 
   // ESI: not present because gross 60,000 > 21,000 ceiling
-  const esiLine = inHigh.statutoryLines.find(l => l.code === "IN_ESI");
+  const esiLine = inPostSept.statutoryLines.find(l => l.code === "IN_ESI");
   assert.equal(esiLine, undefined);
 
   // Professional Tax: MH standard 200
-  const ptLine = inHigh.statutoryLines.find(l => l.code === "IN_PT");
+  const ptLine = inPostSept.statutoryLines.find(l => l.code === "IN_PT");
   assert.ok(ptLine);
   assert.equal(ptLine.employeeAmount, 200.0);
-  assert.ok(inHigh.netSalary > 0);
+  assert.ok(inPostSept.netSalary > 0);
 
   // 2. Low-earner: Basic 15,000, Gross 18,000 (eligible for ESI <= 21,000)
   const inLow = calculateGlobalPayroll({

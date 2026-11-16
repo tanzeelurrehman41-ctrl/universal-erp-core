@@ -682,16 +682,18 @@ export function calculateAustraliaPayroll(request: PayrollCalculationRequest): P
   const effectiveDate = request.effectiveDate || new Date().toISOString().substring(0, 10);
 
   // 1. Superannuation Guarantee (12.0% effective 1 July 2026, 11.5% prior)
+  // Maximum Contribution Base (MCB): 2026-27 AUD 270,830/yr ($22,569.17/mo, $67,707.50/qtr); prior $65,070/qtr ($21,690/mo)
   const is2026Super = effectiveDate >= "2026-07-01";
   const superRate = is2026Super ? 0.12 : 0.115;
+  const monthlyMcb = is2026Super ? 22569.17 : 21690.0;
   const ote = request.ordinaryTimeEarnings !== undefined ? request.ordinaryTimeEarnings : gross;
-  // Maximum Super Contribution Base (MSCB): quarterly $65,070 ($21,690/mo)
-  const cappedOte = Math.min(ote, 21690.0);
+  const cappedOte = Math.min(ote, monthlyMcb);
   const superEr = Math.round(cappedOte * superRate * 100) / 100;
+  const clearanceNote = is2026Super ? "Payday Super 7-day rule" : "Quarterly clearance";
 
   lines.push({
     code: "AU_SUPER",
-    description: `Superannuation Guarantee (${(superRate * 100).toFixed(1)}% on OTE - Payday Super 7-day rule)`,
+    description: `Superannuation Guarantee (${(superRate * 100).toFixed(1)}% on OTE - ${clearanceNote})`,
     employeeAmount: 0,
     employerAmount: superEr,
     ratePct: superRate * 100,
@@ -938,10 +940,13 @@ export function calculateCanadaPayroll(request: PayrollCalculationRequest): Payr
   const currencyCode = request.currencyCode || "CAD";
   const lines: StatutoryLine[] = [];
 
-  // 1. CPP Base & CPP2
+  const effectiveDate = request.effectiveDate || new Date().toISOString().substring(0, 10);
+  const is2026 = effectiveDate >= "2026-01-01";
+
+  // 1. CPP Base & CPP2 (2026: YMPE $74,600, YAMPE $85,000; 2025: YMPE $71,300, YAMPE $81,200)
   const monthlyExemption = 291.67; // $3,500 / 12
-  const monthlyYmpe = 5941.67;     // $71,300 / 12
-  const monthlyYampe = 6766.67;    // $81,200 / 12
+  const monthlyYmpe = is2026 ? 6216.67 : 5941.67;     // $74,600 / 12 vs $71,300 / 12
+  const monthlyYampe = is2026 ? 7083.33 : 6766.67;    // $85,000 / 12 vs $81,200 / 12
 
   let cppBaseEe = 0;
   let cppBaseEr = 0;
@@ -965,7 +970,7 @@ export function calculateCanadaPayroll(request: PayrollCalculationRequest): Payr
 
   lines.push({
     code: "CA_CPP_BASE",
-    description: "Canada Pension Plan Base (CPP 5.95% up to YMPE $71,300)",
+    description: `Canada Pension Plan Base (CPP 5.95% up to YMPE $${Math.round(monthlyYmpe * 12).toLocaleString()})`,
     employeeAmount: cppBaseEe,
     employerAmount: cppBaseEr,
     ratePct: 5.95,
@@ -975,7 +980,7 @@ export function calculateCanadaPayroll(request: PayrollCalculationRequest): Payr
   if (cpp2Ee > 0) {
     lines.push({
       code: "CA_CPP2_ENHANCED",
-      description: "CPP2 Second Additional Contribution (4.0% on YAMPE band)",
+      description: `CPP2 Second Additional Contribution (4.0% on band up to $${Math.round(monthlyYampe * 12).toLocaleString()})`,
       employeeAmount: cpp2Ee,
       employerAmount: cpp2Er,
       ratePct: 4.0,
@@ -983,15 +988,15 @@ export function calculateCanadaPayroll(request: PayrollCalculationRequest): Payr
     });
   }
 
-  // 2. Employment Insurance (EI 2026)
-  const monthlyEiMax = 5475.0; // $65,700 / 12
+  // 2. Employment Insurance (EI 2026: $68,900 / 12; 2025: $65,700 / 12)
+  const monthlyEiMax = is2026 ? 5741.67 : 5475.0;
   const insurableEi = Math.min(gross, monthlyEiMax);
   const eiEe = Math.round(insurableEi * 0.0163 * 100) / 100;
   const eiEr = Math.round(insurableEi * 0.02282 * 100) / 100;
 
   lines.push({
     code: "CA_EI",
-    description: "Employment Insurance (EI 1.63% EE, 2.282% ER / 1.4x)",
+    description: `Employment Insurance (EI 1.63% EE, 2.282% ER / 1.4x up to $${Math.round(monthlyEiMax * 12).toLocaleString()})`,
     employeeAmount: eiEe,
     employerAmount: eiEr,
     ratePct: 1.63,
@@ -1058,14 +1063,21 @@ export function calculateIndiaPayroll(request: PayrollCalculationRequest): Payro
   const currencyCode = request.currencyCode || "INR";
   const lines: StatutoryLine[] = [];
 
-  // 1. Employees' Provident Fund (EPF)
+  const effectiveDate = request.effectiveDate || new Date().toISOString().substring(0, 10);
+  const isPostSept2026 = effectiveDate >= "2026-09-17";
+
+  // 1. Employees' Provident Fund (EPF & MP Act 1952)
+  // Effective 17 September 2026: Wage / Pension Ceiling ₹25,000 (Gazette Amendment); prior ₹15,000
   const pfWage = basic;
   const epfEe = Math.round(pfWage * 0.12 * 100) / 100;
 
-  const epsBase = Math.min(pfWage, 15000.0);
-  const epsEr = Math.round(epsBase * 0.0833 * 100) / 100; // max ₹1,250.00
+  const epsCeiling = isPostSept2026 ? 25000.0 : 15000.0;
+  const edliCeiling = isPostSept2026 ? 25000.0 : 15000.0;
+
+  const epsBase = Math.min(pfWage, epsCeiling);
+  const epsEr = Math.round(epsBase * 0.0833 * 100) / 100; // max ₹2,082.50 post-Sept 2026 vs ₹1,250.00 prior
   const epfEr = epfEe - epsEr;
-  const edliEr = Math.round(Math.min(pfWage, 15000.0) * 0.005 * 100) / 100;
+  const edliEr = Math.round(Math.min(pfWage, edliCeiling) * 0.005 * 100) / 100;
 
   lines.push({
     code: "IN_EPF_EE",
@@ -1078,7 +1090,7 @@ export function calculateIndiaPayroll(request: PayrollCalculationRequest): Payro
 
   lines.push({
     code: "IN_EPF_ER",
-    description: "EPF & EPS Employer Contribution (12.0% total)",
+    description: `EPF & EPS Employer Contribution (12.0% total: EPS max ₹${Math.round(epsCeiling * 0.0833 * 100) / 100} + EPF balance + EDLI)`,
     employeeAmount: 0,
     employerAmount: epfEr + epsEr + edliEr,
     ratePct: 12.5,

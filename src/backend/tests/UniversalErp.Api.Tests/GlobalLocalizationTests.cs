@@ -623,6 +623,55 @@ public class GlobalLocalizationTests
         Assert.Contains("Payday Super", result.StatutoryCitation);
     }
 
+    [Fact]
+    public void CalculatePayroll_Australia_Enforces2026MaximumContributionBaseAndPaydaySuper()
+    {
+        // High Earner: OTE AUD 25,000 / month ($300,000 / year)
+        // 2026-27 MCB is AUD 270,830 / year = AUD 22,569.17 / month (Quarterly $67,707.50)
+        var context2026 = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "AU",
+            WorkJurisdiction: "VIC",
+            SkillCategory: "executive",
+            BaseSalary: 25000.00m,
+            Allowances: 0.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 8, 1), // 2026-27 FY
+            CurrencyCode: "AUD",
+            OrdinaryTimeEarnings: 25000.00m);
+
+        var result2026 = _payrollEngine.CalculatePayroll(context2026);
+
+        // 12% on capped MCB $22,569.17 = AUD 2,708.30
+        Assert.Equal(2708.30m, result2026.EmployerPension);
+        var superLine2026 = result2026.PayLines.First(l => l.Category == "superannuation_guarantee");
+        Assert.Contains("Payday Super 7-Day Clearance", superLine2026.Description);
+
+        // Historical 2025-26 Period (Prior to 1 July 2026): MCB $65,070 / 3 = $21,690.00 / month, 11.5%
+        var context2025 = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "AU",
+            WorkJurisdiction: "VIC",
+            SkillCategory: "executive",
+            BaseSalary: 25000.00m,
+            Allowances: 0.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 5, 1), // Pre-1 July 2026
+            CurrencyCode: "AUD",
+            OrdinaryTimeEarnings: 25000.00m);
+
+        var result2025 = _payrollEngine.CalculatePayroll(context2025);
+
+        // 11.5% on capped MCB $21,690.00 = AUD 2,494.35
+        Assert.Equal(2494.35m, result2025.EmployerPension);
+        var superLine2025 = result2025.PayLines.First(l => l.Category == "superannuation_guarantee");
+        Assert.Contains("Quarterly Clearance", superLine2025.Description);
+    }
+
     // ── 9. Global Payroll Engine: Pakistan (FBR TY2027 & EOBI) ───────────────
 
     [Fact]
@@ -781,14 +830,15 @@ public class GlobalLocalizationTests
     }
 
     [Fact]
-    public void CalculatePayroll_Canada_ComputesCppBase_Cpp2_EiAndTd1Withholding()
+    public void CalculatePayroll_Canada_Computes2026StatutoryLimits_CppBase_Cpp2_AndEi()
     {
-        var context = new PayrollCalculationContext(
+        // 2026 Effective Date: YMPE $74,600 ($6,216.67/mo), YAMPE $85,000 ($7,083.33/mo), EI max $68,900 ($5,741.67/mo)
+        var context2026 = new PayrollCalculationContext(
             EmployeeId: Guid.NewGuid(),
             CountryCode: "CA",
             WorkJurisdiction: "ON",
             SkillCategory: "skilled",
-            BaseSalary: 6000.00m, // CAD 6,000 / month ($72,000 / year)
+            BaseSalary: 6500.00m, // CAD 6,500 / month ($78,000 / year - activates both Base CPP and CPP2)
             Allowances: 0.00m,
             OvertimeHours: 0.00m,
             OvertimeHourlyRate: 0.00m,
@@ -796,22 +846,44 @@ public class GlobalLocalizationTests
             EffectiveDate: new DateOnly(2026, 1, 1),
             CurrencyCode: "CAD");
 
-        var result = _payrollEngine.CalculatePayroll(context);
+        var result2026 = _payrollEngine.CalculatePayroll(context2026);
 
-        Assert.Equal("CA", result.CountryCode);
-        Assert.Equal(6000.00m, result.GrossPay);
+        Assert.Equal("CA", result2026.CountryCode);
+        Assert.Equal(6500.00m, result2026.GrossPay);
 
-        // CPP Base (336.18) + CPP2 (2.33) = 338.51
-        Assert.Equal(338.51m, result.EmployeePension);
-        Assert.Equal(338.51m, result.EmployerPension);
+        // Base CPP (352.54) + CPP2 (11.33) = 363.87
+        Assert.Equal(363.87m, result2026.EmployeePension);
+        Assert.Equal(363.87m, result2026.EmployerPension);
 
-        // EI Employee (89.24 max capped) and Employer (124.94 max capped)
-        Assert.Equal(89.24m, result.EmployeeSocialSecurity);
-        Assert.Equal(124.94m, result.EmployerSocialSecurity);
+        // EI EE (93.59 max capped at $68,900/12) and ER (131.02 max capped)
+        Assert.Equal(93.59m, result2026.EmployeeSocialSecurity);
+        Assert.Equal(131.02m, result2026.EmployerSocialSecurity);
+        Assert.True(result2026.IncomeTaxWithholding > 0);
+        Assert.True(result2026.NetPay < result2026.GrossPay);
 
-        // Income tax withheld > 0
-        Assert.True(result.IncomeTaxWithholding > 0);
-        Assert.True(result.NetPay < result.GrossPay);
+        // Historical 2025 Effective Date: YMPE $71,300 ($5,941.67/mo), YAMPE $81,200 ($6,766.67/mo), EI $65,700 ($5,475.00/mo)
+        var context2025 = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "CA",
+            WorkJurisdiction: "ON",
+            SkillCategory: "skilled",
+            BaseSalary: 6000.00m, // CAD 6,000 / month
+            Allowances: 0.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2025, 10, 1),
+            CurrencyCode: "CAD");
+
+        var result2025 = _payrollEngine.CalculatePayroll(context2025);
+
+        // Historical CPP Base (336.18) + CPP2 (2.33) = 338.51
+        Assert.Equal(338.51m, result2025.EmployeePension);
+        Assert.Equal(338.51m, result2025.EmployerPension);
+
+        // Historical EI EE (89.24) and ER (124.94)
+        Assert.Equal(89.24m, result2025.EmployeeSocialSecurity);
+        Assert.Equal(124.94m, result2025.EmployerSocialSecurity);
     }
 
     // ── 13. Phase 16: India Localization (Dual GST, EPF, ESI, PT & 115BAC) ──
@@ -868,8 +940,39 @@ public class GlobalLocalizationTests
     [Fact]
     public void CalculatePayroll_India_ComputesEpfSplit_EsiWageCeiling_AndPt()
     {
-        // 1. Gross ₹60,000, Basic ₹40,000 (exceeds ₹21k ESI ceiling, MH state)
-        var highContext = new PayrollCalculationContext(
+        // 1. Post-17 September 2026 Gazette Amendment: Ceiling ₹25,000/month (Basic ₹40,000, MH state)
+        var postSeptContext = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "IN",
+            WorkJurisdiction: "MH",
+            SkillCategory: "skilled",
+            BaseSalary: 40000.00m,
+            Allowances: 20000.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 10, 1),
+            CurrencyCode: "INR");
+
+        var postSeptRes = _payrollEngine.CalculatePayroll(postSeptContext);
+
+        Assert.Equal("IN", postSeptRes.CountryCode);
+        Assert.Equal(60000.00m, postSeptRes.GrossPay);
+        // EPF EE: 12% of 40,000 = 4,800
+        Assert.Equal(4800.00m, postSeptRes.EmployeePension);
+        // EPF ER: 12% total = 4,800
+        Assert.Equal(4800.00m, postSeptRes.EmployerPension);
+        // EDLI 0.5% on capped ₹25,000 = ₹125.00
+        Assert.Equal(125.00m, postSeptRes.EmployerSocialSecurity);
+        // Professional tax = ₹200.00 (in employee social security)
+        Assert.Equal(200.00m, postSeptRes.EmployeeSocialSecurity);
+        Assert.True(postSeptRes.NetPay > 0);
+
+        var epsLine2026 = postSeptRes.PayLines.First(l => l.Category == "eps_er");
+        Assert.Equal(2082.50m, epsLine2026.Amount); // 8.33% of ₹25,000 cap = ₹2,082.50
+
+        // 2. Pre-17 September 2026 Historical Period: Ceiling ₹15,000/month
+        var preSeptContext = new PayrollCalculationContext(
             EmployeeId: Guid.NewGuid(),
             CountryCode: "IN",
             WorkJurisdiction: "MH",
@@ -882,19 +985,12 @@ public class GlobalLocalizationTests
             EffectiveDate: new DateOnly(2026, 4, 1),
             CurrencyCode: "INR");
 
-        var highRes = _payrollEngine.CalculatePayroll(highContext);
+        var preSeptRes = _payrollEngine.CalculatePayroll(preSeptContext);
 
-        Assert.Equal("IN", highRes.CountryCode);
-        Assert.Equal(60000.00m, highRes.GrossPay);
-        // EPF EE: 12% of 40,000 = 4,800
-        Assert.Equal(4800.00m, highRes.EmployeePension);
-        // EPF ER: 12% = 4,800
-        Assert.Equal(4800.00m, highRes.EmployerPension);
-        // EDLI 0.5% = 75
-        Assert.Equal(75.00m, highRes.EmployerSocialSecurity);
-        // Professional tax = 200 (in employee social security)
-        Assert.Equal(200.00m, highRes.EmployeeSocialSecurity);
-        Assert.True(highRes.NetPay > 0);
+        // Historical EDLI 0.5% on capped ₹15,000 = ₹75.00
+        Assert.Equal(75.00m, preSeptRes.EmployerSocialSecurity);
+        var epsLineHistorical = preSeptRes.PayLines.First(l => l.Category == "eps_er");
+        Assert.Equal(1249.50m, epsLineHistorical.Amount); // 8.33% of ₹15,000 cap = ₹1,249.50
     }
 
     // ── 14. Phase 16: European Expansion Payroll Adapters ────────────────────

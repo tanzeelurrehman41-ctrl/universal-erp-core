@@ -439,7 +439,7 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
       },
       payroll: {
         status: "Implemented and tested",
-        notes: "2026 CRA payroll: Base CPP 5.95% ($71,300 YMPE, $3,500 exemption), Enhanced CPP2 4.0% ($81,200 YAMPE), EI 1.63% EE / 2.282% ER ($65,700 max), federal & provincial TD1 progressive withholding.",
+        notes: "2026 CRA payroll: Base CPP 5.95% ($74,600 YMPE, $3,500 exemption; 2025: $71,300), Enhanced CPP2 4.0% ($85,000 YAMPE; 2025: $81,200), EI 1.63% EE / 2.282% ER ($68,900 max; 2025: $65,700), federal & provincial TD1 progressive withholding.",
       },
       accounting: {
         status: "Implemented and tested",
@@ -481,7 +481,7 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
       },
       payroll: {
         status: "Implemented and tested",
-        notes: "Superannuation Guarantee 12.0% effective 1 July 2026, OTE qualification, Payday Super 7-business-day fund clearance rule, STP Phase 2 disaggregated lines, state payroll tax rules (NSW, VIC, QLD, WA, SA, TAS, ACT, NT).",
+        notes: "Superannuation Guarantee 12.0% effective 1 July 2026, Maximum Contribution Base AUD 270,830/yr (quarterly AUD 67,707.50; prior AUD 65,070), Payday Super 7-business-day fund clearance rule, STP Phase 2 disaggregated lines, state payroll tax rules (NSW, VIC, QLD, WA, SA, TAS, ACT, NT).",
       },
       accounting: {
         status: "Implemented and tested",
@@ -523,7 +523,7 @@ export const LOCALIZATION_COVERAGE_MATRIX: Record<string, CountryCoverageEntry> 
       },
       payroll: {
         status: "Implemented and tested",
-        notes: "EPF 12% EE / 12% ER (EPS 8.33% up to ₹15,000 cap + EPF balance + 0.5% EDLI), ESI 0.75% EE / 3.25% ER (₹21,000 wage ceiling), State PT (MH ₹200/mo, ₹300 Feb), Section 115BAC New Tax Regime (₹75k std deduction, 6 slabs).",
+        notes: "EPF 12% EE / 12% ER (EPS 8.33% up to ₹25,000 ceiling effective 17 Sept 2026 = max ₹2,082.50; prior ₹15,000 cap = max ₹1,250 + EPF balance + 0.5% EDLI up to ₹25,000 = max ₹125), ESI 0.75% EE / 3.25% ER (₹21,000 wage ceiling), State PT (MH ₹200/mo, ₹300 Feb), Section 115BAC New Tax Regime (₹75k std deduction, 6 slabs).",
       },
       accounting: {
         status: "Implemented and tested",

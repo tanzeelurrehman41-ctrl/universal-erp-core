@@ -6,6 +6,7 @@ using System.Threading;
 using UniversalErp.Application.Security.AccessControl;
 using UniversalErp.Application.Security.ApiSecurity;
 using UniversalErp.Application.Security.AuditLogging;
+using UniversalErp.Application.Infrastructure.MultiCloud;
 using Xunit;
 
 namespace UniversalErp.Api.Tests;
@@ -312,5 +313,86 @@ public sealed class EnterpriseSecurityTests
         tamperedEvents[1] = tamperedEv;
 
         Assert.False(AuditChainCheckpointService.VerifyCheckpoint(checkpoint, tamperedEvents, signingKey));
+    }
+
+    [Fact]
+    public void MultiCloudDeploymentService_ResolvesTenantDataResidencyRoutes_EnforcingRegionalCompliance()
+    {
+        var service = new MultiCloudDeploymentService();
+        var tenantId = Guid.NewGuid();
+
+        // 1. EU Tenant (Germany) -> Strict GDPR (eu-central-1, no cross-border replication)
+        var euRoute = service.ResolveTenantResidencyRoute(tenantId, "DE");
+        Assert.Equal("eu-central-1", euRoute.PrimaryRegionCode);
+        Assert.Equal("GDPR", euRoute.ComplianceRegime);
+        Assert.False(euRoute.CrossBorderReplicationAllowed);
+
+        // 2. Australian Tenant -> APRA CPS 234 (ap-southeast-1, no cross-border replication)
+        var auRoute = service.ResolveTenantResidencyRoute(tenantId, "AU");
+        Assert.Equal("ap-southeast-1", auRoute.PrimaryRegionCode);
+        Assert.Equal("APRA_CPS234", auRoute.ComplianceRegime);
+        Assert.False(auRoute.CrossBorderReplicationAllowed);
+
+        // 3. Indian Tenant -> RBI Data Localization (ap-southeast-1, no cross-border replication)
+        var inRoute = service.ResolveTenantResidencyRoute(tenantId, "IN");
+        Assert.Equal("ap-southeast-1", inRoute.PrimaryRegionCode);
+        Assert.Equal("RBI_DATA_LOCALIZATION", inRoute.ComplianceRegime);
+        Assert.False(inRoute.CrossBorderReplicationAllowed);
+
+        // 4. Saudi Arabia Tenant -> SAMA CSF (me-central-1, no cross-border replication)
+        var saRoute = service.ResolveTenantResidencyRoute(tenantId, "SA");
+        Assert.Equal("me-central-1", saRoute.PrimaryRegionCode);
+        Assert.Equal("SAMA_CSF", saRoute.ComplianceRegime);
+        Assert.False(saRoute.CrossBorderReplicationAllowed);
+
+        // 5. Canada Tenant -> PIPEDA (us-east-1, no cross-border replication)
+        var caRoute = service.ResolveTenantResidencyRoute(tenantId, "CA");
+        Assert.Equal("us-east-1", caRoute.PrimaryRegionCode);
+        Assert.Equal("PIPEDA", caRoute.ComplianceRegime);
+        Assert.False(caRoute.CrossBorderReplicationAllowed);
+
+        // 6. US Tenant -> HIPAA (us-east-1, cross-border replication allowed)
+        var usRoute = service.ResolveTenantResidencyRoute(tenantId, "US");
+        Assert.Equal("us-east-1", usRoute.PrimaryRegionCode);
+        Assert.Equal("HIPAA", usRoute.ComplianceRegime);
+        Assert.True(usRoute.CrossBorderReplicationAllowed);
+    }
+
+    [Fact]
+    public void MultiCloudDeploymentService_ExecutesDisasterRecoveryDrills_VerifiesRtoRpoAndMerkleIntegrity()
+    {
+        var service = new MultiCloudDeploymentService();
+
+        // 1. Initial baseline drills present
+        var baselineDrills = service.GetExecutedDrills();
+        Assert.True(baselineDrills.Count >= 3);
+        Assert.Contains(baselineDrills, d => d.DrillType == "SIMULATED_DATABASE_FAILOVER");
+
+        // 2. Execute High Availability Failover Drill (Target RTO < 60s, RPO < 5s)
+        var failoverResult = service.ExecuteFailoverDrill(
+            sourceRegion: "neon-ha-primary",
+            targetRegion: "eu-central-1",
+            drillType: "SIMULATED_DATABASE_FAILOVER",
+            executedBy: "UniversalErp.ReleaseEngineering.DRAutomation");
+
+        Assert.True(failoverResult.Success);
+        Assert.True(failoverResult.RtoTargetMet);
+        Assert.True(failoverResult.RpoTargetMet);
+        Assert.True(failoverResult.AchievedRtoSeconds <= 60);
+        Assert.True(failoverResult.AchievedRpoSeconds <= 5);
+        Assert.True(failoverResult.MerkleChainVerified);
+        Assert.Equal(64, failoverResult.Checksum.Length);
+
+        // 3. Execute Audit Chain Integrity Drill
+        var auditDrillResult = service.ExecuteFailoverDrill(
+            sourceRegion: "audit.tamper_evident_event_log",
+            targetRegion: "audit.audit_chain_checkpoints",
+            drillType: "AUDIT_CHAIN_INTEGRITY_DRILL",
+            executedBy: "UniversalErp.Security.AuditVerification");
+
+        Assert.True(auditDrillResult.Success);
+        Assert.True(auditDrillResult.AchievedRtoSeconds <= 300);
+        Assert.Equal(0, auditDrillResult.AchievedRpoSeconds);
+        Assert.True(auditDrillResult.MerkleChainVerified);
     }
 }

@@ -720,12 +720,35 @@ public sealed class AustraliaPayrollAdapter : IPayrollCountryAdapter
         var overtimePay = Math.Round(context.OvertimeHours * context.OvertimeHourlyRate * 1.5m, 2);
         var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
 
-        // 1. Superannuation Guarantee (12.0% effective 1 July 2026, 11.5% prior)
-        var superRate = context.EffectiveDate >= new DateOnly(2026, 7, 1) ? 0.12m : 0.115m;
+        // 1. Superannuation Guarantee & Contribution Base
+        // Effective 1 July 2026:
+        // - SG Rate: 12.0% (Treasury Laws Amendment)
+        // - Maximum Contribution Base (MCB): AUD 270,830/yr (Quarterly AUD 67,707.50, Monthly AUD 22,569.17)
+        // - Payday Super Mandate: 7-business-day fund receipt clearance rule
+        // Prior to 1 July 2026:
+        // - SG Rate: 11.5%
+        // - MCB: Quarterly AUD 65,070 (Monthly AUD 21,690.00)
+        // - Quarterly super clearance rules
+        decimal superRate;
+        decimal monthlyMcb;
+        bool isPaydaySuper;
+
+        if (context.EffectiveDate >= new DateOnly(2026, 7, 1))
+        {
+            superRate = 0.12m;
+            monthlyMcb = 22569.17m; // AUD 270,830 / 12 = 22,569.166... rounded to 22,569.17 (Quarterly $67,707.50 / 3)
+            isPaydaySuper = true;
+        }
+        else
+        {
+            superRate = 0.115m;
+            monthlyMcb = 21690.00m; // Quarterly $65,070 / 3
+            isPaydaySuper = context.AustraliaPaydaySuper;
+        }
+
         // Ordinary Time Earnings (OTE) excludes overtime
         var ote = context.OrdinaryTimeEarnings > 0 ? context.OrdinaryTimeEarnings : (context.BaseSalary + context.Allowances);
-        // Maximum Super Contribution Base (MSCB): quarterly $65,070 ($21,690/mo)
-        var cappedOte = Math.Min(ote, 21690.00m);
+        var cappedOte = Math.Min(ote, monthlyMcb);
         var superEr = Math.Round(cappedOte * superRate, 2);
 
         // 2. PAYG Withholding (ATO 2026 Schedule - Annual Tax-Free Threshold $18,200)
@@ -751,12 +774,13 @@ public sealed class AustraliaPayrollAdapter : IPayrollCountryAdapter
         var minWage = GetStatutoryMinimumWage(context.WorkJurisdiction, context.SkillCategory, context.EffectiveDate);
         var isCompliant = grossPay >= minWage;
 
+        var clearanceNote = isPaydaySuper ? "Payday Super 7-Day Clearance" : "Quarterly Clearance";
         var payLines = new List<PayrollPayLine>
         {
             new("earning", "base_salary", "Base Salary", context.BaseSalary, "AUD"),
             new("earning", "allowances", "Allowances", context.Allowances, "AUD"),
             new("deduction", "payg_withholding", "ATO PAYG Withholding", monthlyPayg, "AUD"),
-            new("employer_contribution", "superannuation_guarantee", $"Superannuation Guarantee ({(superRate * 100):F1}% OTE)", superEr, "AUD")
+            new("employer_contribution", "superannuation_guarantee", $"Superannuation Guarantee ({(superRate * 100):F1}% OTE - {clearanceNote})", superEr, "AUD")
         };
 
         return new PayrollCalculationResult(
@@ -1023,13 +1047,33 @@ public sealed class CanadaPayrollAdapter : IPayrollCountryAdapter
         var overtimePay = Math.Round(context.OvertimeHours * context.OvertimeHourlyRate * 1.5m, 2);
         var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
 
-        // 1. Canada Pension Plan (CPP 2026 CRA Formulas)
+        // 1. Canada Pension Plan (CPP CRA Statutory Formulas)
         // Basic exemption = $3,500/yr ($291.67/mo)
-        // YMPE 2026 = $71,300/yr ($5,941.67/mo) -> Base CPP 5.95% EE & ER (max $336.18/mo)
-        // YAMPE 2026 = $81,200/yr ($6,766.67/mo) -> CPP2 4.0% EE & ER on excess above YMPE (max $33.00/mo)
         var monthlyExemption = 291.67m;
-        var monthlyYmpe = 5941.67m;
-        var monthlyYampe = 6766.67m;
+        decimal monthlyYmpe;
+        decimal monthlyYampe;
+        decimal monthlyEiMax;
+
+        if (context.EffectiveDate >= new DateOnly(2026, 1, 1))
+        {
+            // Official 2026 CRA Statutory Limits:
+            // YMPE: CAD 74,600/yr ($6,216.67/mo)
+            // YAMPE: CAD 85,000/yr ($7,083.33/mo)
+            // EI Max Insurable Earnings: CAD 68,900/yr ($5,741.67/mo)
+            monthlyYmpe = 6216.67m;
+            monthlyYampe = 7083.33m;
+            monthlyEiMax = 5741.67m;
+        }
+        else
+        {
+            // Historical 2025 CRA Statutory Limits:
+            // YMPE: CAD 71,300/yr ($5,941.67/mo)
+            // YAMPE: CAD 81,200/yr ($6,766.67/mo)
+            // EI Max Insurable Earnings: CAD 65,700/yr ($5,475.00/mo)
+            monthlyYmpe = 5941.67m;
+            monthlyYampe = 6766.67m;
+            monthlyEiMax = 5475.00m;
+        }
 
         decimal cppBaseEe = 0.00m;
         decimal cppBaseEr = 0.00m;
@@ -1053,10 +1097,8 @@ public sealed class CanadaPayrollAdapter : IPayrollCountryAdapter
         var totalCppEe = cppBaseEe + cpp2Ee;
         var totalCppEr = cppBaseEr + cpp2Er;
 
-        // 2. Employment Insurance (EI 2026 CRA Formulas)
-        // Maximum Annual Insurable Earnings = $65,700/yr ($5,475.00/mo)
-        // Employee = 1.63% (max $89.24/mo). Employer = 1.4x = 2.282% (max $124.94/mo).
-        var monthlyEiMax = 5475.00m;
+        // 2. Employment Insurance (EI CRA Formulas)
+        // Employee = 1.63%. Employer = 1.4x = 2.282%.
         var insurableEiWage = Math.Min(grossPay, monthlyEiMax);
         var eiEe = Math.Round(insurableEiWage * 0.0163m, 2);
         var eiEr = Math.Round(insurableEiWage * 0.02282m, 2);
@@ -1086,17 +1128,17 @@ public sealed class CanadaPayrollAdapter : IPayrollCountryAdapter
         {
             new("earning", "base_salary", "Base Salary", context.BaseSalary, "CAD"),
             new("earning", "allowances", "Taxable Allowances", context.Allowances, "CAD"),
-            new("deduction", "cpp_base_ee", "Canada Pension Plan Base EE (5.95%)", cppBaseEe, "CAD"),
+            new("deduction", "cpp_base_ee", $"Canada Pension Plan Base EE (5.95% up to ${monthlyYmpe * 12:N0}/yr)", cppBaseEe, "CAD"),
             new("employer_contribution", "cpp_base_er", "Canada Pension Plan Base ER (5.95%)", cppBaseEr, "CAD")
         };
 
         if (cpp2Ee > 0)
         {
-            payLines.Add(new("deduction", "cpp2_enhanced_ee", "CPP2 Second Tier EE (4.0% on YAMPE band)", cpp2Ee, "CAD"));
-            payLines.Add(new("employer_contribution", "cpp2_enhanced_er", "CPP2 Second Tier ER (4.0% on YAMPE band)", cpp2Er, "CAD"));
+            payLines.Add(new("deduction", "cpp2_enhanced_ee", $"CPP2 Second Tier EE (4.0% on band up to ${monthlyYampe * 12:N0}/yr)", cpp2Ee, "CAD"));
+            payLines.Add(new("employer_contribution", "cpp2_enhanced_er", "CPP2 Second Tier ER (4.0% on band)", cpp2Er, "CAD"));
         }
 
-        payLines.Add(new("deduction", "ei_premium_ee", "Employment Insurance EE (1.63%)", eiEe, "CAD"));
+        payLines.Add(new("deduction", "ei_premium_ee", $"Employment Insurance EE (1.63% up to ${monthlyEiMax * 12:N0}/yr)", eiEe, "CAD"));
         payLines.Add(new("employer_contribution", "ei_premium_er", "Employment Insurance ER (2.282% / 1.4x)", eiEr, "CAD"));
         payLines.Add(new("deduction", "income_tax_fed_prov", "Federal & Provincial Income Tax (CRA TD1)", monthlyIncomeTax, "CAD"));
 
@@ -1146,15 +1188,36 @@ public sealed class IndiaPayrollAdapter : IPayrollCountryAdapter
         var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
 
         // 1. Employees' Provident Fund (EPF & MP Act 1952)
-        // Employee: 12% on PF wage (Basic + DA)
-        // Employer: 12% split into 8.33% EPS (capped at ₹15,000 wage = ₹1,250 max) + EPF balance
+        // Effective 17 September 2026:
+        // - Wage ceiling / EPS pension ceiling raised from ₹15,000 to ₹25,000 monthly (Gazette notification)
+        // - EPS Employer: 8.33% on wage up to ₹25,000 (max ₹2,082.50/mo vs ₹1,250 historical)
+        // - EDLI Employer: 0.50% on wage up to ₹25,000 (max ₹125.00/mo vs ₹75 historical)
+        // Prior to 17 September 2026:
+        // - Wage ceiling / EPS pension ceiling: ₹15,000 monthly
+        // - EPS Employer: 8.33% on wage up to ₹15,000 (max ₹1,250.00/mo)
+        // - EDLI Employer: 0.50% on wage up to ₹15,000 (max ₹75.00/mo)
         var pfWage = context.BaseSalary;
         var epfEe = Math.Round(pfWage * 0.12m, 2);
 
-        var epsBase = Math.Min(pfWage, 15000.00m);
-        var epsEr = Math.Round(epsBase * 0.0833m, 2); // max ₹1,250.00
+        decimal epsCeiling;
+        decimal edliCeiling;
+
+        if (context.EffectiveDate >= new DateOnly(2026, 9, 17))
+        {
+            epsCeiling = 25000.00m;
+            edliCeiling = 25000.00m;
+        }
+        else
+        {
+            epsCeiling = 15000.00m;
+            edliCeiling = 15000.00m;
+        }
+
+        var epsBase = Math.Min(pfWage, epsCeiling);
+        var epsEr = Math.Round(epsBase * 0.0833m, 2);
         var epfEr = epfEe - epsEr;
-        var edliEr = Math.Round(Math.Min(pfWage, 15000.00m) * 0.005m, 2); // 0.5% EDLI max ₹75
+        var edliBase = Math.Min(pfWage, edliCeiling);
+        var edliEr = Math.Round(edliBase * 0.005m, 2);
 
         // 2. Employees' State Insurance (ESI Act 1948)
         // Applies only if gross pay <= ₹21,000/month: EE 0.75%, ER 3.25%
@@ -1227,8 +1290,8 @@ public sealed class IndiaPayrollAdapter : IPayrollCountryAdapter
             new("earning", "allowances", "Special & HRA Allowances", context.Allowances, "INR"),
             new("deduction", "epf_ee", "Employees' Provident Fund EE (12.0%)", epfEe, "INR"),
             new("employer_contribution", "epf_er", "EPF Employer Share (3.67% + balance)", epfEr, "INR"),
-            new("employer_contribution", "eps_er", "Employees' Pension Scheme ER (8.33% max ₹1,250)", epsEr, "INR"),
-            new("employer_contribution", "edli_er", "EDLI Insurance Contribution ER (0.50%)", edliEr, "INR")
+            new("employer_contribution", "eps_er", $"Employees' Pension Scheme ER (8.33% max ₹{Math.Round(epsCeiling * 0.0833m, 2):N2})", epsEr, "INR"),
+            new("employer_contribution", "edli_er", $"EDLI Insurance Contribution ER (0.50% max ₹{Math.Round(edliCeiling * 0.005m, 2):N2})", edliEr, "INR")
         };
 
         if (esiEe > 0)
