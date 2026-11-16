@@ -171,6 +171,38 @@ public class Phase13UnitTests
         // Tampered payload fails
         var tampered = _signingEngine.VerifySignature(payload + "tampered", secret, sigHeader, tsHeader);
         Assert.False(tampered);
+
+        // Replay attack: expired timestamp (e.g. 400 seconds ago) fails
+        var oldTimestamp = DateTimeOffset.UtcNow.AddSeconds(-400);
+        var (oldSig, oldTs) = _signingEngine.ComputeHeaders(payload, secret, oldTimestamp);
+        var replayCheck = _signingEngine.VerifySignature(payload, secret, oldSig, oldTs, maxAgeSeconds: 300);
+        Assert.False(replayCheck);
+    }
+
+    [Fact]
+    public void SecretEncryption_Aes256Gcm_RoundtripsSuccessfully()
+    {
+        var secret = _signingEngine.GenerateSecret();
+        var ciphertext = _signingEngine.EncryptSecret(secret);
+
+        Assert.NotNull(ciphertext);
+        Assert.NotEqual(secret, ciphertext);
+
+        var decrypted = _signingEngine.DecryptSecret(ciphertext);
+        Assert.Equal(secret, decrypted);
+    }
+
+    [Fact]
+    public void SecretDecryption_TamperedCiphertext_ThrowsCryptographicException()
+    {
+        var secret = _signingEngine.GenerateSecret();
+        var ciphertext = _signingEngine.EncryptSecret(secret);
+        var bytes = Convert.FromBase64String(ciphertext);
+        bytes[^1] ^= 0xFF; // tamper with tag
+        var tamperedCiphertext = Convert.ToBase64String(bytes);
+
+        Assert.ThrowsAny<System.Security.Cryptography.CryptographicException>(() =>
+            _signingEngine.DecryptSecret(tamperedCiphertext));
     }
 
     [Fact]

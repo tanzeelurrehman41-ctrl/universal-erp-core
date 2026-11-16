@@ -121,14 +121,15 @@ public class PostgresIntegrationsRepository : IIntegrationsRepository
             ? _signingEngine.GenerateSecret()
             : request.Secret;
 
+        var secretCiphertext = _signingEngine.EncryptSecret(plaintextSecret);
         var secretHash = _signingEngine.HashSecret(plaintextSecret);
 
         const string sql = @"
             INSERT INTO integrations.webhook_subscriptions (
-                tenant_id, company_id, event_type, target_url, secret_hash, is_active
+                tenant_id, company_id, event_type, target_url, secret_ciphertext, secret_hash, is_active
             )
             VALUES (
-                @tenantId, @companyId, @eventType, @targetUrl, @secretHash, true
+                @tenantId, @companyId, @eventType, @targetUrl, @secretCiphertext, @secretHash, true
             )
             RETURNING id, tenant_id, company_id, event_type, target_url, is_active, created_at, updated_at;";
 
@@ -137,6 +138,7 @@ public class PostgresIntegrationsRepository : IIntegrationsRepository
         cmd.Parameters.AddWithValue("companyId", companyId);
         cmd.Parameters.AddWithValue("eventType", request.EventType);
         cmd.Parameters.AddWithValue("targetUrl", request.TargetUrl);
+        cmd.Parameters.AddWithValue("secretCiphertext", secretCiphertext);
         cmd.Parameters.AddWithValue("secretHash", secretHash);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -164,11 +166,13 @@ public class PostgresIntegrationsRepository : IIntegrationsRepository
         await using var conn = await OpenConnectionAsync(tenantId, null, ct);
 
         var newPlaintext = _signingEngine.GenerateSecret();
+        var newCiphertext = _signingEngine.EncryptSecret(newPlaintext);
         var newHash = _signingEngine.HashSecret(newPlaintext);
 
         const string sql = @"
             UPDATE integrations.webhook_subscriptions
-            SET secret_hash = @hash,
+            SET secret_ciphertext = @ciphertext,
+                secret_hash = @hash,
                 updated_at = now()
             WHERE tenant_id = @tenantId AND id = @subId
             RETURNING updated_at;";
@@ -176,6 +180,7 @@ public class PostgresIntegrationsRepository : IIntegrationsRepository
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("tenantId", tenantId);
         cmd.Parameters.AddWithValue("subId", subscriptionId);
+        cmd.Parameters.AddWithValue("ciphertext", newCiphertext);
         cmd.Parameters.AddWithValue("hash", newHash);
 
         var res = await cmd.ExecuteScalarAsync(ct);
@@ -185,6 +190,33 @@ public class PostgresIntegrationsRepository : IIntegrationsRepository
         }
 
         throw new InvalidOperationException($"Webhook subscription {subscriptionId} not found.");
+    }
+
+    public async Task<string?> GetDecryptedSecretAsync(Guid tenantId, Guid subscriptionId, CancellationToken ct = default)
+    {
+        await using var conn = await OpenConnectionAsync(tenantId, null, ct);
+
+        const string sql = @"
+            SELECT secret_ciphertext, is_active
+            FROM integrations.webhook_subscriptions
+            WHERE tenant_id = @tenantId AND id = @subId;";
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("tenantId", tenantId);
+        cmd.Parameters.AddWithValue("subId", subscriptionId);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+        {
+            var ciphertext = reader.GetString(0);
+            var isActive = reader.GetBoolean(1);
+            if (!isActive || string.IsNullOrWhiteSpace(ciphertext))
+                return null; // Revoked or inactive
+
+            return _signingEngine.DecryptSecret(ciphertext);
+        }
+
+        return null;
     }
 
     public async Task<bool> DeleteWebhookSubscriptionAsync(Guid tenantId, Guid subscriptionId, CancellationToken ct = default)

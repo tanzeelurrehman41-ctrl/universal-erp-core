@@ -306,6 +306,49 @@ public class Phase13PostgresConsolidationIntegrationTests
         Assert.Equal("dispatched", dispatchedTransfer.Status);
         Assert.NotNull(dispatchedTransfer.FromGlJournalId);
 
+        // Verify sender journal lines:
+        // Dr 1300 Due-From: 3,600 (at approved transfer price)
+        // Cr 4000 Intercompany Sales: 3,600 (at approved transfer price)
+        // Dr 5000 Intercompany COGS: 3,000 (at original FIFO cost)
+        // Cr 1200 Inventory Asset: 3,000 (at original FIFO cost)
+        await using (var conn = await dataSource.OpenConnectionAsync(ct))
+        {
+            await using var jCmd = conn.CreateCommand();
+            jCmd.CommandText = """
+                SELECT jl.line_no, a.account_code, jl.debit_functional, jl.credit_functional
+                FROM finance.journal_lines jl
+                JOIN finance.accounts a ON a.id = jl.account_id
+                WHERE jl.journal_id = @jId
+                ORDER BY jl.line_no ASC;
+                """;
+            jCmd.Parameters.AddWithValue("jId", dispatchedTransfer.FromGlJournalId.Value);
+            await using var jReader = await jCmd.ExecuteReaderAsync(ct);
+
+            // Line 1: Dr 1300
+            Assert.True(await jReader.ReadAsync(ct));
+            Assert.Equal("1300", jReader.GetString(1));
+            Assert.Equal(3600m, jReader.GetDecimal(2));
+            Assert.Equal(0m, jReader.GetDecimal(3));
+
+            // Line 2: Cr 4000
+            Assert.True(await jReader.ReadAsync(ct));
+            Assert.Equal("4000", jReader.GetString(1));
+            Assert.Equal(0m, jReader.GetDecimal(2));
+            Assert.Equal(3600m, jReader.GetDecimal(3));
+
+            // Line 3: Dr 5000
+            Assert.True(await jReader.ReadAsync(ct));
+            Assert.Equal("5000", jReader.GetString(1));
+            Assert.Equal(3000m, jReader.GetDecimal(2));
+            Assert.Equal(0m, jReader.GetDecimal(3));
+
+            // Line 4: Cr 1200
+            Assert.True(await jReader.ReadAsync(ct));
+            Assert.Equal("1200", jReader.GetString(1));
+            Assert.Equal(0m, jReader.GetDecimal(2));
+            Assert.Equal(3000m, jReader.GetDecimal(3));
+        }
+
         // Verify remaining qty in sender FIFO layer decreased from 50 to 20
         await using (var conn = await dataSource.OpenConnectionAsync(ct))
         {
@@ -327,6 +370,35 @@ public class Phase13PostgresConsolidationIntegrationTests
 
         Assert.Equal("received", receivedTransfer.Status);
         Assert.NotNull(receivedTransfer.ToGlJournalId);
+
+        // Verify receiver journal lines:
+        // Dr 1200 Inventory Asset: 3,600 (at invoice transfer valuation)
+        // Cr 2200 Due-To Affiliates: 3,600 (at invoice transfer valuation)
+        await using (var conn = await dataSource.OpenConnectionAsync(ct))
+        {
+            await using var jCmd = conn.CreateCommand();
+            jCmd.CommandText = """
+                SELECT jl.line_no, a.account_code, jl.debit_functional, jl.credit_functional
+                FROM finance.journal_lines jl
+                JOIN finance.accounts a ON a.id = jl.account_id
+                WHERE jl.journal_id = @jId
+                ORDER BY jl.line_no ASC;
+                """;
+            jCmd.Parameters.AddWithValue("jId", receivedTransfer.ToGlJournalId.Value);
+            await using var jReader = await jCmd.ExecuteReaderAsync(ct);
+
+            // Line 1: Dr 1200
+            Assert.True(await jReader.ReadAsync(ct));
+            Assert.Equal("1200", jReader.GetString(1));
+            Assert.Equal(3600m, jReader.GetDecimal(2));
+            Assert.Equal(0m, jReader.GetDecimal(3));
+
+            // Line 2: Cr 2200
+            Assert.True(await jReader.ReadAsync(ct));
+            Assert.Equal("2200", jReader.GetString(1));
+            Assert.Equal(0m, jReader.GetDecimal(2));
+            Assert.Equal(3600m, jReader.GetDecimal(3));
+        }
 
         // Verify receiver Model A FIFO layer created in Company B
         await using (var conn = await dataSource.OpenConnectionAsync(ct))
@@ -384,6 +456,22 @@ public class Phase13PostgresConsolidationIntegrationTests
         Assert.NotNull(webhook.PlaintextSecret);
         Assert.True(webhook.PlaintextSecret.Length >= 32);
 
+        // Verify encrypted-at-rest storage in database
+        await using (var conn = await dataSource.OpenConnectionAsync(ct))
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT secret_ciphertext, secret_hash FROM integrations.webhook_subscriptions WHERE id = @id;";
+            cmd.Parameters.AddWithValue("id", webhook.Subscription.Id);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            var ctSecret = reader.GetString(0);
+            var hash = reader.GetString(1);
+            Assert.NotEmpty(ctSecret);
+            Assert.NotEqual(webhook.PlaintextSecret, ctSecret); // Verified encrypted at rest
+            Assert.Equal(signingEngine.HashSecret(webhook.PlaintextSecret), hash);
+            Assert.Equal(webhook.PlaintextSecret, signingEngine.DecryptSecret(ctSecret));
+        }
+
         // 2. Rotate Webhook Secret
         var rotated = await integrationsService.RotateWebhookSecretAsync(tenantId, webhook.Subscription.Id, ct);
         Assert.NotEqual(webhook.PlaintextSecret, rotated.NewPlaintextSecret);
@@ -399,7 +487,8 @@ public class Phase13PostgresConsolidationIntegrationTests
         Assert.Equal("pending", delivery.DeliveryStatus);
         Assert.Equal(0, delivery.AttemptCount);
 
-        var (sigHeader, tsHeader) = signingEngine.ComputeHeaders(eventPayload, rotated.NewPlaintextSecret, DateTimeOffset.UtcNow);
+        // Verify server signs outbound delivery by decrypting stored secret
+        var (sigHeader, tsHeader) = await integrationsService.SignOutboundDeliveryAsync(tenantId, webhook.Subscription.Id, eventPayload, ct);
         Assert.StartsWith("sha256=", sigHeader);
         Assert.True(signingEngine.VerifySignature(eventPayload, rotated.NewPlaintextSecret, sigHeader, tsHeader));
 
@@ -435,6 +524,12 @@ public class Phase13PostgresConsolidationIntegrationTests
         // Revoke partner
         var revoked = await integrationsService.RevokeApiPartnerAsync(tenantId, partner.Partner.Id, ct);
         Assert.True(revoked);
+
+        // Revoke/Delete webhook subscription and verify outbound signing is rejected
+        var deletedSub = await integrationsService.DeleteWebhookSubscriptionAsync(tenantId, webhook.Subscription.Id, ct);
+        Assert.True(deletedSub);
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            integrationsService.SignOutboundDeliveryAsync(tenantId, webhook.Subscription.Id, eventPayload, ct));
 
         // Multi-tenant isolation test: querying with another tenant returns 0
         var otherTenantId = Guid.NewGuid();

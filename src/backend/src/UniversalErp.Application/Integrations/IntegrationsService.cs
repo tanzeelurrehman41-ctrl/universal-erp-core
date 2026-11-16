@@ -61,6 +61,15 @@ public class IntegrationsService
         return _repository.RecordDeliveryAttemptAsync(tenantId, deliveryId, statusCode, error, succeeded, ct);
     }
 
+    public async Task<(string SignatureHeader, string TimestampHeader)> SignOutboundDeliveryAsync(Guid tenantId, Guid subscriptionId, string payload, CancellationToken ct = default)
+    {
+        var secret = await _repository.GetDecryptedSecretAsync(tenantId, subscriptionId, ct);
+        if (string.IsNullOrWhiteSpace(secret))
+            throw new InvalidOperationException($"Cannot sign outbound delivery: webhook subscription {subscriptionId} not found, inactive, or revoked.");
+
+        return _signingEngine.ComputeHeaders(payload, secret, DateTimeOffset.UtcNow);
+    }
+
     public Task<OutboundEventDeliveryDto> RetryDeliveryAsync(Guid tenantId, Guid deliveryId, CancellationToken ct = default)
     {
         return _repository.RetryDeliveryAsync(tenantId, deliveryId, ct);

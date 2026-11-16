@@ -219,6 +219,7 @@ CREATE TABLE IF NOT EXISTS integrations.webhook_subscriptions (
     company_id UUID NOT NULL,
     event_type TEXT NOT NULL,
     target_url TEXT NOT NULL,
+    secret_ciphertext TEXT NOT NULL DEFAULT '',
     secret_hash TEXT NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

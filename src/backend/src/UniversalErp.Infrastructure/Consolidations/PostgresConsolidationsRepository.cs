@@ -429,6 +429,12 @@ public class PostgresConsolidationsRepository : IConsolidationsRepository
             var journalId = Guid.NewGuid();
             var totalAmount = transfer.TotalAmountPkr;
 
+            decimal totalCost = 0m;
+            foreach (var l in transfer.Lines)
+            {
+                totalCost += l.QuantityDispatched * l.UnitCostPkr;
+            }
+
             const string insJrnSql = @"
                 INSERT INTO finance.journals (
                     tenant_id, company_id, id, journal_no, journal_date, fiscal_period_id,
@@ -458,19 +464,61 @@ public class PostgresConsolidationsRepository : IConsolidationsRepository
             }
 
             // Journal Lines:
-            // Line 1: Dr Due-From Affiliates (Receivable)
-            const string insJrnLineSql = @"
-                INSERT INTO finance.journal_lines (
-                    tenant_id, company_id, journal_id, line_no, account_id,
-                    description, transaction_currency, transaction_amount, exchange_rate,
-                    debit_functional, credit_functional
-                )
-                VALUES
-                (@tenantId, @companyId, @journalId, 1, @dueFromAcc, @desc1, @curr, @amt, 1.0, @amt, 0),
-                (@tenantId, @companyId, @journalId, 2, @invAcc, @desc2, @curr, @amt, 1.0, 0, @amt);";
-
-            await using (var jlCmd = new NpgsqlCommand(insJrnLineSql, conn, tx))
+            // When transfer price differs from FIFO cost (markup/margin present), record:
+            // Line 1: Dr Due-From Affiliates (Receivable) at Transfer Price
+            // Line 2: Cr Intercompany Sales Revenue at Transfer Price
+            // Line 3: Dr Intercompany Cost of Goods Sold at Original FIFO Cost
+            // Line 4: Cr Inventory Asset at Original FIFO Cost
+            // When transfer is at cost, record:
+            // Line 1: Dr Due-From Affiliates at Cost
+            // Line 2: Cr Inventory Asset at Cost
+            if (totalAmount > totalCost)
             {
+                var salesRevenueAccountId = await ResolveAccountIdAsync(conn, tx, tenantId, transfer.FromCompanyId, "4000", ct);
+                var cogsAccountId = await ResolveAccountIdAsync(conn, tx, tenantId, transfer.FromCompanyId, "5000", ct);
+
+                const string insJrnLineSql = @"
+                    INSERT INTO finance.journal_lines (
+                        tenant_id, company_id, journal_id, line_no, account_id,
+                        description, transaction_currency, transaction_amount, exchange_rate,
+                        debit_functional, credit_functional
+                    )
+                    VALUES
+                    (@tenantId, @companyId, @journalId, 1, @dueFromAcc, @desc1, @curr, @amt, 1.0, @amt, 0),
+                    (@tenantId, @companyId, @journalId, 2, @salesAcc, @desc2, @curr, @amt, 1.0, 0, @amt),
+                    (@tenantId, @companyId, @journalId, 3, @cogsAcc, @desc3, @curr, @cost, 1.0, @cost, 0),
+                    (@tenantId, @companyId, @journalId, 4, @invAcc, @desc4, @curr, @cost, 1.0, 0, @cost);";
+
+                await using var jlCmd = new NpgsqlCommand(insJrnLineSql, conn, tx);
+                jlCmd.Parameters.AddWithValue("tenantId", tenantId);
+                jlCmd.Parameters.AddWithValue("companyId", transfer.FromCompanyId);
+                jlCmd.Parameters.AddWithValue("journalId", journalId);
+                jlCmd.Parameters.AddWithValue("dueFromAcc", dueFromAccountId);
+                jlCmd.Parameters.AddWithValue("salesAcc", salesRevenueAccountId);
+                jlCmd.Parameters.AddWithValue("cogsAcc", cogsAccountId);
+                jlCmd.Parameters.AddWithValue("invAcc", inventoryAccountId);
+                jlCmd.Parameters.AddWithValue("desc1", $"Due-from company {transfer.ToCompanyId} under {transfer.TransferNumber}");
+                jlCmd.Parameters.AddWithValue("desc2", $"Intercompany sales revenue for {transfer.TransferNumber}");
+                jlCmd.Parameters.AddWithValue("desc3", $"Cost of goods sold for {transfer.TransferNumber}");
+                jlCmd.Parameters.AddWithValue("desc4", $"FIFO inventory relief at original cost for {transfer.TransferNumber}");
+                jlCmd.Parameters.AddWithValue("curr", transfer.CurrencyCode);
+                jlCmd.Parameters.AddWithValue("amt", totalAmount);
+                jlCmd.Parameters.AddWithValue("cost", totalCost);
+                await jlCmd.ExecuteNonQueryAsync(ct);
+            }
+            else
+            {
+                const string insJrnLineSql = @"
+                    INSERT INTO finance.journal_lines (
+                        tenant_id, company_id, journal_id, line_no, account_id,
+                        description, transaction_currency, transaction_amount, exchange_rate,
+                        debit_functional, credit_functional
+                    )
+                    VALUES
+                    (@tenantId, @companyId, @journalId, 1, @dueFromAcc, @desc1, @curr, @amt, 1.0, @amt, 0),
+                    (@tenantId, @companyId, @journalId, 2, @invAcc, @desc2, @curr, @amt, 1.0, 0, @amt);";
+
+                await using var jlCmd = new NpgsqlCommand(insJrnLineSql, conn, tx);
                 jlCmd.Parameters.AddWithValue("tenantId", tenantId);
                 jlCmd.Parameters.AddWithValue("companyId", transfer.FromCompanyId);
                 jlCmd.Parameters.AddWithValue("journalId", journalId);

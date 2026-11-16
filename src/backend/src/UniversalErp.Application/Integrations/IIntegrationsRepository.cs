@@ -11,6 +11,7 @@ public interface IIntegrationsRepository
     Task<WebhookSubscriptionDto?> GetWebhookSubscriptionByIdAsync(Guid tenantId, Guid subscriptionId, CancellationToken ct = default);
     Task<WebhookSubscriptionCreateResult> CreateWebhookSubscriptionAsync(Guid tenantId, Guid companyId, CreateWebhookSubscriptionRequest request, CancellationToken ct = default);
     Task<RotateWebhookSecretResult> RotateWebhookSecretAsync(Guid tenantId, Guid subscriptionId, CancellationToken ct = default);
+    Task<string?> GetDecryptedSecretAsync(Guid tenantId, Guid subscriptionId, CancellationToken ct = default);
     Task<bool> DeleteWebhookSubscriptionAsync(Guid tenantId, Guid subscriptionId, CancellationToken ct = default);
 
     Task<OutboundEventDeliveryDto> EnqueueEventDeliveryAsync(Guid tenantId, EnqueueEventRequest request, CancellationToken ct = default);
