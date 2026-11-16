@@ -1,4 +1,4 @@
-import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
+import { initializeApp, getApps, type FirebaseApp } from "@firebase/app";
 import {
   getAuth,
   signInWithPopup,
@@ -9,7 +9,7 @@ import {
   GoogleAuthProvider,
   type Auth,
   type User as FirebaseUser,
-} from "firebase/auth";
+} from "@firebase/auth";
 
 export type TenantCompanyContext = {
   tenantId: string;
@@ -147,7 +147,7 @@ export function subscribeAuthState(callback: (user: ErpAuthUser | null) => void)
     callback(null);
     return () => {};
   }
-  return onAuthStateChanged(firebaseAuth, (user) => {
+  return onAuthStateChanged(firebaseAuth, (user: FirebaseUser | null) => {
     callback(mapFirebaseUser(user));
   });
 }

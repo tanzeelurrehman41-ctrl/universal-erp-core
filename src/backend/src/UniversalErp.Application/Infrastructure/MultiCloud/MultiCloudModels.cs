@@ -5,6 +5,16 @@ using System.Text;
 
 namespace UniversalErp.Application.Infrastructure.MultiCloud;
 
+public sealed class TenantProvisioningBlockedException : InvalidOperationException
+{
+    public TenantProvisioningBlockedException(string message) : base(message) { }
+}
+
+public sealed class DataResidencyViolationException : InvalidOperationException
+{
+    public DataResidencyViolationException(string message) : base(message) { }
+}
+
 public sealed record RegionalDeploymentNode(
     Guid NodeId,
     string RegionCode,
@@ -24,10 +34,11 @@ public sealed record TenantDataResidencyRoute(
     string HomeCountryCode,
     string PrimaryRegionCode,
     string? StandbyRegionCode,
-    string ComplianceRegime, // "GDPR", "HIPAA", "APRA_CPS234", "RBI_DATA_LOCALIZATION", "SAMA_CSF", "PIPEDA", "GLOBAL"
+    string ComplianceRegime, // "GDPR", "UK_GDPR", "HIPAA", "APRA_CPS234", "RBI_DATA_LOCALIZATION", "SAMA_CSF", "UAE_DATA_PROTECTION", "PIPEDA", "GLOBAL"
     bool CrossBorderReplicationAllowed,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string? Notes = null);
 
 public sealed record DisasterRecoveryDrill(
     Guid DrillId,
@@ -63,6 +74,8 @@ public interface IMultiCloudDeploymentService
     IReadOnlyList<RegionalDeploymentNode> GetRegionalNodes();
     RegionalDeploymentNode? GetNodeByRegion(string regionCode);
     TenantDataResidencyRoute ResolveTenantResidencyRoute(Guid tenantId, string homeCountryCode);
+    void ValidateTenantProvisioning(string homeCountryCode, string requestedPrimaryRegion);
+    void ValidateDisasterRecoveryTarget(string homeCountryCode, string targetRegion);
     FailoverEvaluationResult ExecuteFailoverDrill(string sourceRegion, string targetRegion, string drillType, string executedBy);
     IReadOnlyList<DisasterRecoveryDrill> GetExecutedDrills();
 }
@@ -82,35 +95,81 @@ public sealed class MultiCloudDeploymentService : IMultiCloudDeploymentService
     {
         _nodes.AddRange(new[]
         {
+            // Americas (US / Canada / Global)
             new RegionalDeploymentNode(
                 Guid.NewGuid(), "us-east-1", "US East (N. Virginia) Primary", "render",
                 "PRIMARY_ACTIVE", new[] { "US", "CA", "GLOBAL" },
                 "https://api-us-east.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 12,
                 "E3:B0:C4:42:98:FC:1C:14:9A:FB:F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55"),
 
+            // Europe EU Central (Frankfurt) - Primary for EU GDPR
             new RegionalDeploymentNode(
                 Guid.NewGuid(), "eu-central-1", "EU Central (Frankfurt) Secondary", "render",
-                "READ_REPLICA", new[] { "EU", "GB", "CH" },
+                "PRIMARY_ACTIVE", new[] { "EU", "DE", "FR", "IT", "ES", "NL", "PL" },
                 "https://api-eu-central.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 18,
                 "A1:22:98:FC:1C:14:9A:FB:F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55:01:FE"),
 
+            // United Kingdom (London) - Dedicated UK GDPR Node
             new RegionalDeploymentNode(
-                Guid.NewGuid(), "ap-southeast-1", "APAC (Singapore) Node", "aws",
-                "READ_REPLICA", new[] { "SG", "AU", "IN", "JP" },
-                "https://api-ap-southeast.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 24,
-                "F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55:01:FE:E3:B0:C4:42:98:FC:1C:14"),
+                Guid.NewGuid(), "eu-west-2", "AWS London (UK West-2 Primary)", "aws",
+                "PRIMARY_ACTIVE", new[] { "GB", "UK" },
+                "https://api-uk-london.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 15,
+                "C3:44:98:FC:1C:14:9A:FB:F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55:02:AA"),
+
+            // Australia Dedicated In-Country Nodes (APRA CPS 234 / Privacy Act 1988)
+            new RegionalDeploymentNode(
+                Guid.NewGuid(), "ap-southeast-2", "AWS Sydney (Australia SE-2 Primary)", "aws",
+                "PRIMARY_ACTIVE", new[] { "AU", "AU_NSW", "AU_VIC", "AU_QLD", "AU_WA", "AU_SA", "AU_TAS", "AU_ACT" },
+                "https://api-au-sydney.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 14,
+                "D5:55:98:FC:1C:14:9A:FB:F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55:03:BB"),
 
             new RegionalDeploymentNode(
-                Guid.NewGuid(), "me-central-1", "GCC / Middle East (UAE) Node", "aws",
-                "READ_REPLICA", new[] { "AE", "SA", "GCC" },
-                "https://api-me-central.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 22,
+                Guid.NewGuid(), "ap-southeast-4", "AWS Melbourne (Australia SE-4 Standby)", "aws",
+                "READ_REPLICA", new[] { "AU", "AU_VIC", "AU_STANDBY" },
+                "https://api-au-melbourne.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 16,
+                "E6:66:98:FC:1C:14:9A:FB:F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55:04:CC"),
+
+            // India Regulated Payment Data Gateways (RBI Payment Storage Mandate)
+            new RegionalDeploymentNode(
+                Guid.NewGuid(), "ap-south-1", "AWS Mumbai (India South-1 Payment Data Gateway)", "aws",
+                "PRIMARY_ACTIVE", new[] { "IN_PAYMENTS", "IN", "IN_MH", "IN_DL" },
+                "https://api-in-mumbai.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 19,
+                "F7:77:98:FC:1C:14:9A:FB:F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55:05:DD"),
+
+            new RegionalDeploymentNode(
+                Guid.NewGuid(), "ap-south-2", "AWS Hyderabad (India South-2 Standby Gateway)", "aws",
+                "READ_REPLICA", new[] { "IN_PAYMENTS", "IN_STANDBY" },
+                "https://api-in-hyderabad.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 22,
+                "A8:88:98:FC:1C:14:9A:FB:F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55:06:EE"),
+
+            // UAE Dedicated Node (UAE Federal Decree-Law No. 45/2021 - Strictly separate from Bahrain)
+            new RegionalDeploymentNode(
+                Guid.NewGuid(), "me-central-1-uae", "AWS UAE (Dubai Me-Central-1 Primary)", "aws",
+                "PRIMARY_ACTIVE", new[] { "AE", "UAE" },
+                "https://api-uae-dubai.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 18,
                 "B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55:01:FE:E3:B0:C4:42:98:FC:1C:14:A1:22:98:FC"),
 
+            // Bahrain Dedicated Node (Independent of UAE)
+            new RegionalDeploymentNode(
+                Guid.NewGuid(), "me-south-1-bhr", "AWS Bahrain (Me-South-1 Primary)", "aws",
+                "READ_REPLICA", new[] { "BH", "BAHRAIN" },
+                "https://api-bh-manama.universal-erp.internal", "HEALTHY", DateTimeOffset.UtcNow, 20,
+                "C1:11:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55:01:FE:E3:B0:C4:42:98:FC:1C:14:A1:22:98:FD"),
+
+            // Saudi Arabia In-Kingdom Sovereign Node (Roadmap / Pending NCA & SAMA Certification)
+            new RegionalDeploymentNode(
+                Guid.NewGuid(), "me-central-2-ksa", "Saudi Arabia Sovereign Node (Riyadh / Dammam - Pending Certification)", "aws",
+                "DR_STANDBY", new[] { "SA", "KSA" },
+                "https://api-ksa-riyadh.universal-erp.internal", "DRAINING", DateTimeOffset.UtcNow, 30,
+                "D2:22:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55:01:FE:E3:B0:C4:42:98:FC:1C:14:A1:22:98:FE"),
+
+            // Neon Managed Database Primary Cluster
             new RegionalDeploymentNode(
                 Guid.NewGuid(), "neon-ha-primary", "Neon Serverless PostgreSQL Primary", "neon",
                 "PRIMARY_ACTIVE", new[] { "GLOBAL", "US", "EU", "APAC", "GCC" },
                 "postgresql://ep-silent-smoke.render-staging.neon.tech/erp_prod", "HEALTHY", DateTimeOffset.UtcNow, 5),
 
+            // Cloudflare Global Anycast Edge
             new RegionalDeploymentNode(
                 Guid.NewGuid(), "cloudflare-edge-global", "Cloudflare Global Anycast Edge", "cloudflare",
                 "EDGE_GATEWAY", new[] { "GLOBAL" },
@@ -156,41 +215,61 @@ public sealed class MultiCloudDeploymentService : IMultiCloudDeploymentService
 
         return country switch
         {
-            // European Union / UK / Switzerland -> Strict GDPR & Data Protection
-            "DE" or "FR" or "IT" or "ES" or "NL" or "BE" or "AT" or "IE" or "PL" or "SE" or "GB" or "CH" =>
-                new TenantDataResidencyRoute(
-                    Guid.NewGuid(), tenantId, country, "eu-central-1", "us-east-1",
-                    "GDPR", CrossBorderReplicationAllowed: false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
-
-            // Australia -> APRA CPS 234 & Privacy Act 1988
+            // Australia -> APRA CPS 234 & Privacy Act 1988 (Strict In-Country Hosting: Sydney ap-southeast-2, Standby Melbourne ap-southeast-4)
             "AU" =>
                 new TenantDataResidencyRoute(
-                    Guid.NewGuid(), tenantId, country, "ap-southeast-1", "us-east-1",
-                    "APRA_CPS234", CrossBorderReplicationAllowed: false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+                    Guid.NewGuid(), tenantId, country, "ap-southeast-2", "ap-southeast-4",
+                    "APRA_CPS234", CrossBorderReplicationAllowed: false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+                    "Strict Australian in-country residency: primary Sydney (ap-southeast-2), failover Melbourne (ap-southeast-4). Zero cross-border replication."),
 
-            // India -> RBI Master Direction on Local Storage of Payment Data & DPDP Act
+            // India -> RBI Master Direction on Storage of Payment Data & DPDP Act 2023
+            // Regulated payment transactions routed to Mumbai ap-south-1; Standby Hyderabad ap-south-2
             "IN" =>
                 new TenantDataResidencyRoute(
-                    Guid.NewGuid(), tenantId, country, "ap-southeast-1", "eu-central-1",
-                    "RBI_DATA_LOCALIZATION", CrossBorderReplicationAllowed: false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+                    Guid.NewGuid(), tenantId, country, "ap-south-1", "ap-south-2",
+                    "RBI_DATA_LOCALIZATION", CrossBorderReplicationAllowed: false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+                    "Regulated end-to-end payment transaction & settlement data strictly stored in India (Mumbai ap-south-1 / Hyderabad ap-south-2). General non-payment ERP operational data permitted under DPDP Act transfer rules."),
 
-            // Saudi Arabia & UAE -> SAMA Cyber Security Framework & UAE Data Law
-            "SA" or "AE" =>
+            // Saudi Arabia -> SAMA Cybersecurity Framework (CSF) & NCA ECC/CCC
+            // Mandatory in-kingdom hosting. Tenant provisioning disabled until in-kingdom sovereign cloud is certified.
+            "SA" =>
+                throw new TenantProvisioningBlockedException(
+                    "Non-compliant: In-kingdom Saudi Arabia sovereign hosting (Riyadh/Dammam me-central-2-ksa) is pending regulatory compliance audit and formal certification. Tenant provisioning is fail-closed disabled to prevent non-compliant UAE routing."),
+
+            // United Arab Emirates -> Federal Decree-Law No. 45/2021 (Dedicated Dubai Node, strictly separate from Bahrain)
+            "AE" =>
                 new TenantDataResidencyRoute(
-                    Guid.NewGuid(), tenantId, country, "me-central-1", "eu-central-1",
-                    "SAMA_CSF", CrossBorderReplicationAllowed: false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+                    Guid.NewGuid(), tenantId, country, "me-central-1-uae", "eu-central-1",
+                    "UAE_DATA_PROTECTION", CrossBorderReplicationAllowed: false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+                    "Dedicated UAE hosting (Dubai me-central-1-uae) strictly independent of Bahrain (me-south-1-bhr)."),
 
-            // Canada -> PIPEDA & Provincial Privacy Legislation
+            // United Kingdom -> UK GDPR & Data Protection Act 2018 (Dedicated London Node)
+            "GB" =>
+                new TenantDataResidencyRoute(
+                    Guid.NewGuid(), tenantId, country, "eu-west-2", "eu-central-1",
+                    "UK_GDPR", CrossBorderReplicationAllowed: false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+                    "Primary hosting in London (eu-west-2). Secondary backup in Frankfurt (eu-central-1) protected by UK International Data Transfer Addendum (IDTA)."),
+
+            // European Union -> EU GDPR Chapter V (Frankfurt Node, unauthorized US recovery strictly forbidden)
+            "DE" or "FR" or "IT" or "ES" or "NL" or "BE" or "AT" or "IE" or "PL" or "SE" or "CH" =>
+                new TenantDataResidencyRoute(
+                    Guid.NewGuid(), tenantId, country, "eu-central-1", "eu-west-2",
+                    "GDPR", CrossBorderReplicationAllowed: false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+                    "Primary Frankfurt (eu-central-1), Standby London (eu-west-2). Unauthorized foreign recovery into non-EEA/US regions is strictly prevented."),
+
+            // Canada -> PIPEDA & Provincial Privacy (Quebec Law 25 / BC FIPPA / Alberta PIPA)
             "CA" =>
                 new TenantDataResidencyRoute(
                     Guid.NewGuid(), tenantId, country, "us-east-1", "eu-central-1",
-                    "PIPEDA", CrossBorderReplicationAllowed: false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+                    "PIPEDA", CrossBorderReplicationAllowed: true, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+                    "Cross-border processing in us-east-1 disclosed under PIPEDA transfer rules; mandatory Privacy Impact Assessment (PIA) required for public sector or health workloads."),
 
             // United States -> HIPAA / SOC 2 Type II
             "US" =>
                 new TenantDataResidencyRoute(
                     Guid.NewGuid(), tenantId, country, "us-east-1", "eu-central-1",
-                    "HIPAA", CrossBorderReplicationAllowed: true, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+                    "HIPAA", CrossBorderReplicationAllowed: true, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+                    "BAA available, SOC 2 Type II security baseline."),
 
             // Global Default
             _ =>
@@ -198,6 +277,55 @@ public sealed class MultiCloudDeploymentService : IMultiCloudDeploymentService
                     Guid.NewGuid(), tenantId, country, "us-east-1", "eu-central-1",
                     "GLOBAL", CrossBorderReplicationAllowed: true, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)
         };
+    }
+
+    public void ValidateTenantProvisioning(string homeCountryCode, string requestedPrimaryRegion)
+    {
+        var country = (homeCountryCode ?? "US").Trim().ToUpperInvariant();
+
+        if (country == "SA")
+        {
+            throw new TenantProvisioningBlockedException(
+                "Tenant provisioning for Saudi Arabia is blocked: In-kingdom sovereign cloud hosting is pending certification. Routing to UAE is forbidden.");
+        }
+
+        if (country == "AU" && !requestedPrimaryRegion.StartsWith("ap-southeast-2", StringComparison.OrdinalIgnoreCase) && !requestedPrimaryRegion.StartsWith("ap-southeast-4", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new DataResidencyViolationException(
+                $"Tenant provisioning failed: Australian tenants must be hosted in Australia (ap-southeast-2 Sydney or ap-southeast-4 Melbourne). Requested: {requestedPrimaryRegion}");
+        }
+
+        if (country == "GB" && !requestedPrimaryRegion.Equals("eu-west-2", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new DataResidencyViolationException(
+                $"Tenant provisioning failed: UK tenants requiring UK residency must be hosted in London (eu-west-2). Requested: {requestedPrimaryRegion}");
+        }
+
+        if ((country == "DE" || country == "FR" || country == "IT" || country == "ES" || country == "NL" || country == "PL") &&
+            !requestedPrimaryRegion.Equals("eu-central-1", StringComparison.OrdinalIgnoreCase) && !requestedPrimaryRegion.Equals("eu-west-2", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new DataResidencyViolationException(
+                $"Tenant provisioning failed: EU tenants must be hosted within European regulatory boundaries (eu-central-1 Frankfurt). Requested: {requestedPrimaryRegion}");
+        }
+    }
+
+    public void ValidateDisasterRecoveryTarget(string homeCountryCode, string targetRegion)
+    {
+        var country = (homeCountryCode ?? "US").Trim().ToUpperInvariant();
+
+        // Fail-closed prevention of unauthorized recovery into foreign regions
+        if ((country == "AU") && !targetRegion.Equals("ap-southeast-2", StringComparison.OrdinalIgnoreCase) && !targetRegion.Equals("ap-southeast-4", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new DataResidencyViolationException(
+                $"[FAIL-CLOSED DISASTER RECOVERY] Australian tenant data cannot be restored or failed over to foreign region {targetRegion}. Allowed: ap-southeast-2, ap-southeast-4.");
+        }
+
+        if ((country == "DE" || country == "FR" || country == "IT" || country == "ES" || country == "NL" || country == "PL" || country == "GB") &&
+            !targetRegion.StartsWith("eu-", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new DataResidencyViolationException(
+                $"[FAIL-CLOSED DISASTER RECOVERY] European/UK tenant data cannot be restored or failed over to non-European region {targetRegion}. Unauthorized foreign recovery strictly forbidden under GDPR Chapter V.");
+        }
     }
 
     public FailoverEvaluationResult ExecuteFailoverDrill(string sourceRegion, string targetRegion, string drillType, string executedBy)

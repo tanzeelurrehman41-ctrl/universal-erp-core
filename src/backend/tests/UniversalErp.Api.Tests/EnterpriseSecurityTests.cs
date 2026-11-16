@@ -321,41 +321,98 @@ public sealed class EnterpriseSecurityTests
         var service = new MultiCloudDeploymentService();
         var tenantId = Guid.NewGuid();
 
-        // 1. EU Tenant (Germany) -> Strict GDPR (eu-central-1, no cross-border replication)
+        // 1. EU Tenant (Germany) -> Strict GDPR (eu-central-1 Frankfurt primary, eu-west-2 London standby, no cross-border replication)
         var euRoute = service.ResolveTenantResidencyRoute(tenantId, "DE");
         Assert.Equal("eu-central-1", euRoute.PrimaryRegionCode);
+        Assert.Equal("eu-west-2", euRoute.StandbyRegionCode);
         Assert.Equal("GDPR", euRoute.ComplianceRegime);
         Assert.False(euRoute.CrossBorderReplicationAllowed);
 
-        // 2. Australian Tenant -> APRA CPS 234 (ap-southeast-1, no cross-border replication)
+        // 2. Australian Tenant -> APRA CPS 234 & Privacy Act (ap-southeast-2 Sydney primary, ap-southeast-4 Melbourne standby)
         var auRoute = service.ResolveTenantResidencyRoute(tenantId, "AU");
-        Assert.Equal("ap-southeast-1", auRoute.PrimaryRegionCode);
+        Assert.Equal("ap-southeast-2", auRoute.PrimaryRegionCode);
+        Assert.Equal("ap-southeast-4", auRoute.StandbyRegionCode);
         Assert.Equal("APRA_CPS234", auRoute.ComplianceRegime);
         Assert.False(auRoute.CrossBorderReplicationAllowed);
 
-        // 3. Indian Tenant -> RBI Data Localization (ap-southeast-1, no cross-border replication)
+        // 3. Indian Tenant -> RBI Data Localization for payments (ap-south-1 Mumbai primary, ap-south-2 Hyderabad standby)
         var inRoute = service.ResolveTenantResidencyRoute(tenantId, "IN");
-        Assert.Equal("ap-southeast-1", inRoute.PrimaryRegionCode);
+        Assert.Equal("ap-south-1", inRoute.PrimaryRegionCode);
+        Assert.Equal("ap-south-2", inRoute.StandbyRegionCode);
         Assert.Equal("RBI_DATA_LOCALIZATION", inRoute.ComplianceRegime);
         Assert.False(inRoute.CrossBorderReplicationAllowed);
 
-        // 4. Saudi Arabia Tenant -> SAMA CSF (me-central-1, no cross-border replication)
-        var saRoute = service.ResolveTenantResidencyRoute(tenantId, "SA");
-        Assert.Equal("me-central-1", saRoute.PrimaryRegionCode);
-        Assert.Equal("SAMA_CSF", saRoute.ComplianceRegime);
-        Assert.False(saRoute.CrossBorderReplicationAllowed);
+        // 4. Saudi Arabia Tenant -> Fail-closed blocked pending in-kingdom sovereign cloud certification (no UAE routing)
+        var saEx = Assert.Throws<TenantProvisioningBlockedException>(() => service.ResolveTenantResidencyRoute(tenantId, "SA"));
+        Assert.Contains("In-kingdom Saudi Arabia sovereign hosting", saEx.Message);
 
-        // 5. Canada Tenant -> PIPEDA (us-east-1, no cross-border replication)
+        // 5. UAE Tenant -> Dedicated Dubai Node (me-central-1-uae, distinct from Bahrain)
+        var aeRoute = service.ResolveTenantResidencyRoute(tenantId, "AE");
+        Assert.Equal("me-central-1-uae", aeRoute.PrimaryRegionCode);
+        Assert.Equal("UAE_DATA_PROTECTION", aeRoute.ComplianceRegime);
+        Assert.False(aeRoute.CrossBorderReplicationAllowed);
+
+        // 6. UK Tenant -> Dedicated London Node (eu-west-2)
+        var gbRoute = service.ResolveTenantResidencyRoute(tenantId, "GB");
+        Assert.Equal("eu-west-2", gbRoute.PrimaryRegionCode);
+        Assert.Equal("UK_GDPR", gbRoute.ComplianceRegime);
+        Assert.False(gbRoute.CrossBorderReplicationAllowed);
+
+        // 7. Canada Tenant -> PIPEDA (us-east-1, cross-border allowed with PIA disclosure)
         var caRoute = service.ResolveTenantResidencyRoute(tenantId, "CA");
         Assert.Equal("us-east-1", caRoute.PrimaryRegionCode);
         Assert.Equal("PIPEDA", caRoute.ComplianceRegime);
-        Assert.False(caRoute.CrossBorderReplicationAllowed);
+        Assert.True(caRoute.CrossBorderReplicationAllowed);
 
-        // 6. US Tenant -> HIPAA (us-east-1, cross-border replication allowed)
+        // 8. US Tenant -> HIPAA (us-east-1, cross-border replication allowed)
         var usRoute = service.ResolveTenantResidencyRoute(tenantId, "US");
         Assert.Equal("us-east-1", usRoute.PrimaryRegionCode);
         Assert.Equal("HIPAA", usRoute.ComplianceRegime);
         Assert.True(usRoute.CrossBorderReplicationAllowed);
+    }
+
+    [Fact]
+    public void MultiCloudDeploymentService_ValidatesFailClosedResidencyAndDisasterRecovery()
+    {
+        var service = new MultiCloudDeploymentService();
+
+        // 1. SA provisioning blocked fail-closed
+        Assert.Throws<TenantProvisioningBlockedException>(() =>
+            service.ValidateTenantProvisioning("SA", "me-central-1-uae"));
+
+        // 2. AU foreign provisioning blocked (Singapore rejected)
+        Assert.Throws<DataResidencyViolationException>(() =>
+            service.ValidateTenantProvisioning("AU", "us-east-1"));
+        Assert.Throws<DataResidencyViolationException>(() =>
+            service.ValidateTenantProvisioning("AU", "ap-southeast-1"));
+
+        // 3. AU valid provisioning succeeds (Sydney or Melbourne)
+        service.ValidateTenantProvisioning("AU", "ap-southeast-2");
+        service.ValidateTenantProvisioning("AU", "ap-southeast-4");
+
+        // 4. GB foreign provisioning blocked
+        Assert.Throws<DataResidencyViolationException>(() =>
+            service.ValidateTenantProvisioning("GB", "us-east-1"));
+
+        // 5. EU foreign provisioning blocked
+        Assert.Throws<DataResidencyViolationException>(() =>
+            service.ValidateTenantProvisioning("DE", "us-east-1"));
+
+        // 6. Fail-closed disaster recovery target validation
+        // EU tenant cannot be recovered to US
+        Assert.Throws<DataResidencyViolationException>(() =>
+            service.ValidateDisasterRecoveryTarget("DE", "us-east-1"));
+
+        // AU tenant cannot be recovered to Singapore or US
+        Assert.Throws<DataResidencyViolationException>(() =>
+            service.ValidateDisasterRecoveryTarget("AU", "ap-southeast-1"));
+        Assert.Throws<DataResidencyViolationException>(() =>
+            service.ValidateDisasterRecoveryTarget("AU", "us-east-1"));
+
+        // Valid DR targets succeed
+        service.ValidateDisasterRecoveryTarget("AU", "ap-southeast-4");
+        service.ValidateDisasterRecoveryTarget("DE", "eu-central-1");
+        service.ValidateDisasterRecoveryTarget("DE", "eu-west-2");
     }
 
     [Fact]
