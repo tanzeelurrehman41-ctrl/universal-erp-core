@@ -146,17 +146,29 @@ test("calculateGlobalTax resolves UK and European Union VAT rules", () => {
   assert.equal(fr.taxAmount, 200.0);
   assert.equal(fr.totalAmount, 1200.0);
 
-  // Intra-EU B2B Reverse Charge (Germany supplier -> France customer)
+  // Intra-EU B2B Reverse Charge (Germany supplier -> France customer with verified VAT ID)
   const euCross = calculateGlobalTax({
     amount: 1000,
     customerCountryCode: "FR",
     supplierCountryCode: "DE",
     customerType: "b2b",
+    customerVatNumber: "FR123456789",
   });
   assert.equal(euCross.ratePct, 0.0);
   assert.equal(euCross.taxAmount, 0.0);
   assert.equal(euCross.taxRegime, "reverse_charge");
   assert.ok(euCross.statutoryReference.includes("Article 196"));
+
+  // Intra-EU B2B without valid VAT ID falls back to French destination VAT (20%)
+  const euCrossNoVat = calculateGlobalTax({
+    amount: 1000,
+    customerCountryCode: "FR",
+    supplierCountryCode: "DE",
+    customerType: "b2b",
+  });
+  assert.equal(euCrossNoVat.ratePct, 20.0);
+  assert.equal(euCrossNoVat.taxAmount, 200.0);
+  assert.equal(euCrossNoVat.isDestinationVat, true);
 });
 
 test("calculateGlobalTax resolves Middle East GCC VAT (UAE & Saudi Arabia)", () => {
@@ -222,16 +234,21 @@ test("calculateGlobalPayroll accurately calculates US, UK, UAE, and Pakistan pay
   assert.ok(ssLine);
   assert.equal(ssLine.employeeAmount, 620.0); // 6.2% of 10,000
 
-  // 2. United Kingdom Payroll (£5,000 monthly gross)
+  // 2. United Kingdom Payroll (£5,000 monthly gross under 2026-27 reform)
   const ukPay = calculateGlobalPayroll({
     countryCode: "GB",
     grossSalary: 5000,
     currencyCode: "GBP",
+    effectiveDate: "2026-05-01",
   });
   assert.equal(ukPay.countryCode, "GB");
   assert.ok(ukPay.employeeIncomeTax > 0); // PAYE
   assert.ok(ukPay.employeeStatutoryDeductions > 0); // NIC
   assert.ok(ukPay.employerStatutoryContributions > 0); // Employer NIC
+  // Under 2026-27 reform: Employer NIC is 15.0% above £417.00/month -> (5000 - 417) * 0.15 = 687.45
+  const erNic = ukPay.statutoryLines.find((l) => l.code === "UK_NIC");
+  assert.ok(erNic);
+  assert.equal(erNic.employerAmount, 687.45);
 
   // 3. United Arab Emirates Expatriate Payroll (AED 20,000 gross)
   const uaePay = calculateGlobalPayroll({
@@ -259,4 +276,160 @@ test("calculateGlobalPayroll accurately calculates US, UK, UAE, and Pakistan pay
   assert.ok(eobiLine);
   assert.equal(eobiLine.employeeAmount, 370.0); // 1% of 37,000
   assert.equal(eobiLine.employerAmount, 1850.0); // 5% of 37,000
+});
+
+test("calculateUsPayroll verifies 2026 OASDI cap ($184,500), Additional Medicare (0.9%), MFJ, FUTA & SUTA", () => {
+  // Test high-earner $25,000/mo ($300k annualized) Single filer
+  const res = calculateGlobalPayroll({
+    countryCode: "US",
+    grossSalary: 25000,
+    filingStatus: "Single",
+    effectiveDate: "2026-06-01",
+  });
+
+  // OASDI: monthly cap is $184,500 / 12 = $15,375.00 -> 6.2% = $953.25
+  const ss = res.statutoryLines.find((l) => l.code === "US_FICA_SS");
+  assert.ok(ss);
+  assert.equal(ss.employeeAmount, 953.25);
+  assert.equal(ss.employerAmount, 953.25);
+
+  // Medicare: 1.45% base on $25,000 = $362.50 + 0.9% on ($25,000 - $16,666.67 = $8,333.33) = $75.00 -> Total EE = $437.50
+  const med = res.statutoryLines.find((l) => l.code === "US_FICA_MED");
+  assert.ok(med);
+  assert.equal(med.employeeAmount, 437.50);
+  assert.equal(med.employerAmount, 362.50);
+
+  // FUTA: 0.6% on $583.33 = $3.50
+  const futa = res.statutoryLines.find((l) => l.code === "US_FUTA");
+  assert.ok(futa);
+  assert.equal(futa.employerAmount, 3.50);
+
+  // Married Filing Jointly should have higher standard deduction ($31,400) resulting in lower FIT
+  const resMfj = calculateGlobalPayroll({
+    countryCode: "US",
+    grossSalary: 25000,
+    filingStatus: "MarriedFilingJointly",
+    effectiveDate: "2026-06-01",
+  });
+  assert.ok(resMfj.employeeIncomeTax < res.employeeIncomeTax);
+});
+
+test("calculateUkPayroll verifies 2026-27 Employer NIC (15%, £417 threshold), Scottish PAYE, Student Loans, Categories", () => {
+  // Category C: State pensioner (0% employee NIC, 15% employer NIC above £417)
+  const catC = calculateGlobalPayroll({
+    countryCode: "GB",
+    grossSalary: 3000,
+    ukCategoryLetter: "C",
+    effectiveDate: "2026-06-01",
+  });
+  const nicC = catC.statutoryLines.find((l) => l.code === "UK_NIC");
+  assert.ok(nicC);
+  assert.equal(nicC.employeeAmount, 0.0);
+  assert.equal(nicC.employerAmount, 387.45); // (3000 - 417) * 0.15 = 387.45
+
+  // Scottish Taxpayer with Student Loan Plan 4 & Pension Auto-Enrolment
+  const scot = calculateGlobalPayroll({
+    countryCode: "GB",
+    grossSalary: 4000,
+    ukCategoryLetter: "A",
+    isScottishTaxpayer: true,
+    studentLoanPlan: "Plan4",
+    pensionAutoEnrolment: true,
+    effectiveDate: "2026-06-01",
+  });
+  const payeLine = scot.statutoryLines.find((l) => l.code === "UK_PAYE");
+  assert.ok(payeLine);
+  assert.ok(payeLine.description.includes("Scottish"));
+
+  const slLine = scot.statutoryLines.find((l) => l.code === "UK_SL_PLAN4");
+  assert.ok(slLine);
+  // Plan 4 threshold £2,616.25 -> (4000 - 2616.25) * 0.09 = 124.54
+  assert.equal(slLine.employeeAmount, 124.54);
+
+  const pensionLine = scot.statutoryLines.find((l) => l.code === "UK_PENSION_AE");
+  assert.ok(pensionLine);
+  // Qualifying earnings: 4000 - 520 = 3480 -> EE 5% = 174, ER 3% = 104.40
+  assert.equal(pensionLine.employeeAmount, 174.0);
+  assert.equal(pensionLine.employerAmount, 104.40);
+});
+
+test("calculateGlobalTax enforces EU OSS destination VAT for B2C and Art 196 reverse charge for B2B", () => {
+  // Cross-Border EU B2C: US supplier -> German consumer => 19% German VAT under OSS
+  const b2cDe = calculateGlobalTax({
+    amount: 1000,
+    supplierCountryCode: "US",
+    customerCountryCode: "DE",
+    customerType: "b2c",
+    isEuOssEligible: true,
+  });
+  assert.equal(b2cDe.ratePct, 19.0);
+  assert.equal(b2cDe.taxAmount, 190.0);
+  assert.equal(b2cDe.isDestinationVat, true);
+  assert.ok(b2cDe.eInvoicingMandatePlatform?.includes("ZUGFeRD"));
+
+  // Cross-Border EU B2C: US supplier -> Irish consumer => 23% Irish VAT under OSS
+  const b2cIe = calculateGlobalTax({
+    amount: 1000,
+    supplierCountryCode: "US",
+    customerCountryCode: "IE",
+    customerType: "b2c",
+  });
+  assert.equal(b2cIe.ratePct, 23.0);
+  assert.equal(b2cIe.taxAmount, 230.0);
+
+  // Cross-Border EU B2B with valid VAT ID => 0% Reverse Charge under Article 196
+  const b2bDe = calculateGlobalTax({
+    amount: 1000,
+    supplierCountryCode: "US",
+    customerCountryCode: "DE",
+    customerType: "b2b",
+    customerVatNumber: "DE123456789",
+  });
+  assert.equal(b2bDe.ratePct, 0.0);
+  assert.equal(b2bDe.taxAmount, 0.0);
+  assert.equal(b2bDe.isReverseCharge, true);
+  assert.ok(b2bDe.statutoryReference.includes("Article 196"));
+
+  // UK Overseas Vendor B2C digital services: 20% standard VAT
+  const ukB2c = calculateGlobalTax({
+    amount: 1000,
+    supplierCountryCode: "US",
+    customerCountryCode: "GB",
+    customerType: "b2c",
+  });
+  assert.equal(ukB2c.ratePct, 20.0);
+  assert.equal(ukB2c.taxAmount, 200.0);
+  assert.equal(ukB2c.isDestinationVat, true);
+
+  // UK Overseas Vendor B2B with UK VAT: 0% Reverse Charge
+  const ukB2b = calculateGlobalTax({
+    amount: 1000,
+    supplierCountryCode: "US",
+    customerCountryCode: "GB",
+    customerType: "b2b",
+    customerVatNumber: "GB123456789",
+  });
+  assert.equal(ukB2b.ratePct, 0.0);
+  assert.equal(ukB2b.isReverseCharge, true);
+
+  // Australia Inbound B2C: 10% GST
+  const auB2c = calculateGlobalTax({
+    amount: 1000,
+    supplierCountryCode: "US",
+    customerCountryCode: "AU",
+    customerType: "b2c",
+  });
+  assert.equal(auB2c.ratePct, 10.0);
+  assert.equal(auB2c.taxAmount, 100.0);
+
+  // Canada Ontario B2C: 13% HST
+  const caB2c = calculateGlobalTax({
+    amount: 1000,
+    supplierCountryCode: "US",
+    customerCountryCode: "CA",
+    customerJurisdictionCode: "ON",
+    customerType: "b2c",
+  });
+  assert.equal(caB2c.ratePct, 13.0);
+  assert.equal(caB2c.taxAmount, 130.0);
 });

@@ -48,14 +48,16 @@ public sealed record TaxDeterminationRequest(
     bool HasValidForeignRemittanceProof = false,
     string? ExemptionCertificateNumber = null,
     bool ProviderElectedReducedRateWithoutInputTax = false,
-    DateTimeOffset? AsOfDate = null);
+    DateTimeOffset? AsOfDate = null,
+    bool SupplierHasNexusInDestination = false,
+    bool IsEuOssEligible = true);
 
 public sealed record TaxDeterminationResult(
     string Jurisdiction,
     string CountryCode,
     string? ProvinceState,
     string Authority,
-    string TaxSystem, // "sales_tax", "vat", "gst", "export_zero_rated", "reverse_charge", "exempt"
+    string TaxSystem, // "sales_tax", "vat", "gst", "eu_oss", "export_zero_rated", "reverse_charge", "exempt"
     string TaxName,
     string TariffOrClassificationCode,
     decimal RatePercentage,
@@ -64,7 +66,9 @@ public sealed record TaxDeterminationResult(
     bool IsExempt,
     string StatutoryReference,
     string CalculationExplanation,
-    string AuditEvidenceSummary);
+    string AuditEvidenceSummary,
+    string? EInvoicingMandatePlatform = null,
+    bool IsDestinationVat = false);
 
 public sealed record GlobalInvoiceCalculationResult(
     decimal Subtotal,

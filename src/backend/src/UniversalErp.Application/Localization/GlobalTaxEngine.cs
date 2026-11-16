@@ -15,31 +15,130 @@ public sealed class GlobalTaxEngine
         var customerCountry = (request.CustomerCountryCode ?? "US").Trim().ToUpperInvariant();
         var province = request.CustomerProvinceState?.Trim().ToUpperInvariant();
         var asOf = request.AsOfDate ?? DateTimeOffset.UtcNow;
+        var hasVatId = !string.IsNullOrWhiteSpace(request.CustomerTaxId);
         var isB2B = string.Equals(request.CustomerType, "b2b", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(request.CustomerType, "b2b_registered", StringComparison.OrdinalIgnoreCase) ||
-                    !string.IsNullOrWhiteSpace(request.CustomerTaxId);
+                    hasVatId;
 
-        // 1. Cross-Border International Export Check
-        if (request.IsExport || (supplierCountry != customerCountry && !IsIntraEu(supplierCountry, customerCountry)))
+        // 1. Pakistan IT Export Zero-Rating with Remittance Proof
+        if (supplierCountry == "PK" && customerCountry != "PK" && (request.IsExport || request.HasValidForeignRemittanceProof))
         {
-            if (request.HasValidForeignRemittanceProof || supplierCountry != customerCountry)
+            return new TaxDeterminationResult(
+                Jurisdiction: "PK-EXPORT",
+                CountryCode: customerCountry,
+                ProvinceState: province,
+                Authority: "FBR_PRC",
+                TaxSystem: "export_zero_rated",
+                TaxName: "Pakistan IT Export of Services (0% Zero-Rated)",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "9815.6000",
+                RatePercentage: 0.0000m,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: "Income Tax Ordinance 2001 Sec 154A & Provincial Place of Provision of Services Rules",
+                CalculationExplanation: $"Qualifying IT services export with foreign remittance proof from {supplierCountry} to {customerCountry}.",
+                AuditEvidenceSummary: $"Pakistan IT export zero-rating confirmed. RemittanceProof={request.HasValidForeignRemittanceProof}, Customer={customerCountry}.");
+        }
+
+        // 2. European Union (EU Member States: B2B Reverse Charge vs B2C One Stop Shop Destination VAT)
+        if (IsEuMemberState(customerCountry))
+        {
+            var isCrossBorder = supplierCountry != customerCountry;
+
+            // Intra-EU or Cross-Border B2B with verified VAT ID -> Reverse Charge (0%) under Article 196
+            if (isCrossBorder && isB2B && hasVatId)
             {
                 return new TaxDeterminationResult(
-                    Jurisdiction: "EXPORT",
+                    Jurisdiction: $"EU-{customerCountry}",
                     CountryCode: customerCountry,
                     ProvinceState: province,
-                    Authority: "CROSS_BORDER_HARMONIZED",
-                    TaxSystem: "export_zero_rated",
-                    TaxName: "Export of Services (Zero-Rated / Exempt)",
-                    TariffOrClassificationCode: request.ProductServiceClassification ?? "EXPORT-SERVICES",
+                    Authority: $"EU_REVENUE_{customerCountry}",
+                    TaxSystem: "reverse_charge",
+                    TaxName: "EU B2B Reverse Charge (Directive 2006/112/EC Art 196)",
+                    TariffOrClassificationCode: request.ProductServiceClassification ?? "CPA-62.01",
                     RatePercentage: 0.0000m,
                     InputTaxAllowable: true,
-                    IsReverseCharge: false,
+                    IsReverseCharge: true,
                     IsExempt: false,
-                    StatutoryReference: "OECD Guidelines on Place of Supply of Services & Cross-Border Export Zero-Rating",
-                    CalculationExplanation: $"Supply from {supplierCountry} to customer in {customerCountry} is outside domestic scope and zero-rated.",
-                    AuditEvidenceSummary: $"Cross-border export confirmed. Supplier={supplierCountry}, Customer={customerCountry}, RemittanceVerified={request.HasValidForeignRemittanceProof}");
+                    StatutoryReference: "Council Directive 2006/112/EC, Article 196 (Reverse Charge on Cross-Border B2B Services)",
+                    CalculationExplanation: $"Cross-border B2B electronic supply from {supplierCountry} to taxable person in {customerCountry}. Customer ({request.CustomerTaxId}) self-assesses VAT.",
+                    AuditEvidenceSummary: $"VIES VAT ID verified: {request.CustomerTaxId}. Reverse charge applies.",
+                    EInvoicingMandatePlatform: GetEuEInvoicingPlatform(customerCountry),
+                    IsDestinationVat: true);
             }
+
+            // B2C or Cross-Border B2B without valid VAT ID -> Destination VAT under EU One Stop Shop (OSS)
+            var euRate = GetEuStandardVatRate(customerCountry);
+            var isOss = isCrossBorder && request.IsEuOssEligible;
+
+            return new TaxDeterminationResult(
+                Jurisdiction: $"EU-{customerCountry}",
+                CountryCode: customerCountry,
+                ProvinceState: province,
+                Authority: $"EU_REVENUE_{customerCountry}",
+                TaxSystem: isOss ? "eu_oss" : "vat",
+                TaxName: isOss ? $"EU One Stop Shop (OSS) Destination VAT ({customerCountry})" : $"EU Domestic VAT ({customerCountry})",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "CPA-62.01",
+                RatePercentage: euRate,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: isOss
+                    ? "EU Directive 2006/112/EC Article 58 & Council Implementing Regulation (EU) 2019/1995 (OSS Scheme)"
+                    : $"National VAT Act of {customerCountry} (Standard Rate)",
+                CalculationExplanation: isOss
+                    ? $"Electronic service supplied to consumer in {customerCountry}. Destination VAT of {euRate}% charged under OSS scheme."
+                    : $"Domestic supply in {customerCountry} charged at standard rate of {euRate}%.",
+                AuditEvidenceSummary: $"EU destination VAT applied. Destination={customerCountry}, Rate={euRate}%, OSS={isOss}.",
+                EInvoicingMandatePlatform: GetEuEInvoicingPlatform(customerCountry),
+                IsDestinationVat: true);
+        }
+
+        // 3. United Kingdom (HMRC)
+        if (customerCountry == "GB")
+        {
+            var isCrossBorder = supplierCountry != "GB";
+
+            // Cross-border B2B with verified UK VAT number -> Reverse Charge under VATA 1994 s7A
+            if (isCrossBorder && isB2B && hasVatId)
+            {
+                return new TaxDeterminationResult(
+                    Jurisdiction: "GB-HMRC",
+                    CountryCode: "GB",
+                    ProvinceState: "UK",
+                    Authority: "HMRC",
+                    TaxSystem: "reverse_charge",
+                    TaxName: "UK B2B Cross-Border Reverse Charge",
+                    TariffOrClassificationCode: request.ProductServiceClassification ?? "CPA-62.01",
+                    RatePercentage: 0.0000m,
+                    InputTaxAllowable: true,
+                    IsReverseCharge: true,
+                    IsExempt: false,
+                    StatutoryReference: "Value Added Tax Act 1994, Section 7A (Place of Supply B2B General Rule)",
+                    CalculationExplanation: $"Supply from {supplierCountry} to UK business customer ({request.CustomerTaxId}). Customer accounts for VAT under reverse charge.",
+                    AuditEvidenceSummary: $"UK VAT registration verified: {request.CustomerTaxId}. Reverse charge applies.",
+                    IsDestinationVat: true);
+            }
+
+            // Domestic or B2C Cross-Border -> UK Standard 20% VAT
+            return new TaxDeterminationResult(
+                Jurisdiction: "GB-HMRC",
+                CountryCode: "GB",
+                ProvinceState: "UK",
+                Authority: "HMRC",
+                TaxSystem: "vat",
+                TaxName: isCrossBorder ? "UK Overseas Vendor Digital Services VAT" : "UK Value Added Tax (Standard Rate)",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "CPA-62.01",
+                RatePercentage: 20.0000m,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: "Value Added Tax Act 1994, Section 2(1) and Schedule 4A",
+                CalculationExplanation: isCrossBorder
+                    ? "UK Overseas vendor electronic services rules require standard 20% VAT on sales to UK consumers."
+                    : "Standard rate UK VAT for domestic supply of SaaS / electronic services.",
+                AuditEvidenceSummary: "HMRC statutory standard 20% VAT rate.",
+                IsDestinationVat: isCrossBorder);
         }
 
         // 2. United States Destination-Based Sales Tax
@@ -154,78 +253,6 @@ public sealed class GlobalTaxEngine
             };
         }
 
-        // 3. United Kingdom (HMRC)
-        if (customerCountry == "GB")
-        {
-            return new TaxDeterminationResult(
-                Jurisdiction: "GB-HMRC",
-                CountryCode: "GB",
-                ProvinceState: "UK",
-                Authority: "HMRC",
-                TaxSystem: "vat",
-                TaxName: "UK Value Added Tax (Standard Rate)",
-                TariffOrClassificationCode: request.ProductServiceClassification ?? "CPA-62.01",
-                RatePercentage: 20.0000m,
-                InputTaxAllowable: true,
-                IsReverseCharge: false,
-                IsExempt: false,
-                StatutoryReference: "Value Added Tax Act 1994, Section 2(1) and Schedule 4A",
-                CalculationExplanation: "Standard rate UK VAT for domestic supply of SaaS / electronic services.",
-                AuditEvidenceSummary: "HMRC statutory standard 20% VAT rate.");
-        }
-
-        // 4. European Union (EU Member States & One Stop Shop / Reverse Charge)
-        if (IsEuMemberState(customerCountry))
-        {
-            // Intra-EU B2B Reverse Charge under Article 196
-            if (supplierCountry != customerCountry && isB2B && !string.IsNullOrWhiteSpace(request.CustomerTaxId))
-            {
-                return new TaxDeterminationResult(
-                    Jurisdiction: $"EU-{customerCountry}",
-                    CountryCode: customerCountry,
-                    ProvinceState: province,
-                    Authority: "EU_COMMISSION",
-                    TaxSystem: "reverse_charge",
-                    TaxName: "EU Intra-Community B2B Reverse Charge",
-                    TariffOrClassificationCode: request.ProductServiceClassification ?? "CPA-62.01",
-                    RatePercentage: 0.0000m,
-                    InputTaxAllowable: true,
-                    IsReverseCharge: true,
-                    IsExempt: false,
-                    StatutoryReference: "Council Directive 2006/112/EC, Article 196 (Reverse Charge Mechanism)",
-                    CalculationExplanation: $"Intra-EU B2B supply. Customer ({request.CustomerTaxId}) self-assesses VAT in {customerCountry}.",
-                    AuditEvidenceSummary: $"VIES VAT ID verified: {request.CustomerTaxId}. Reverse charge applies.");
-            }
-
-            // B2C One Stop Shop (OSS) Destination VAT Rates
-            var euRate = customerCountry switch
-            {
-                "DE" => 19.0000m, // Germany MwSt
-                "FR" => 20.0000m, // France TVA
-                "IE" => 23.0000m, // Ireland VAT
-                "NL" => 21.0000m, // Netherlands BTW
-                "IT" => 22.0000m, // Italy IVA
-                "ES" => 21.0000m, // Spain IVA
-                _ => 20.0000m    // EU Average / Standard
-            };
-
-            return new TaxDeterminationResult(
-                Jurisdiction: $"EU-{customerCountry}",
-                CountryCode: customerCountry,
-                ProvinceState: province,
-                Authority: $"EU_REVENUE_{customerCountry}",
-                TaxSystem: "vat",
-                TaxName: $"EU One Stop Shop (OSS) VAT ({customerCountry})",
-                TariffOrClassificationCode: request.ProductServiceClassification ?? "CPA-62.01",
-                RatePercentage: euRate,
-                InputTaxAllowable: true,
-                IsReverseCharge: false,
-                IsExempt: false,
-                StatutoryReference: "EU VAT Directive 2006/112/EC & One Stop Shop (OSS) Destination Principle",
-                CalculationExplanation: $"B2C electronic service taxed at destination member state rate of {euRate}%.",
-                AuditEvidenceSummary: $"EU OSS destination principle applied. MemberState={customerCountry}, Rate={euRate}%.");
-        }
-
         // 5. United Arab Emirates (FTA)
         if (customerCountry == "AE")
         {
@@ -243,7 +270,8 @@ public sealed class GlobalTaxEngine
                 IsExempt: false,
                 StatutoryReference: "Federal Decree-Law No. (8) of 2017 on Value Added Tax & Cabinet Decision No. 52/2017",
                 CalculationExplanation: "Standard 5% VAT rate for electronic services consumed in the United Arab Emirates.",
-                AuditEvidenceSummary: "Federal Tax Authority (FTA) statutory standard 5% VAT rate.");
+                AuditEvidenceSummary: "Federal Tax Authority (FTA) statutory standard 5% VAT rate.",
+                EInvoicingMandatePlatform: "UAE MoF E-Invoicing (Peppol PINT)");
         }
 
         // 6. Saudi Arabia (ZATCA)
@@ -263,7 +291,97 @@ public sealed class GlobalTaxEngine
                 IsExempt: false,
                 StatutoryReference: "VAT Law Royal Decree No. (M/113) as amended by Royal Decree No. (A/638)",
                 CalculationExplanation: "Standard 15% VAT rate for electronic services consumed in KSA with ZATCA Phase 2 compliance.",
-                AuditEvidenceSummary: "Zakat, Tax and Customs Authority (ZATCA) statutory standard 15% VAT rate.");
+                AuditEvidenceSummary: "Zakat, Tax and Customs Authority (ZATCA) statutory standard 15% VAT rate.",
+                EInvoicingMandatePlatform: "ZATCA FATOORA Phase 2 (Cryptographic Stamp / UBL 2.1 XML)");
+        }
+
+        // 7. Australia (ATO GST)
+        if (customerCountry == "AU")
+        {
+            var isCrossBorder = supplierCountry != "AU";
+            if (isCrossBorder && isB2B && hasVatId)
+            {
+                return new TaxDeterminationResult(
+                    Jurisdiction: "AU-ATO",
+                    CountryCode: "AU",
+                    ProvinceState: province,
+                    Authority: "ATO",
+                    TaxSystem: "reverse_charge",
+                    TaxName: "Australia B2B Cross-Border Reverse Charge",
+                    TariffOrClassificationCode: request.ProductServiceClassification ?? "DIGITAL-SVC",
+                    RatePercentage: 0.0000m,
+                    InputTaxAllowable: true,
+                    IsReverseCharge: true,
+                    IsExempt: false,
+                    StatutoryReference: "A New Tax System (Goods and Services Tax) Act 1999, Subdiv 84-A",
+                    CalculationExplanation: $"Cross-border B2B digital service to Australian GST-registered business ({request.CustomerTaxId}). Reverse charge applies.",
+                    AuditEvidenceSummary: $"ABN/GST verified: {request.CustomerTaxId}. Reverse charge applies.");
+            }
+
+            return new TaxDeterminationResult(
+                Jurisdiction: "AU-ATO",
+                CountryCode: "AU",
+                ProvinceState: province,
+                Authority: "ATO",
+                TaxSystem: "gst",
+                TaxName: isCrossBorder ? "Australia Inbound Digital Services GST" : "Australia Goods and Services Tax (Standard)",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "DIGITAL-SVC",
+                RatePercentage: 10.0000m,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: "A New Tax System (Goods and Services Tax) Act 1999, Section 9-70 & Subdiv 84-B",
+                CalculationExplanation: "Standard 10% Australian GST applies to digital services consumed in Australia.",
+                AuditEvidenceSummary: "Australian Taxation Office statutory standard 10% GST rate.");
+        }
+
+        // 8. Canada (CRA GST / HST)
+        if (customerCountry == "CA")
+        {
+            var isCrossBorder = supplierCountry != "CA";
+            if (isCrossBorder && isB2B && hasVatId)
+            {
+                return new TaxDeterminationResult(
+                    Jurisdiction: "CA-CRA",
+                    CountryCode: "CA",
+                    ProvinceState: province,
+                    Authority: "CRA",
+                    TaxSystem: "reverse_charge",
+                    TaxName: "Canada B2B Cross-Border Reverse Charge",
+                    TariffOrClassificationCode: request.ProductServiceClassification ?? "DIGITAL-SVC",
+                    RatePercentage: 0.0000m,
+                    InputTaxAllowable: true,
+                    IsReverseCharge: true,
+                    IsExempt: false,
+                    StatutoryReference: "Excise Tax Act (Canada), Section 220 (Reverse Charge on Imported Services)",
+                    CalculationExplanation: $"Cross-border B2B digital service to Canadian GST/HST registrant ({request.CustomerTaxId}). Customer self-assesses.",
+                    AuditEvidenceSummary: $"CRA GST/HST registration verified: {request.CustomerTaxId}. Reverse charge applies.");
+            }
+
+            var caRate = (province ?? "FED") switch
+            {
+                "ON" => 13.0000m, // Ontario HST
+                "BC" => 12.0000m, // BC GST + PST
+                "QC" => 14.9750m, // Quebec QST
+                "NS" or "NB" or "NL" or "PE" => 15.0000m, // Atlantic HST
+                _ => 5.0000m      // Federal GST only (AB, SK, MB, etc.)
+            };
+
+            return new TaxDeterminationResult(
+                Jurisdiction: $"CA-{province ?? "FED"}",
+                CountryCode: "CA",
+                ProvinceState: province,
+                Authority: "CRA",
+                TaxSystem: "gst",
+                TaxName: $"Canada GST/HST ({province ?? "Federal"})",
+                TariffOrClassificationCode: request.ProductServiceClassification ?? "DIGITAL-SVC",
+                RatePercentage: caRate,
+                InputTaxAllowable: true,
+                IsReverseCharge: false,
+                IsExempt: false,
+                StatutoryReference: "Excise Tax Act (Canada), Part IX (Simplified Non-Resident Digital Services Regime)",
+                CalculationExplanation: $"Destination tax of {caRate}% assessed under Canadian digital services regime.",
+                AuditEvidenceSummary: $"CRA destination rate applied: Province={province ?? "Federal"}, Rate={caRate}%.");
         }
 
         // 7. Pakistan Localization Package (Provincial Revenue Authorities)
@@ -617,7 +735,51 @@ public sealed class GlobalTaxEngine
     }
 
     private static bool IsEuMemberState(string countryCode) =>
-        countryCode is "DE" or "FR" or "IE" or "NL" or "IT" or "ES" or "BE" or "AT" or "SE" or "PL" or "DK" or "FI" or "PT" or "GR" or "CZ" or "RO" or "HU";
+        countryCode is "DE" or "FR" or "IE" or "NL" or "IT" or "ES" or "BE" or "AT" or "SE" or "PL" or "DK" or "FI" or "PT" or "GR" or "CZ" or "RO" or "HU" or "BG" or "HR" or "SK" or "LT" or "SI" or "LV" or "EE" or "CY" or "LU" or "MT";
+
+    private static decimal GetEuStandardVatRate(string countryCode) =>
+        countryCode switch
+        {
+            "DE" => 19.0000m,
+            "FR" => 20.0000m,
+            "IE" => 23.0000m,
+            "NL" => 21.0000m,
+            "IT" => 22.0000m,
+            "ES" => 21.0000m,
+            "BE" => 21.0000m,
+            "AT" => 20.0000m,
+            "SE" => 25.0000m,
+            "PL" => 23.0000m,
+            "DK" => 25.0000m,
+            "FI" => 25.5000m,
+            "PT" => 23.0000m,
+            "GR" => 24.0000m,
+            "CZ" => 21.0000m,
+            "RO" => 19.0000m,
+            "HU" => 27.0000m,
+            "BG" => 20.0000m,
+            "HR" => 25.0000m,
+            "SK" => 23.0000m,
+            "LT" => 21.0000m,
+            "SI" => 22.0000m,
+            "LV" => 21.0000m,
+            "EE" => 22.0000m,
+            "CY" => 19.0000m,
+            "LU" => 17.0000m,
+            "MT" => 18.0000m,
+            _ => 20.0000m
+        };
+
+    private static string? GetEuEInvoicingPlatform(string countryCode) =>
+        countryCode switch
+        {
+            "DE" => "ZUGFeRD / XRechnung (EN 16931)",
+            "FR" => "Chorus Pro / Public Invoicing Portal (PPF)",
+            "IT" => "Sistema di Interscambio (SdI)",
+            "PL" => "Krajowy System e-Faktur (KSeF)",
+            "ES" => "FACe / Facturae",
+            _ => "Peppol BIS Billing 3.0"
+        };
 
     private static bool IsIntraEu(string country1, string country2) =>
         IsEuMemberState(country1) && IsEuMemberState(country2);

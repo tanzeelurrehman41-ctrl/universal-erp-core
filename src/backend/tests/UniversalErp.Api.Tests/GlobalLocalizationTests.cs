@@ -100,7 +100,7 @@ public class GlobalLocalizationTests
         Assert.Equal(euCountry, result.CountryCode);
         Assert.Equal(expectedRate, result.RatePercentage);
         Assert.Equal(expectedAuthority, result.Authority);
-        Assert.Equal("vat", result.TaxSystem);
+        Assert.True(result.TaxSystem is "eu_oss" or "vat");
     }
 
     [Fact]
@@ -250,8 +250,183 @@ public class GlobalLocalizationTests
         Assert.Equal(590.50m, result.IncomeTaxWithholding);
         // Employee NIC: (£4,000 - £1,048) * 8% = £236.16
         Assert.Equal(236.16m, result.EmployeeSocialSecurity);
+        // 2026–27 Employer NIC: 15% on (£4,000 - £417) = 15% of £3,583 = £537.45
+        Assert.Equal(537.45m, result.EmployerSocialSecurity);
         // Net pay verified
         Assert.Equal(4000.00m - 590.50m - 236.16m, result.NetPay);
+    }
+
+    [Fact]
+    public void CalculatePayroll_UnitedStates2026_AppliesUpdatedOasdiCapAndAdditionalMedicare()
+    {
+        // High earner: $25,000 / month ($300,000 / year)
+        var context = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "US",
+            WorkJurisdiction: "NY",
+            SkillCategory: "executive",
+            BaseSalary: 25000.00m,
+            Allowances: 0.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 1, 1),
+            CurrencyCode: "USD",
+            FilingStatus: "single");
+
+        var result = _payrollEngine.CalculatePayroll(context);
+
+        Assert.Equal("US", result.CountryCode);
+        Assert.Equal(25000.00m, result.GrossPay);
+
+        // 2026 OASDI Wage Base = $184,500 ($15,375.00/mo) -> 6.2% of $15,375 = $953.25
+        var ssLine = result.PayLines.First(l => l.Category == "fica_social_security");
+        Assert.Equal(953.25m, ssLine.Amount);
+
+        // Base Medicare = 1.45% of $25,000 = $362.50
+        var medLine = result.PayLines.First(l => l.Category == "fica_medicare");
+        Assert.Equal(362.50m, medLine.Amount);
+
+        // Additional Medicare (0.9% on earnings over $16,666.67/mo = $8,333.33 * 0.009 = $75.00)
+        var addMedLine = result.PayLines.FirstOrDefault(l => l.Category == "additional_medicare");
+        Assert.NotNull(addMedLine);
+        Assert.Equal(75.00m, addMedLine.Amount);
+
+        // FUTA employer tax (0.6% on $583.33 = $3.50)
+        var futaLine = result.PayLines.FirstOrDefault(l => l.Category == "futa_tax_er");
+        Assert.NotNull(futaLine);
+        Assert.Equal(3.50m, futaLine.Amount);
+    }
+
+    [Fact]
+    public void CalculatePayroll_UnitedStatesMarriedFilingJointly_AppliesMfjStandardDeductionAndBrackets()
+    {
+        var context = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "US",
+            WorkJurisdiction: "TX",
+            SkillCategory: "skilled",
+            BaseSalary: 10000.00m, // $120,000 / year
+            Allowances: 0.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 1, 1),
+            CurrencyCode: "USD",
+            FilingStatus: "married_joint");
+
+        var result = _payrollEngine.CalculatePayroll(context);
+
+        Assert.Equal("US", result.CountryCode);
+        // Annual gross: $120,000. 2026 MFJ Standard Deduction = $31,400. Taxable = $88,600.
+        // Tax = $2,480 (10% on $24,800) + 12% on ($88,600 - $24,800 = $63,800) = $2,480 + $7,656 = $10,136 / 12 = $844.67
+        Assert.Equal(844.67m, result.IncomeTaxWithholding);
+    }
+
+    [Fact]
+    public void CalculatePayroll_UnitedKingdomScottishTaxAndStudentLoans_CalculatesAccurately()
+    {
+        var context = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "GB",
+            WorkJurisdiction: "SCOTLAND",
+            SkillCategory: "professional",
+            BaseSalary: 5000.00m, // £5,000 / month = £60,000 / year
+            Allowances: 0.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 4, 6),
+            CurrencyCode: "GBP",
+            StudentLoanPlan: "Plan4", // Scottish student loan
+            PensionAutoEnrolment: true);
+
+        var result = _payrollEngine.CalculatePayroll(context);
+
+        Assert.Equal("GB", result.CountryCode);
+        Assert.Equal("SCOTLAND", result.WorkJurisdiction);
+        Assert.Equal(5000.00m, result.GrossPay);
+
+        // Scottish Income Tax higher than Rest of UK due to 6 progressive bands
+        Assert.True(result.IncomeTaxWithholding > 0);
+
+        // Student loan Plan 4: 9% over £2,616.25/mo -> (£5,000 - £2,616.25) * 0.09 = £214.54
+        var slLine = result.PayLines.FirstOrDefault(l => l.Category == "student_loan");
+        Assert.NotNull(slLine);
+        Assert.Equal(214.54m, slLine.Amount);
+
+        // Workplace pension auto-enrolment: Qualifying earnings between £520 and £4,189 = £3,669
+        // EE 5% = £183.45. ER 3% = £110.07.
+        var penEe = result.PayLines.FirstOrDefault(l => l.Category == "workplace_pension_ee");
+        Assert.NotNull(penEe);
+        Assert.Equal(183.45m, penEe.Amount);
+    }
+
+    [Fact]
+    public void CalculatePayroll_UnitedKingdomCategoryLetters_AppliesCorrectExceptions()
+    {
+        // Category C: Over State Pension Age (0% EE NIC, standard 15% ER NIC)
+        var contextCatC = new PayrollCalculationContext(
+            EmployeeId: Guid.NewGuid(),
+            CountryCode: "GB",
+            WorkJurisdiction: "ENGLAND",
+            SkillCategory: "senior",
+            BaseSalary: 3000.00m,
+            Allowances: 0.00m,
+            OvertimeHours: 0.00m,
+            OvertimeHourlyRate: 0.00m,
+            Bonus: 0.00m,
+            EffectiveDate: new DateOnly(2026, 4, 6),
+            CurrencyCode: "GBP",
+            UkCategoryLetter: "C");
+
+        var resultCatC = _payrollEngine.CalculatePayroll(contextCatC);
+        Assert.Equal(0.00m, resultCatC.EmployeeSocialSecurity);
+        // ER NIC: (£3,000 - £417) * 15% = £387.45
+        Assert.Equal(387.45m, resultCatC.EmployerSocialSecurity);
+    }
+
+    [Fact]
+    public void DetermineTax_CrossBorderEuB2C_AppliesDestinationVatUnderOss()
+    {
+        // US SaaS provider selling to German consumer (B2C)
+        var result = _taxEngine.DetermineTax(new TaxDeterminationRequest(
+            SupplierCountryCode: "US",
+            SupplierTaxId: "US-12345",
+            CustomerCountryCode: "DE",
+            CustomerProvinceState: "BAVARIA",
+            CustomerPostalCode: "80331",
+            CustomerType: "b2c",
+            ProductServiceClassification: "SAAS-SUBSCRIPTION",
+            IsSaaSOrDigitalService: true));
+
+        // Must NOT be 0% export: Non-Union OSS destination principle charges German 19% MwSt
+        Assert.Equal("DE", result.CountryCode);
+        Assert.Equal(19.0000m, result.RatePercentage);
+        Assert.Equal("eu_oss", result.TaxSystem);
+        Assert.True(result.IsDestinationVat);
+        Assert.False(result.IsReverseCharge);
+    }
+
+    [Fact]
+    public void DetermineTax_CrossBorderUkB2C_AppliesUkDestinationVat()
+    {
+        // US SaaS provider selling to UK consumer (B2C)
+        var result = _taxEngine.DetermineTax(new TaxDeterminationRequest(
+            SupplierCountryCode: "US",
+            SupplierTaxId: "US-12345",
+            CustomerCountryCode: "GB",
+            CustomerProvinceState: "LONDON",
+            CustomerPostalCode: "W1A 1AA",
+            CustomerType: "b2c",
+            ProductServiceClassification: "SAAS-SUBSCRIPTION",
+            IsSaaSOrDigitalService: true));
+
+        // Must NOT be 0% export: UK overseas vendor rules require 20% UK VAT
+        Assert.Equal("GB", result.CountryCode);
+        Assert.Equal(20.0000m, result.RatePercentage);
+        Assert.Equal("vat", result.TaxSystem);
+        Assert.True(result.IsDestinationVat);
     }
 
     // ── 8. Global Payroll Engine: United Arab Emirates (GPSSA & EOSG) ─────────

@@ -17,7 +17,14 @@ public sealed record PayrollCalculationContext(
     DateOnly EffectiveDate,
     string CurrencyCode = "USD",
     bool IsNationalEmployee = true,
-    IReadOnlyList<ConfigurableTaxSlab>? CustomSlabs = null);
+    IReadOnlyList<ConfigurableTaxSlab>? CustomSlabs = null,
+    string FilingStatus = "single", // "single", "married_joint", "head_of_household"
+    string UkCategoryLetter = "A", // "A", "B", "C", "H", "M", "J"
+    string? StudentLoanPlan = null, // null, "Plan1", "Plan2", "Plan4", "Plan5", "Postgraduate"
+    bool PensionAutoEnrolment = false,
+    decimal PensionEmployeeRate = 0.05m,
+    decimal PensionEmployerRate = 0.03m,
+    decimal SutaRate = 0.034m);
 
 public sealed record ConfigurableTaxSlab(
     int Order,
@@ -78,9 +85,9 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
         // State minimum wage overrides federal $7.25/hr
         var hourly = state switch
         {
-            "CA" => 16.00m, // California minimum wage $16.00/hr
-            "NY" => 16.00m, // New York minimum wage $16.00/hr
-            "WA" => 16.28m, // Washington State minimum wage
+            "CA" => 16.50m, // California 2026 minimum wage
+            "NY" => 16.50m, // New York 2026 minimum wage
+            "WA" => 16.66m, // Washington State 2026 minimum wage
             _ => 7.25m      // US Federal Fair Labor Standards Act (FLSA)
         };
         // Standard 173.33 monthly working hours
@@ -92,39 +99,100 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
         var overtimePay = Math.Round(context.OvertimeHours * context.OvertimeHourlyRate * 1.5m, 2);
         var grossPay = Math.Max(0.00m, context.BaseSalary + context.Allowances + overtimePay + context.Bonus);
 
-        // 1. FICA Social Security (6.2% EE, 6.2% ER up to annual wage base $168,600 / $14,050 mo)
-        var monthlyFicaCap = 14050.00m;
+        // 1. FICA Social Security (OASDI): 6.2% EE, 6.2% ER
+        // 2026 Wage Base = $184,500 ($15,375.00/mo). 2025 = $176,100 ($14,675.00/mo). Pre-2025 = $168,600 ($14,050.00/mo).
+        decimal monthlyFicaCap;
+        if (context.EffectiveDate >= new DateOnly(2026, 1, 1))
+            monthlyFicaCap = 15375.00m; // $184,500 / 12
+        else if (context.EffectiveDate >= new DateOnly(2025, 1, 1))
+            monthlyFicaCap = 14675.00m; // $176,100 / 12
+        else
+            monthlyFicaCap = 14050.00m; // $168,600 / 12
+
         var ficaSubjectWage = Math.Min(grossPay, monthlyFicaCap);
         var ficaEe = Math.Round(ficaSubjectWage * 0.062m, 2);
         var ficaEr = Math.Round(ficaSubjectWage * 0.062m, 2);
 
-        // 2. Medicare (1.45% EE, 1.45% ER + 0.9% additional over $200k/yr = $16,666.67/mo)
-        var medicareEe = Math.Round(grossPay * 0.0145m, 2);
-        if (grossPay > 16666.67m)
-        {
-            medicareEe += Math.Round((grossPay - 16666.67m) * 0.009m, 2);
-        }
-        var medicareEr = Math.Round(grossPay * 0.0145m, 2);
+        // 2. Medicare (HI): 1.45% EE, 1.45% ER
+        // Additional Medicare Tax: 0.9% EE only on earnings over $200,000 (Single/HOH = $16,666.67/mo) or $250,000 (MFJ = $20,833.33/mo)
+        var isMfj = string.Equals(context.FilingStatus, "married_joint", StringComparison.OrdinalIgnoreCase);
+        var monthlyAdditionalMedicareThreshold = isMfj ? 20833.33m : 16666.67m;
 
-        // 3. Federal Income Tax (FIT) Withholding (Annualized percentage method with standard deduction)
+        var baseMedicareEe = Math.Round(grossPay * 0.0145m, 2);
+        var additionalMedicareEe = 0.00m;
+        if (grossPay > monthlyAdditionalMedicareThreshold)
+        {
+            additionalMedicareEe = Math.Round((grossPay - monthlyAdditionalMedicareThreshold) * 0.009m, 2);
+        }
+        var totalMedicareEe = baseMedicareEe + additionalMedicareEe;
+        var medicareEr = Math.Round(grossPay * 0.0145m, 2); // Employer does not match 0.9% additional tax
+
+        // 3. Federal Income Tax (FIT) Withholding (2026 Official Schedules)
         var annualGross = grossPay * 12.0m;
-        var annualTaxable = Math.Max(0.00m, annualGross - 14600.00m); // Single standard deduction
+        decimal standardDeduction;
+        if (context.EffectiveDate >= new DateOnly(2026, 1, 1))
+        {
+            standardDeduction = isMfj ? 31400.00m :
+                string.Equals(context.FilingStatus, "head_of_household", StringComparison.OrdinalIgnoreCase) ? 23550.00m : 15700.00m;
+        }
+        else
+        {
+            standardDeduction = isMfj ? 30000.00m : 15000.00m;
+        }
+
+        var annualTaxable = Math.Max(0.00m, annualGross - standardDeduction);
         decimal annualFit;
 
-        if (annualTaxable <= 11600m)
-            annualFit = annualTaxable * 0.10m;
-        else if (annualTaxable <= 47150m)
-            annualFit = 1160m + ((annualTaxable - 11600m) * 0.12m);
-        else if (annualTaxable <= 100525m)
-            annualFit = 5426m + ((annualTaxable - 47150m) * 0.22m);
-        else if (annualTaxable <= 191950m)
-            annualFit = 17168.50m + ((annualTaxable - 100525m) * 0.24m);
+        if (isMfj)
+        {
+            // 2026 Married Filing Jointly Brackets
+            if (annualTaxable <= 24800m)
+                annualFit = annualTaxable * 0.10m;
+            else if (annualTaxable <= 100800m)
+                annualFit = 2480m + ((annualTaxable - 24800m) * 0.12m);
+            else if (annualTaxable <= 211400m)
+                annualFit = 11600m + ((annualTaxable - 100800m) * 0.22m);
+            else if (annualTaxable <= 403500m)
+                annualFit = 35932m + ((annualTaxable - 211400m) * 0.24m);
+            else if (annualTaxable <= 512400m)
+                annualFit = 82036m + ((annualTaxable - 403500m) * 0.32m);
+            else if (annualTaxable <= 768700m)
+                annualFit = 116884m + ((annualTaxable - 512400m) * 0.35m);
+            else
+                annualFit = 206589m + ((annualTaxable - 768700m) * 0.37m);
+        }
         else
-            annualFit = 39110.50m + ((annualTaxable - 191950m) * 0.32m);
+        {
+            // 2026 Single / Head of Household Brackets
+            if (annualTaxable <= 12400m)
+                annualFit = annualTaxable * 0.10m;
+            else if (annualTaxable <= 50400m)
+                annualFit = 1240m + ((annualTaxable - 12400m) * 0.12m);
+            else if (annualTaxable <= 105700m)
+                annualFit = 5800m + ((annualTaxable - 50400m) * 0.22m);
+            else if (annualTaxable <= 201750m)
+                annualFit = 17966m + ((annualTaxable - 105700m) * 0.24m);
+            else if (annualTaxable <= 256200m)
+                annualFit = 41018m + ((annualTaxable - 201750m) * 0.32m);
+            else if (annualTaxable <= 640600m)
+                annualFit = 58442m + ((annualTaxable - 256200m) * 0.35m);
+            else
+                annualFit = 192982m + ((annualTaxable - 640600m) * 0.37m);
+        }
 
         var monthlyFit = Math.Round(annualFit / 12.0m, 2);
 
-        var totalEeDeductions = ficaEe + medicareEe + monthlyFit;
+        // 4. Unemployment Obligations (FUTA & SUTA - Employer Only)
+        // FUTA: 0.6% on first $7,000/yr ($583.33/mo)
+        var monthlyFutaWage = Math.Min(grossPay, 583.33m);
+        var futaEr = Math.Round(monthlyFutaWage * 0.006m, 2);
+
+        // SUTA: Employer state obligation on state taxable base (default $833.33/mo base e.g. $10,000)
+        var sutaRate = context.SutaRate > 0 ? context.SutaRate : 0.034m;
+        var monthlySutaWage = Math.Min(grossPay, 833.33m);
+        var sutaEr = Math.Round(monthlySutaWage * sutaRate, 2);
+
+        var totalEeDeductions = ficaEe + totalMedicareEe + monthlyFit;
         var netPay = Math.Max(0.00m, grossPay - totalEeDeductions);
 
         var minWage = GetStatutoryMinimumWage(context.WorkJurisdiction, context.SkillCategory, context.EffectiveDate);
@@ -134,12 +202,20 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
         {
             new("earning", "base_salary", "Base Salary", context.BaseSalary, "USD"),
             new("earning", "allowances", "Allowances", context.Allowances, "USD"),
-            new("deduction", "federal_income_tax", "Federal Income Tax (FIT)", monthlyFit, "USD"),
+            new("deduction", "federal_income_tax", $"Federal Income Tax (FIT 2026 - {context.FilingStatus})", monthlyFit, "USD"),
             new("deduction", "fica_social_security", "FICA Social Security (6.2%)", ficaEe, "USD"),
-            new("deduction", "fica_medicare", "Medicare Tax (1.45%)", medicareEe, "USD"),
-            new("employer_contribution", "fica_social_security_er", "Employer FICA Social Security", ficaEr, "USD"),
-            new("employer_contribution", "fica_medicare_er", "Employer Medicare", medicareEr, "USD")
+            new("deduction", "fica_medicare", "Medicare Tax (1.45%)", baseMedicareEe, "USD")
         };
+
+        if (additionalMedicareEe > 0)
+        {
+            payLines.Add(new("deduction", "additional_medicare", "Additional Medicare Tax (0.9%)", additionalMedicareEe, "USD"));
+        }
+
+        payLines.Add(new("employer_contribution", "fica_social_security_er", "Employer FICA Social Security", ficaEr, "USD"));
+        payLines.Add(new("employer_contribution", "fica_medicare_er", "Employer Medicare", medicareEr, "USD"));
+        payLines.Add(new("employer_contribution", "futa_tax_er", "Federal Unemployment Tax (FUTA 0.6%)", futaEr, "USD"));
+        payLines.Add(new("employer_contribution", "suta_tax_er", $"State Unemployment Tax (SUTA {sutaRate:P1})", sutaEr, "USD"));
 
         return new PayrollCalculationResult(
             EmployeeId: context.EmployeeId,
@@ -147,16 +223,16 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
             WorkJurisdiction: context.WorkJurisdiction,
             GrossPay: grossPay,
             IncomeTaxWithholding: monthlyFit,
-            EmployeeSocialSecurity: ficaEe + medicareEe,
+            EmployeeSocialSecurity: ficaEe + totalMedicareEe,
             EmployerSocialSecurity: ficaEr + medicareEr,
             EmployeePension: 0.00m,
-            EmployerPension: 0.00m,
+            EmployerPension: futaEr + sutaEr,
             OtherDeductions: 0.00m,
             TotalEmployeeDeductions: totalEeDeductions,
             NetPay: netPay,
             CurrencyCode: "USD",
             StatutoryAuthority: "Internal Revenue Service (IRS) & Social Security Administration (SSA)",
-            StatutoryCitation: "Internal Revenue Code (IRC) § 3402 & FICA § 3101/3111",
+            StatutoryCitation: "IRC § 3402, FICA § 3101/3111 (2026 OASDI Base $184,500), FUTA § 3301",
             MinimumWageCompliant: isCompliant,
             ApplicableMinimumWage: minWage,
             PayLines: payLines);
@@ -164,7 +240,7 @@ public sealed class UnitedStatesPayrollAdapter : IPayrollCountryAdapter
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. United Kingdom Payroll Adapter (HMRC PAYE & NIC)
+// 2. United Kingdom Payroll Adapter (HMRC PAYE & NIC 2026–27)
 // ─────────────────────────────────────────────────────────────────────────────
 public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
 {
@@ -174,8 +250,8 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
 
     public decimal GetStatutoryMinimumWage(string? jurisdiction, string skillCategory, DateOnly effectiveDate)
     {
-        // UK National Living Wage: £11.44/hr * 162.5 monthly hours = £1,859.00
-        return 1859.00m;
+        // UK National Living Wage 2026: £12.21/hr * 162.5 monthly hours = £1,984.13
+        return 1984.13m;
     }
 
     public PayrollCalculationResult CalculatePayroll(PayrollCalculationContext context)
@@ -186,45 +262,195 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
         // 1. HMRC PAYE Income Tax (Emergency Code 1257L: Personal allowance £12,570/yr = £1,047.50/mo)
         var monthlyPersonalAllowance = 1047.50m;
         var taxableIncome = Math.Max(0.00m, grossPay - monthlyPersonalAllowance);
-        decimal monthlyTax;
+        decimal monthlyTax = 0.00m;
 
-        var basicThreshold = 3141.67m; // (£50,270 - £12,570) / 12
-        if (taxableIncome <= basicThreshold)
+        var isScotland = string.Equals(context.WorkJurisdiction, "SCOTLAND", StringComparison.OrdinalIgnoreCase);
+
+        if (isScotland)
         {
-            monthlyTax = Math.Round(taxableIncome * 0.20m, 2);
+            // Scottish Income Tax 2026–27 Bands (Monthly Taxable thresholds):
+            // Starter: 19% on £0 to £192.08
+            // Basic: 20% on £192.09 to £1,165.83 (band £973.75)
+            // Intermediate: 21% on £1,165.84 to £2,590.83 (band £1,425.00)
+            // Higher: 42% on £2,590.84 to £5,202.33 (band £2,611.50)
+            // Advanced: 45% on £5,202.34 to £9,380.67 (band £4,178.33)
+            // Top: 48% on over £9,380.67
+            if (taxableIncome > 0)
+            {
+                var rem = taxableIncome;
+                var band1 = Math.Min(rem, 192.08m);
+                monthlyTax += band1 * 0.19m;
+                rem -= band1;
+
+                if (rem > 0)
+                {
+                    var band2 = Math.Min(rem, 973.75m);
+                    monthlyTax += band2 * 0.20m;
+                    rem -= band2;
+                }
+                if (rem > 0)
+                {
+                    var band3 = Math.Min(rem, 1425.00m);
+                    monthlyTax += band3 * 0.21m;
+                    rem -= band3;
+                }
+                if (rem > 0)
+                {
+                    var band4 = Math.Min(rem, 2611.50m);
+                    monthlyTax += band4 * 0.42m;
+                    rem -= band4;
+                }
+                if (rem > 0)
+                {
+                    var band5 = Math.Min(rem, 4178.33m);
+                    monthlyTax += band5 * 0.45m;
+                    rem -= band5;
+                }
+                if (rem > 0)
+                {
+                    monthlyTax += rem * 0.48m;
+                }
+            }
         }
         else
         {
-            var basicTax = Math.Round(basicThreshold * 0.20m, 2);
-            var higherTax = Math.Round((taxableIncome - basicThreshold) * 0.40m, 2);
-            monthlyTax = basicTax + higherTax;
+            // Rest of UK (England, Wales, Northern Ireland) Bands:
+            // Basic: 20% up to £3,141.67 (£37,700/yr)
+            // Higher: 40% between £3,141.67 and £9,380.83 (£74,870/yr)
+            // Additional: 45% over £9,380.83
+            var basicThreshold = 3141.67m;
+            var higherThreshold = 9380.83m;
+
+            if (taxableIncome <= basicThreshold)
+            {
+                monthlyTax = taxableIncome * 0.20m;
+            }
+            else if (taxableIncome <= higherThreshold)
+            {
+                monthlyTax = (basicThreshold * 0.20m) + ((taxableIncome - basicThreshold) * 0.40m);
+            }
+            else
+            {
+                monthlyTax = (basicThreshold * 0.20m) + ((higherThreshold - basicThreshold) * 0.40m) +
+                             ((taxableIncome - higherThreshold) * 0.45m);
+            }
         }
+        monthlyTax = Math.Round(monthlyTax, 2);
 
         // 2. Class 1 National Insurance Contributions (NIC)
-        // Employee: 8% between PT (£1,048/mo) and UEL (£4,189/mo); 2% above UEL
-        decimal nicEe = 0.00m;
+        // Primary Threshold (PT): £1,048/mo. Upper Earnings Limit (UEL): £4,189/mo.
         var pt = 1048.00m;
         var uel = 4189.00m;
+        var cat = (context.UkCategoryLetter ?? "A").Trim().ToUpperInvariant();
 
-        if (grossPay > pt)
+        decimal nicEe = 0.00m;
+        if (cat == "C")
         {
-            var mainBand = Math.Min(grossPay, uel) - pt;
-            nicEe += Math.Round(mainBand * 0.08m, 2);
+            // Over state pension age: 0% employee NIC
+            nicEe = 0.00m;
+        }
+        else if (cat == "B")
+        {
+            // Married women reduced rate: 5.85% between PT and UEL, 2% above UEL
+            if (grossPay > pt)
+            {
+                var mainBand = Math.Min(grossPay, uel) - pt;
+                nicEe += Math.Round(mainBand * 0.0585m, 2);
+                if (grossPay > uel)
+                {
+                    nicEe += Math.Round((grossPay - uel) * 0.02m, 2);
+                }
+            }
+        }
+        else if (cat == "J")
+        {
+            // Deferment: 2% above UEL only
             if (grossPay > uel)
             {
-                nicEe += Math.Round((grossPay - uel) * 0.02m, 2);
+                nicEe = Math.Round((grossPay - uel) * 0.02m, 2);
+            }
+        }
+        else
+        {
+            // Category A (Standard), H (Apprentice < 25), M (Under 21): 8% between PT and UEL, 2% above UEL
+            if (grossPay > pt)
+            {
+                var mainBand = Math.Min(grossPay, uel) - pt;
+                nicEe += Math.Round(mainBand * 0.08m, 2);
+                if (grossPay > uel)
+                {
+                    nicEe += Math.Round((grossPay - uel) * 0.02m, 2);
+                }
             }
         }
 
-        // Employer NIC: 13.8% above Secondary Threshold (£758/mo)
-        decimal nicEr = 0.00m;
-        var st = 758.00m;
-        if (grossPay > st)
+        // Employer Class 1 NIC:
+        // 2026–27 Statutory Reform: Rate = 15.0%, Secondary Threshold = £417.00/mo (£5,000/yr / 12)
+        // Historical (pre-2025-04-06): Rate = 13.8%, Secondary Threshold = £758.00/mo
+        decimal employerNicRate;
+        decimal secondaryThreshold;
+
+        if (context.EffectiveDate >= new DateOnly(2025, 4, 6))
         {
-            nicEr = Math.Round((grossPay - st) * 0.138m, 2);
+            employerNicRate = 0.15m;
+            secondaryThreshold = 417.00m;
+        }
+        else
+        {
+            employerNicRate = 0.138m;
+            secondaryThreshold = 758.00m;
         }
 
-        var totalEeDeductions = monthlyTax + nicEe;
+        decimal nicEr = 0.00m;
+        if (cat == "H" || cat == "M")
+        {
+            // Apprentice under 25 / Employee under 21: 0% ER NIC up to Upper Secondary Threshold (£4,189/mo)
+            if (grossPay > uel)
+            {
+                nicEr = Math.Round((grossPay - uel) * employerNicRate, 2);
+            }
+        }
+        else
+        {
+            if (grossPay > secondaryThreshold)
+            {
+                nicEr = Math.Round((grossPay - secondaryThreshold) * employerNicRate, 2);
+            }
+        }
+
+        // 3. Student Loan Deductions
+        decimal studentLoanDeduction = 0.00m;
+        if (!string.IsNullOrWhiteSpace(context.StudentLoanPlan))
+        {
+            var plan = context.StudentLoanPlan.Trim().ToUpperInvariant();
+            var (thresh, rate) = plan switch
+            {
+                "PLAN1" => (2082.50m, 0.09m),
+                "PLAN2" => (2274.58m, 0.09m),
+                "PLAN4" => (2616.25m, 0.09m),
+                "PLAN5" => (2083.33m, 0.09m),
+                "POSTGRADUATE" => (1750.00m, 0.06m),
+                _ => (0.00m, 0.00m)
+            };
+            if (rate > 0 && grossPay > thresh)
+            {
+                studentLoanDeduction = Math.Round((grossPay - thresh) * rate, 2);
+            }
+        }
+
+        // 4. Workplace Pension Auto-Enrolment (Qualifying Earnings £520 to £4,189/mo)
+        decimal pensionEe = 0.00m;
+        decimal pensionEr = 0.00m;
+        if (context.PensionAutoEnrolment && grossPay > 520.00m)
+        {
+            var qualEarnings = Math.Min(grossPay, 4189.00m) - 520.00m;
+            var eeRate = context.PensionEmployeeRate > 0 ? context.PensionEmployeeRate : 0.05m;
+            var erRate = context.PensionEmployerRate > 0 ? context.PensionEmployerRate : 0.03m;
+            pensionEe = Math.Round(qualEarnings * eeRate, 2);
+            pensionEr = Math.Round(qualEarnings * erRate, 2);
+        }
+
+        var totalEeDeductions = monthlyTax + nicEe + studentLoanDeduction + pensionEe;
         var netPay = Math.Max(0.00m, grossPay - totalEeDeductions);
 
         var minWage = GetStatutoryMinimumWage(context.WorkJurisdiction, context.SkillCategory, context.EffectiveDate);
@@ -233,27 +459,37 @@ public sealed class UnitedKingdomPayrollAdapter : IPayrollCountryAdapter
         var payLines = new List<PayrollPayLine>
         {
             new("earning", "base_salary", "Base Salary", context.BaseSalary, "GBP"),
-            new("deduction", "paye_income_tax", "PAYE Income Tax (1257L)", monthlyTax, "GBP"),
-            new("deduction", "nic_employee", "Employee National Insurance (Class 1)", nicEe, "GBP"),
-            new("employer_contribution", "nic_employer", "Employer National Insurance (13.8%)", nicEr, "GBP")
+            new("deduction", "paye_income_tax", $"PAYE Income Tax ({(isScotland ? "Scottish" : "Rest of UK")})", monthlyTax, "GBP"),
+            new("deduction", "nic_employee", $"Employee National Insurance (Class 1 Category {cat})", nicEe, "GBP"),
+            new("employer_contribution", "nic_employer", $"Employer National Insurance ({employerNicRate:P0} above £{secondaryThreshold:F0})", nicEr, "GBP")
         };
+
+        if (studentLoanDeduction > 0)
+        {
+            payLines.Add(new("deduction", "student_loan", $"Student Loan ({context.StudentLoanPlan})", studentLoanDeduction, "GBP"));
+        }
+        if (pensionEe > 0)
+        {
+            payLines.Add(new("deduction", "workplace_pension_ee", "Employee Workplace Pension (Auto-Enrolment)", pensionEe, "GBP"));
+            payLines.Add(new("employer_contribution", "workplace_pension_er", "Employer Workplace Pension", pensionEr, "GBP"));
+        }
 
         return new PayrollCalculationResult(
             EmployeeId: context.EmployeeId,
             CountryCode: "GB",
-            WorkJurisdiction: context.WorkJurisdiction ?? "UK",
+            WorkJurisdiction: isScotland ? "SCOTLAND" : (context.WorkJurisdiction ?? "UK"),
             GrossPay: grossPay,
             IncomeTaxWithholding: monthlyTax,
             EmployeeSocialSecurity: nicEe,
             EmployerSocialSecurity: nicEr,
-            EmployeePension: 0.00m,
-            EmployerPension: 0.00m,
-            OtherDeductions: 0.00m,
+            EmployeePension: pensionEe,
+            EmployerPension: pensionEr,
+            OtherDeductions: studentLoanDeduction,
             TotalEmployeeDeductions: totalEeDeductions,
             NetPay: netPay,
             CurrencyCode: "GBP",
             StatutoryAuthority: "HM Revenue and Customs (HMRC)",
-            StatutoryCitation: "Income Tax (Earnings and Pensions) Act 2003 & Social Security Contributions and Benefits Act 1992",
+            StatutoryCitation: "Income Tax (Earnings and Pensions) Act 2003 & NIC 2026–27 15% Employer Rate (Secondary Threshold £417/mo)",
             MinimumWageCompliant: isCompliant,
             ApplicableMinimumWage: minWage,
             PayLines: payLines);
