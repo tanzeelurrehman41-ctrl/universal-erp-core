@@ -143,6 +143,15 @@ public static class WarehouseEndpointMappings
             WarehouseService service,
             HttpContext httpContext) =>
         {
+            if (!string.IsNullOrWhiteSpace(entityType))
+            {
+                var trimmed = entityType.Trim();
+                if (trimmed.Length > 50 || !System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^[a-zA-Z0-9_-]+$"))
+                {
+                    return Results.BadRequest(new { error = "INVALID_ENTITY_TYPE", message = "The entityType parameter must be alphanumeric and up to 50 characters." });
+                }
+            }
+
             var ctx = ExtractContext(httpContext);
             var list = await service.GetBarcodesAsync(ctx, entityType, httpContext.RequestAborted);
             return Results.Ok(list);

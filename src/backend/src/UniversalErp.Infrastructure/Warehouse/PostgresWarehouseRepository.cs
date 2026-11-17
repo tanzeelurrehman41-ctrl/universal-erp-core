@@ -574,11 +574,15 @@ public class PostgresWarehouseRepository : IWarehouseRepository
                    entity_type, entity_id, gs1_gtin, gs1_lot, gs1_serial, gs1_expiry_date,
                    is_active, created_at
             FROM warehouse.barcode_definitions
-            WHERE (@type IS NULL OR entity_type = @type)
+            WHERE (@type::text IS NULL OR entity_type = @type)
             ORDER BY created_at DESC;
             """;
         cmd.Parameters.Clear();
-        cmd.Parameters.AddWithValue("type", (object?)entityType ?? DBNull.Value);
+        var typeParam = new NpgsqlParameter("type", NpgsqlTypes.NpgsqlDbType.Text)
+        {
+            Value = string.IsNullOrWhiteSpace(entityType) ? DBNull.Value : entityType.Trim().ToLowerInvariant()
+        };
+        cmd.Parameters.Add(typeParam);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))

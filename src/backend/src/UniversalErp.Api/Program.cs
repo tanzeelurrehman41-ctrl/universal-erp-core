@@ -609,26 +609,28 @@ var createProduct = productApi.MapPost("/products", async (
     return Results.Created($"/api/v1/products/{product.ProductId}", product);
 });
 
-if (!isDevelopment)
+var effectiveDevMode = isDevelopment && !isAuthExplicitlyConfigured;
+
+if (!effectiveDevMode)
 {
     listProducts.RequireAuthorization("inventory.product.view");
     getProduct.RequireAuthorization("inventory.product.view");
     createProduct.RequireAuthorization("inventory.product.create");
 }
 
-app.MapInventoryEndpoints(isDevelopment);
-app.MapPurchasingEndpoints(isDevelopment);
-app.MapSalesEndpoints(isDevelopment);
-app.MapTenantEndpoints(isDevelopment);
-app.MapFinanceEndpoints(isDevelopment);
-app.MapManufacturingEndpoints(isDevelopment);
-app.MapWarehouseEndpoints(isDevelopment);
-app.MapHrPayrollEndpoints(isDevelopment);
-app.MapAnalyticsEndpoints(isDevelopment);
-app.MapBranchEndpoints(isDevelopment);
-app.MapConsolidationEndpoints(isDevelopment);
-app.MapIntegrationEndpoints(isDevelopment);
-app.MapSaaSEndpoints(isDevelopment);
+app.MapInventoryEndpoints(effectiveDevMode);
+app.MapPurchasingEndpoints(effectiveDevMode);
+app.MapSalesEndpoints(effectiveDevMode);
+app.MapTenantEndpoints(effectiveDevMode);
+app.MapFinanceEndpoints(effectiveDevMode);
+app.MapManufacturingEndpoints(effectiveDevMode);
+app.MapWarehouseEndpoints(effectiveDevMode);
+app.MapHrPayrollEndpoints(effectiveDevMode);
+app.MapAnalyticsEndpoints(effectiveDevMode);
+app.MapBranchEndpoints(effectiveDevMode);
+app.MapConsolidationEndpoints(effectiveDevMode);
+app.MapIntegrationEndpoints(effectiveDevMode);
+app.MapSaaSEndpoints(effectiveDevMode);
 productApi.MapFoundationEndpoints();
 
 app.MapGet("/", () => Results.Ok(new

@@ -14,10 +14,16 @@ public sealed class AuthenticatedTenantContextMiddleware(RequestDelegate next)
         if (context.Request.Path.Equals("/api/v1/contexts", StringComparison.OrdinalIgnoreCase) ||
             context.Request.Path.StartsWithSegments("/api/v1/tenants/register") ||
             context.Request.Path.StartsWithSegments("/api/v1/plans") ||
-            !context.Request.Path.StartsWithSegments("/api/v1") ||
-            context.User.Identity?.IsAuthenticated != true)
+            !context.Request.Path.StartsWithSegments("/api/v1"))
         {
             await next(context);
+            return;
+        }
+
+        if (context.User.Identity?.IsAuthenticated != true)
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { code = "UNAUTHORIZED", message = "A valid authentication token is required." });
             return;
         }
 

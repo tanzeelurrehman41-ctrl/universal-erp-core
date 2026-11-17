@@ -100,4 +100,17 @@ public class Phase10WarehouseServiceTests
         Assert.False(resZeroQty.IsSuccess);
         Assert.Equal("INVALID_QUANTITY", resZeroQty.Error);
     }
+
+    [Fact]
+    public async Task GetBarcodes_AllowsNullAndFilteredEntityType()
+    {
+        var service = new WarehouseService(new MockWarehouseRepository());
+        var ctx = new TenantContext(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+
+        var allBarcodes = await service.GetBarcodesAsync(ctx, null, CancellationToken.None);
+        Assert.NotNull(allBarcodes);
+
+        var filteredBarcodes = await service.GetBarcodesAsync(ctx, "product_variant", CancellationToken.None);
+        Assert.NotNull(filteredBarcodes);
+    }
 }

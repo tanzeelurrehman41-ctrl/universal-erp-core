@@ -84,9 +84,9 @@ public sealed class PostgresTenantOnboardingRepository(NpgsqlDataSource dataSour
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
 
         await using var lookupCmd = new NpgsqlCommand(
-            "SELECT id FROM platform.tenants WHERE tenant_code = @code",
+            "SELECT id FROM platform.tenants WHERE LOWER(tenant_code) = LOWER(@code)",
             connection);
-        lookupCmd.Parameters.AddWithValue("code", tenantCode);
+        lookupCmd.Parameters.AddWithValue("code", tenantCode.Trim());
 
         var result = await lookupCmd.ExecuteScalarAsync(cancellationToken);
         if (result is null or DBNull)
@@ -540,21 +540,19 @@ public sealed class PostgresTenantOnboardingRepository(NpgsqlDataSource dataSour
             transaction);
         subCmd.Parameters.AddWithValue("id", tenantId);
 
-        TenantSubscriptionDetail subscription;
+        TenantSubscriptionDetail? subscription = null;
         await using (var subReader = await subCmd.ExecuteReaderAsync(cancellationToken))
         {
-            if (!await subReader.ReadAsync(cancellationToken))
+            if (await subReader.ReadAsync(cancellationToken))
             {
-                await subReader.CloseAsync();
-                return null;
+                subscription = new TenantSubscriptionDetail(
+                    subReader.GetGuid(0),
+                    subReader.GetString(1),
+                    subReader.GetString(2),
+                    subReader.GetString(3),
+                    subReader.GetFieldValue<DateTimeOffset>(4),
+                    subReader.GetFieldValue<DateTimeOffset>(5));
             }
-            subscription = new TenantSubscriptionDetail(
-                subReader.GetGuid(0),
-                subReader.GetString(1),
-                subReader.GetString(2),
-                subReader.GetString(3),
-                subReader.GetFieldValue<DateTimeOffset>(4),
-                subReader.GetFieldValue<DateTimeOffset>(5));
             await subReader.CloseAsync();
         }
 
