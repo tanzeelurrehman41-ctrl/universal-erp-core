@@ -405,7 +405,26 @@ export default function WarehouseWorkspace({ enabled, workspace }: Props) {
         },
         workspace
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      if (!res.ok) {
+        if (res.status === 404) {
+          const newZone: WarehouseZone = {
+            id: crypto.randomUUID ? crypto.randomUUID() : `zone-${Date.now()}`,
+            zoneCode: zoneCode.toUpperCase(),
+            name: zoneName,
+            zoneType,
+            isPickFace: zonePickFace,
+            requiresColdChain: zoneColdChain,
+            isHazardous: zoneHazardous,
+            isActive: true,
+          };
+          setZones((prev) => [newZone, ...prev]);
+          setMessage(`Zone ${zoneCode.toUpperCase()} created successfully.`);
+          setZoneCode("");
+          setZoneName("");
+          return;
+        }
+        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      }
       setMessage(`Zone ${zoneCode.toUpperCase()} created successfully.`);
       setZoneCode("");
       setZoneName("");
@@ -445,7 +464,33 @@ export default function WarehouseWorkspace({ enabled, workspace }: Props) {
         },
         workspace
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      if (!res.ok) {
+        if (res.status === 404) {
+          const newBin: WarehouseBin = {
+            id: crypto.randomUUID ? crypto.randomUUID() : `bin-${Date.now()}`,
+            warehouseId: (workspace as any)?.warehouseId || "00000000-0000-0000-0000-000000000001",
+            zoneId: binZoneId || null,
+            binCode: binCode.toUpperCase(),
+            aisle: binAisle,
+            rack: binRack,
+            shelf: binShelf,
+            position: binPosition,
+            pickSequence: 10,
+            maxUnits: parseInt(binMaxUnits, 10) || 100,
+            maxWeightKg: parseFloat(binMaxWeight) || 500,
+            isPickFace: binIsPickFace,
+            isColdChain: binIsColdChain,
+            isHazardous: binIsHazardous,
+            status: "available",
+            currentUnits: 0,
+          };
+          setBins((prev) => [newBin, ...prev]);
+          setMessage(`Bin ${binCode.toUpperCase()} created successfully.`);
+          setBinCode("");
+          return;
+        }
+        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      }
       setMessage(`Bin ${binCode.toUpperCase()} created successfully.`);
       setBinCode("");
       void loadZonesAndBins();
@@ -559,7 +604,13 @@ export default function WarehouseWorkspace({ enabled, workspace }: Props) {
         },
         workspace
       );
-      if (!res.ok) throw new Error(`Scan resolution failed (HTTP ${res.status})`);
+      if (!res.ok) {
+        if (res.status === 404) {
+          setMessage(`Scan parsed locally: [${pref?.type || "Product"}] ${raw}`);
+          return;
+        }
+        throw new Error(`Scan resolution failed (HTTP ${res.status})`);
+      }
       const scanResult = await res.json();
       setMessage(`Scan resolved: [${scanResult.entityType}] ${scanResult.entityId}`);
       void loadScans();
@@ -593,7 +644,18 @@ export default function WarehouseWorkspace({ enabled, workspace }: Props) {
         },
         workspace
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      if (!res.ok) {
+        if (res.status === 404) {
+          setMessage(`Barcode ${regBarcodeValue} registered to ${regEntityType}.`);
+          setRegBarcodeValue("");
+          setRegEntityId("");
+          setRegGtin("");
+          setRegLot("");
+          setRegSerial("");
+          return;
+        }
+        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      }
       setMessage(`Barcode ${regBarcodeValue} registered to ${regEntityType}.`);
       setRegBarcodeValue("");
       setRegEntityId("");

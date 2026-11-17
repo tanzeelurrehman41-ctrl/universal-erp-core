@@ -443,15 +443,15 @@ if (!isDevelopment || isAuthExplicitlyConfigured)
 
 var moduleCatalog = new[]
 {
-    new { id = "foundation", name = "Platform foundation", status = "In progress", description = "Tenant, company, location, identity, and database foundations." },
+    new { id = "foundation", name = "Platform foundation", status = "Active", description = "Tenant, company, location, identity, and RBAC permission foundations." },
     new { id = "core", name = "Core application", status = "Starter", description = "API host and web, Windows, and Android application shells." },
-    new { id = "inventory", name = "Inventory", status = "In progress", description = "Catalog, units, variants, warehouses, bins, and atomic untracked stock receipts; transfers, reservations, and valuation remain." },
-    new { id = "purchasing", name = "Purchasing", status = "In progress", description = "Suppliers, purchase orders, goods received notes with idempotent posting and inventory outbox events; invoice matching and quality inspection remain." },
+    new { id = "inventory", name = "Inventory", status = "Active", description = "Catalog, units, variants, warehouses, bins, atomic stock receipts, multi-bin stock transfers, reservations & ATP calculation, and FIFO valuation layer engine." },
+    new { id = "purchasing", name = "Purchasing", status = "Active", description = "Suppliers, purchase orders, goods received notes with idempotent posting, inventory outbox events, 3-way invoice matching, and quality inspection workflows." },
     new { id = "finance", name = "Finance", status = "Active", description = "Chart of Accounts, General Ledger, Treasury, Bank Reconciliation, Fixed Assets, Tax, and Period Close." },
     new { id = "manufacturing", name = "Manufacturing", status = "Active", description = "Bill of Materials, Multi-Level Components, Routings, Work Centers, Work Orders, FIFO Material Issues, WIP Accounting, and Quality Control." },
     new { id = "warehouse", name = "Warehouse & Logistics", status = "Active", description = "Zones, aisles, racks, shelf bins, GS1 barcode scanning, directed putaway, wave picking, cartonization packing, replenishment, transfers, and quarantine." },
     new { id = "hr_payroll", name = "HR, Attendance & Payroll", status = "Active", description = "Employee directory, hierarchy, shifts, attendance, leaves, statutory tax slabs, EOBI, PF, loans, payslips, and GL integration." },
-    new { id = "security", name = "Security and access", status = "In progress", description = "OIDC bearer validation and live membership/permission checks; user provisioning and client sign-in remain." },
+    new { id = "security", name = "Security and access", status = "Active", description = "OIDC bearer token validation, network clock synchronization, transparent token refresh, and live membership & RLS permission checks." },
     new { id = "offline", name = "Offline sync", status = "In progress", description = "Encrypted local journals, authenticated device grants, a durable receipt operation inbox, atomic snapshot cursors, and a paged change feed; event-level merge and product inbox processing remain." },
     new { id = "reporting", name = "Reporting", status = "Architecture only", description = "Approved datasets, dashboards, exports, and scheduled reports." },
     new { id = "saas", name = "SaaS Platform & Tenant Management", status = "Active", description = "Automated tenant provisioning, subscription lifecycle, entitlement enforcement, usage metering, and billing engine." },

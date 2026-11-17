@@ -22,11 +22,11 @@ export default defineConfig({
     port: 4173,
     proxy: {
       "/api": {
-        target: "https://universal-erp-core.onrender.com",
+        target: "http://127.0.0.1:5080",
         changeOrigin: true,
       },
       "/health": {
-        target: "https://universal-erp-core.onrender.com",
+        target: "http://127.0.0.1:5080",
         changeOrigin: true,
       },
     },

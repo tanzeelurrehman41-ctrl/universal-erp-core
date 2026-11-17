@@ -49,7 +49,11 @@ export const authConfigured = oidcConfigured;
 const apiBase = (import.meta.env.VITE_API_BASE_URL || "").trim().replace(/\/+$/, "");
 
 export function apiUrl(path: string): string {
-  if (!apiBase) return path;
+  const isLocalHost = typeof window !== "undefined" &&
+    (window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost");
+  if (isLocalHost || !apiBase) {
+    return path.startsWith("/") ? path : `/${path}`;
+  }
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
   return `${apiBase}${cleanPath}`;
 }
