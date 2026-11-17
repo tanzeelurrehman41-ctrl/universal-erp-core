@@ -66,6 +66,29 @@ function readSavedWorkspaces(): TenantCompanyContext[] {
   }
 }
 
+function resolveDefaultWorkspaceKey(available: TenantCompanyContext[]): string {
+  if (available.length === 0) return "";
+  try {
+    const isExplicit = sessionStorage.getItem("universal-erp-workspace-explicit") === "true";
+    const savedKey = sessionStorage.getItem("universal-erp-active-workspace") ?? "";
+    if (isExplicit && savedKey && available.some((w) => workspaceKey(w) === savedKey)) {
+      return savedKey;
+    }
+  } catch {
+    // ignore
+  }
+
+  // Intended default for demo account: DEMO-CLOUD / CLOUD-LOGISTICS
+  const demoCloud = available.find(
+    (w) => w.tenantCode === "DEMO-CLOUD" || w.tenantId === "22222222-2222-4222-8222-222222222222"
+  );
+  if (demoCloud) {
+    return workspaceKey(demoCloud);
+  }
+
+  return workspaceKey(available[0]);
+}
+
 const modulePreview: ModuleSummary[] = [
   { id: "foundation", name: "Platform foundation", status: "Active", description: "Tenant, company, location, identity, and RBAC permission foundations." },
   { id: "core", name: "Core application", status: "Starter", description: "API host and web, Windows, and Android application shells." },
@@ -108,7 +131,8 @@ export default function App() {
   );
   const [activeWorkspaceKey, setActiveWorkspaceKey] = useState(() => {
     try {
-      return sessionStorage.getItem("universal-erp-active-workspace") ?? "";
+      const saved = readSavedWorkspaces();
+      return resolveDefaultWorkspaceKey(saved);
     } catch {
       return "";
     }
@@ -166,12 +190,7 @@ export default function App() {
         setWorkspaces(available);
         try {
           sessionStorage.setItem("universal-erp-workspaces", JSON.stringify(available));
-          const savedKey = sessionStorage.getItem("universal-erp-active-workspace") ?? "";
-          const nextKey = available.some((workspace) => workspaceKey(workspace) === savedKey)
-            ? savedKey
-            : available[0]
-              ? workspaceKey(available[0])
-              : "";
+          const nextKey = resolveDefaultWorkspaceKey(available);
           setActiveWorkspaceKey(nextKey);
           sessionStorage.setItem("universal-erp-active-workspace", nextKey);
         } catch {
@@ -511,9 +530,13 @@ export default function App() {
     setActiveWorkspaceKey(nextKey);
     try {
       sessionStorage.setItem("universal-erp-active-workspace", nextKey);
+      sessionStorage.setItem("universal-erp-workspace-explicit", "true");
     } catch {
       setAuthMessage("This browser could not remember the selected company. Choose it again after reopening.");
     }
+    setProducts([]);
+    setBranches([]);
+    setActiveBranchId("");
   };
   const visibleOfflineOperations = oidcConfigured
     ? offlineOperations.filter((operation) => queueOwnerKey && operation.ownerKey === queueOwnerKey)
@@ -681,10 +704,27 @@ export default function App() {
               <option value="">Select a company</option>
               {workspaces.map((workspace) => (
                 <option key={workspaceKey(workspace)} value={workspaceKey(workspace)}>
-                  {workspace.tenantName} · {workspace.companyName}
+                  {workspace.tenantName} · {workspace.companyName} ({workspace.baseCurrencyCode})
                 </option>
               ))}
             </select>
+            {activeWorkspace && (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  padding: "2px 8px",
+                  borderRadius: "12px",
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  background: activeWorkspace.tenantCode === "DEMO-CLOUD" ? "rgba(34, 197, 94, 0.15)" : "rgba(59, 130, 246, 0.15)",
+                  color: activeWorkspace.tenantCode === "DEMO-CLOUD" ? "var(--success-600)" : "var(--primary-600)",
+                  border: `1px solid ${activeWorkspace.tenantCode === "DEMO-CLOUD" ? "rgba(34, 197, 94, 0.3)" : "rgba(59, 130, 246, 0.3)"}`,
+                }}
+              >
+                {activeWorkspace.tenantCode} · {activeWorkspace.baseCurrencyCode}
+              </span>
+            )}
           </div>
 
           {branches.length > 0 && (
@@ -745,6 +785,7 @@ export default function App() {
       {/* Dashboard Executive Overview */}
       {(activeNavTab === "overview" || activeNavTab === "all") && (
         <DashboardWorkspace
+          key={activeWorkspaceKey || "overview"}
           workspace={activeWorkspace}
           onNavigate={(target) => setActiveNavTab(target as any)}
         />
@@ -864,6 +905,7 @@ export default function App() {
           </section>
 
           <InventoryWorkspace
+            key={activeWorkspaceKey || "inventory"}
             enabled={inventoryEnabled}
             canQueue={!oidcConfigured || Boolean(queueOwnerKey && activeWorkspace)}
             persistentStorageGranted={persistentStorageGranted}
@@ -881,6 +923,7 @@ export default function App() {
 
       {(activeNavTab === "warehouse" || activeNavTab === "all") && (
         <WarehouseWorkspace
+          key={activeWorkspaceKey || "warehouse"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -888,6 +931,7 @@ export default function App() {
 
       {(activeNavTab === "purchasing" || activeNavTab === "all") && (
         <PurchasingWorkspace
+          key={activeWorkspaceKey || "purchasing"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -895,6 +939,7 @@ export default function App() {
 
       {(activeNavTab === "sales" || activeNavTab === "all") && (
         <SalesWorkspace
+          key={activeWorkspaceKey || "sales"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -902,6 +947,7 @@ export default function App() {
 
       {(activeNavTab === "finance" || activeNavTab === "all") && (
         <FinanceWorkspace
+          key={activeWorkspaceKey || "finance"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -909,6 +955,7 @@ export default function App() {
 
       {(activeNavTab === "manufacturing" || activeNavTab === "all") && (
         <ManufacturingWorkspace
+          key={activeWorkspaceKey || "manufacturing"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -916,6 +963,7 @@ export default function App() {
 
       {(activeNavTab === "foundation" || activeNavTab === "all") && (
         <FoundationWorkspace
+          key={activeWorkspaceKey || "foundation"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -923,6 +971,7 @@ export default function App() {
 
       {(activeNavTab === "hr" || activeNavTab === "all") && (
         <HRWorkspace
+          key={activeWorkspaceKey || "hr"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -930,6 +979,7 @@ export default function App() {
 
       {(activeNavTab === "analytics" || activeNavTab === "all") && (
         <AnalyticsWorkspace
+          key={activeWorkspaceKey || "analytics"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -937,6 +987,7 @@ export default function App() {
 
       {(activeNavTab === "consolidation" || activeNavTab === "all") && (
         <ConsolidationWorkspace
+          key={activeWorkspaceKey || "consolidation"}
           tenantId={activeWorkspace?.tenantId ?? "development-tenant"}
           companyId={activeWorkspace?.companyId ?? "development-company"}
           userId={queueOwnerKey ?? "development-user"}
@@ -945,6 +996,7 @@ export default function App() {
 
       {(activeNavTab === "saas" || activeNavTab === "all") && (
         <SaaSPlatformWorkspace
+          key={activeWorkspaceKey || "saas"}
           tenantId={activeWorkspace?.tenantId}
           companyId={activeWorkspace?.companyId}
         />
