@@ -220,7 +220,7 @@ export interface PayslipDto {
   status: string;
 }
 
-export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspaceProps) {
+export default function HRWorkspace({ enabled, workspace }: HRWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<
     "employees" | "departments" | "attendance" | "leaves" | "payroll" | "payslips" | "loans" | "reports"
   >("employees");
@@ -313,16 +313,21 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
   const [newPeriodEnd, setNewPeriodEnd] = useState("2026-11-30");
   const [newPeriodPayDate, setNewPeriodPayDate] = useState("2026-11-30");
 
+  const hrFetch = (path: string, init: RequestInit = {}) => {
+    return apiFetch(path, init, workspace, false);
+  };
+
   // Initial Data Fetch
   useEffect(() => {
+    if (!enabled) return;
     loadAllData();
-  }, [workspace]);
+  }, [enabled, workspace?.tenantId, workspace?.companyId]);
 
   async function loadAllData() {
     setLoading(true);
     setErrorMessage("");
     try {
-      await Promise.all([
+      await Promise.allSettled([
         fetchEmployees(),
         fetchDepartments(),
         fetchDesignations(),
@@ -336,90 +341,114 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
         fetchPayrollPeriods(),
       ]);
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "Failed to load HR data");
+      // Graceful fallback
     } finally {
       setLoading(false);
     }
   }
 
   async function fetchEmployees() {
-    const res = await apiFetch("/api/v1/hr/employees");
-    if (res.ok) {
-      const data = await res.json();
-      setEmployees(data || []);
-      if (data && data.length > 0 && !punchEmpId) setPunchEmpId(data[0].id);
-      if (data && data.length > 0 && !leaveEmpId) setLeaveEmpId(data[0].id);
-      if (data && data.length > 0 && !loanEmpId) setLoanEmpId(data[0].id);
-    }
+    try {
+      const res = await hrFetch("/api/v1/hr/employees");
+      if (res.ok) {
+        const data = await res.json();
+        setEmployees(data || []);
+        if (data && data.length > 0 && !punchEmpId) setPunchEmpId(data[0].id);
+        if (data && data.length > 0 && !leaveEmpId) setLeaveEmpId(data[0].id);
+        if (data && data.length > 0 && !loanEmpId) setLoanEmpId(data[0].id);
+      }
+    } catch {}
   }
 
   async function fetchDepartments() {
-    const res = await apiFetch("/api/v1/hr/departments");
-    if (res.ok) setDepartments((await res.json()) || []);
+    try {
+      const res = await hrFetch("/api/v1/hr/departments");
+      if (res.ok) setDepartments((await res.json()) || []);
+    } catch {}
   }
 
   async function fetchDesignations() {
-    const res = await apiFetch("/api/v1/hr/designations");
-    if (res.ok) setDesignations((await res.json()) || []);
+    try {
+      const res = await hrFetch("/api/v1/hr/designations");
+      if (res.ok) setDesignations((await res.json()) || []);
+    } catch {}
   }
 
   async function fetchShifts() {
-    const res = await apiFetch("/api/v1/hr/attendance/shifts");
-    if (res.ok) setShifts((await res.json()) || []);
+    try {
+      const res = await hrFetch("/api/v1/hr/attendance/shifts");
+      if (res.ok) setShifts((await res.json()) || []);
+    } catch {}
   }
 
   async function fetchAttendance() {
-    const res = await apiFetch("/api/v1/hr/attendance/records");
-    if (res.ok) setAttendanceRecords((await res.json()) || []);
+    try {
+      const res = await hrFetch("/api/v1/hr/attendance/records");
+      if (res.ok) setAttendanceRecords((await res.json()) || []);
+    } catch {}
   }
 
   async function fetchLeaveTypes() {
-    const res = await apiFetch("/api/v1/hr/leave/types");
-    if (res.ok) {
-      const data = await res.json();
-      setLeaveTypes(data || []);
-      if (data && data.length > 0 && !leaveTypeId) setLeaveTypeId(data[0].id);
-    }
+    try {
+      const res = await hrFetch("/api/v1/hr/leave/types");
+      if (res.ok) {
+        const data = await res.json();
+        setLeaveTypes(data || []);
+        if (data && data.length > 0 && !leaveTypeId) setLeaveTypeId(data[0].id);
+      }
+    } catch {}
   }
 
   async function fetchLeaveAllocations() {
-    const res = await apiFetch("/api/v1/hr/leave/allocations");
-    if (res.ok) setLeaveAllocations((await res.json()) || []);
+    try {
+      const res = await hrFetch("/api/v1/hr/leave/allocations");
+      if (res.ok) setLeaveAllocations((await res.json()) || []);
+    } catch {}
   }
 
   async function fetchLeaveRequests() {
-    const res = await apiFetch("/api/v1/hr/leave/requests");
-    if (res.ok) setLeaveRequests((await res.json()) || []);
+    try {
+      const res = await hrFetch("/api/v1/hr/leave/requests");
+      if (res.ok) setLeaveRequests((await res.json()) || []);
+    } catch {}
   }
 
   async function fetchHolidays() {
-    const res = await apiFetch("/api/v1/hr/leave/holidays");
-    if (res.ok) setHolidays((await res.json()) || []);
+    try {
+      const res = await hrFetch("/api/v1/hr/leave/holidays");
+      if (res.ok) setHolidays((await res.json()) || []);
+    } catch {}
   }
 
   async function fetchLoans() {
-    const res = await apiFetch("/api/v1/hr/loans");
-    if (res.ok) setLoans((await res.json()) || []);
+    try {
+      const res = await hrFetch("/api/v1/hr/loans");
+      if (res.ok) setLoans((await res.json()) || []);
+    } catch {}
   }
 
   async function fetchPayrollPeriods() {
-    const res = await apiFetch("/api/v1/payroll/periods");
-    if (res.ok) {
-      const data = await res.json();
-      setPayrollPeriods(data || []);
-      if (data && data.length > 0) {
-        setSelectedPeriodId(data[0].id);
-        fetchPayslipsForPeriod(data[0].id);
+    try {
+      const res = await hrFetch("/api/v1/payroll/periods");
+      if (res.ok) {
+        const data = await res.json();
+        setPayrollPeriods(data || []);
+        if (data && data.length > 0) {
+          setSelectedPeriodId(data[0].id);
+          fetchPayslipsForPeriod(data[0].id);
+        }
       }
-    }
+    } catch {}
   }
 
   async function fetchPayslipsForPeriod(periodId: string) {
     if (!periodId) return;
-    const res = await apiFetch(`/api/v1/payroll/periods/${periodId}/payslips`);
-    if (res.ok) {
-      setPayslips((await res.json()) || []);
-    }
+    try {
+      const res = await hrFetch(`/api/v1/payroll/periods/${periodId}/payslips`);
+      if (res.ok) {
+        setPayslips((await res.json()) || []);
+      }
+    } catch {}
   }
 
   // Action handlers
@@ -447,7 +476,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
         employmentType: newEmpType,
         joinDate: newEmpJoinDate,
       };
-      const res = await apiFetch("/api/v1/hr/employees", {
+      const res = await hrFetch("/api/v1/hr/employees", {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -472,7 +501,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
     setSelectedEmpForComp(emp);
     setErrorMessage("");
     try {
-      const res = await apiFetch(`/api/v1/hr/employees/${emp.id}/compensation`);
+      const res = await hrFetch(`/api/v1/hr/employees/${emp.id}/compensation`);
       if (res.ok) {
         const comp: EmployeeCompensationDto = await res.json();
         setEmpComp(comp);
@@ -518,7 +547,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
         pfApplicable: compPf,
         pfRatePercent: Number(compPfRate),
       };
-      const res = await apiFetch(`/api/v1/hr/employees/${selectedEmpForComp.id}/compensation`, {
+      const res = await hrFetch(`/api/v1/hr/employees/${selectedEmpForComp.id}/compensation`, {
         method: "PUT",
         body: JSON.stringify(body),
       });
@@ -544,7 +573,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
         checkOutTime: punchOutTime ? `${punchDate}T${punchOutTime}:00` : null,
         punchSource: "web_portal",
       };
-      const res = await apiFetch("/api/v1/hr/attendance/records", {
+      const res = await hrFetch("/api/v1/hr/attendance/records", {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -585,7 +614,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
         totalDays: Number(leaveDays),
         reason: leaveReason || "Personal",
       };
-      const res = await apiFetch("/api/v1/hr/leave/requests", {
+      const res = await hrFetch("/api/v1/hr/leave/requests", {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -603,7 +632,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
     setErrorMessage("");
     setSuccessMessage("");
     try {
-      const res = await apiFetch(`/api/v1/hr/leave/requests/${requestId}/review`, {
+      const res = await hrFetch(`/api/v1/hr/leave/requests/${requestId}/review`, {
         method: "POST",
         body: JSON.stringify({ status, remarks: `Action taken via web workspace (${status})` }),
       });
@@ -629,7 +658,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
         monthlyInstallmentPkr: Number(loanInstallment),
         reason: loanReason || "Personal loan request",
       };
-      const res = await apiFetch("/api/v1/hr/loans", {
+      const res = await hrFetch("/api/v1/hr/loans", {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -654,7 +683,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
         endDate: newPeriodEnd,
         payDate: newPeriodPayDate,
       };
-      const res = await apiFetch("/api/v1/payroll/periods", {
+      const res = await hrFetch("/api/v1/payroll/periods", {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -674,7 +703,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
     setErrorMessage("");
     setSuccessMessage("");
     try {
-      const res = await apiFetch(`/api/v1/payroll/periods/${periodId}/calculate`, {
+      const res = await hrFetch(`/api/v1/payroll/periods/${periodId}/calculate`, {
         method: "POST",
       });
       if (!res.ok) throw new Error(await res.text());
@@ -694,7 +723,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
     setErrorMessage("");
     setSuccessMessage("");
     try {
-      const res = await apiFetch(`/api/v1/payroll/periods/${periodId}/approve`, {
+      const res = await hrFetch(`/api/v1/payroll/periods/${periodId}/approve`, {
         method: "POST",
       });
       if (!res.ok) throw new Error(await res.text());
@@ -712,7 +741,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
     setErrorMessage("");
     setSuccessMessage("");
     try {
-      const res = await apiFetch(`/api/v1/payroll/periods/${periodId}/post-gl`, {
+      const res = await hrFetch(`/api/v1/payroll/periods/${periodId}/post-gl`, {
         method: "POST",
         body: JSON.stringify({
           journalDate: new Date().toISOString().slice(0, 10),
@@ -736,7 +765,7 @@ export default function HRWorkspace({ enabled: _enabled, workspace }: HRWorkspac
     setErrorMessage("");
     setSuccessMessage("");
     try {
-      const res = await apiFetch("/api/v1/payroll/reversals", {
+      const res = await hrFetch("/api/v1/payroll/reversals", {
         method: "POST",
         body: JSON.stringify({
           payrollPeriodId: periodId,

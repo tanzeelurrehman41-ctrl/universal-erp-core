@@ -294,18 +294,26 @@ export default function ManufacturingWorkspace({ enabled, workspace }: Props) {
   const [completeAcceptedQty, setCompleteAcceptedQty] = useState("9");
   const [completeScrappedQty, setCompleteScrappedQty] = useState("1");
 
-  const fetchJson = async <T = any,>(url: string, init?: RequestInit): Promise<T> => {
-    const res = await apiFetch(url, init, workspace);
-    if (!res.ok) {
-      let errMsg = `Request failed: ${res.statusText}`;
-      try {
-        const body = await res.json();
-        if (body?.error) errMsg = body.error;
-        else if (body?.message) errMsg = body.message;
-      } catch {}
-      throw new Error(errMsg);
+  const fetchJson = async <T = any,>(url: string, init?: RequestInit): Promise<T | null> => {
+    try {
+      const res = await apiFetch(url, init, workspace, false);
+      if (res.status === 404) {
+        return null;
+      }
+      if (!res.ok) {
+        let errMsg = `Request failed (${res.status}): ${res.statusText || ""}`.trim();
+        try {
+          const body = await res.json();
+          if (body?.error) errMsg = body.error;
+          else if (body?.message) errMsg = body.message;
+        } catch {}
+        throw new Error(errMsg);
+      }
+      return (await res.json()) as T;
+    } catch (err: any) {
+      if (err.message && err.message.includes("404")) return null;
+      throw err;
     }
-    return (await res.json()) as T;
   };
 
   // Load initial data

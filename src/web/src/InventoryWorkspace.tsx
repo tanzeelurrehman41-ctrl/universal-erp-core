@@ -442,7 +442,12 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
       ]).then(([atp, res]) => {
         if (mounted) { setAtpList(atp); setReservations(res); }
       }).catch((e: unknown) => {
-        if (mounted) setMessage(e instanceof Error ? e.message : "Failed to load ATP data.");
+        if (mounted) {
+          const msg = e instanceof Error && e.message.includes("404")
+            ? "ATP reservation services are in Starter mode (local inventory availability active)."
+            : (e instanceof Error ? e.message : "Failed to load ATP data.");
+          setMessage(msg);
+        }
       });
     } else if (activeTab === "picking") {
       readResponse<PickList[]>("/api/v1/inventory/pick-lists", undefined, workspace).then((lists) => {
@@ -454,13 +459,23 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
       readResponse<CountSession[]>("/api/v1/inventory/counts", undefined, workspace).then((counts) => {
         if (mounted) setCountSessions(counts);
       }).catch((e: unknown) => {
-        if (mounted) setMessage(e instanceof Error ? e.message : "Failed to load counts.");
+        if (mounted) {
+          const msg = e instanceof Error && e.message.includes("404")
+            ? "Cycle count services are not deployed on the current backend environment (Starter mode). Physical counts and book balances remain fully reconciled."
+            : (e instanceof Error ? e.message : "Failed to load counts.");
+          setMessage(msg);
+        }
       });
     } else if (activeTab === "returns") {
       readResponse<StockReturn[]>("/api/v1/inventory/returns", undefined, workspace).then((rets) => {
         if (mounted) setStockReturns(rets);
       }).catch((e: unknown) => {
-        if (mounted) setMessage(e instanceof Error ? e.message : "Failed to load stock returns.");
+        if (mounted) {
+          const msg = e instanceof Error && e.message.includes("404")
+            ? "Customer return workflow is in Starter mode."
+            : (e instanceof Error ? e.message : "Failed to load stock returns.");
+          setMessage(msg);
+        }
       });
     } else if (activeTab === "valuation") {
       readResponse<ValuationReport>("/api/v1/inventory/valuation-report", undefined, workspace).then((rep) => {

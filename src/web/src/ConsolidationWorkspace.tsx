@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from './auth';
 import {
   buildBranchTree,
   formatBranchType,
@@ -85,9 +86,7 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
 
   const loadBranches = async () => {
     try {
-      const res = await fetch('/api/v1/branches', {
-        headers: { 'X-Tenant-Id': tenantId, 'X-Company-Id': companyId }
-      });
+      const res = await apiFetch('/api/v1/branches', {}, { tenantId, companyId }, false);
       if (res.ok) {
         const data = await res.json();
         setBranches(data);
@@ -108,12 +107,10 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
     }
 
     try {
-      const res = await fetch('/api/v1/branches', {
+      const res = await apiFetch('/api/v1/branches', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Tenant-Id': tenantId,
-          'X-Company-Id': companyId
         },
         body: JSON.stringify({
           branchCode,
@@ -124,7 +121,7 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
           provinceOrState: province,
           countryCode: 'PK'
         })
-      });
+      }, { tenantId, companyId }, false);
 
       if (res.ok) {
         setBranchMessage(`Branch ${branchCode} created successfully.`);
@@ -142,9 +139,7 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
 
   const loadTransfers = async () => {
     try {
-      const res = await fetch('/api/v1/intercompany/transfers', {
-        headers: { 'X-Tenant-Id': tenantId, 'X-Company-Id': companyId }
-      });
+      const res = await apiFetch('/api/v1/intercompany/transfers', {}, { tenantId, companyId }, false);
       if (res.ok) {
         setTransfers(await res.json());
       }
@@ -155,10 +150,10 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
 
   const handleDispatch = async (transferId: string) => {
     try {
-      const res = await fetch(`/api/v1/intercompany/transfers/${transferId}/dispatch`, {
+      const res = await apiFetch(`/api/v1/intercompany/transfers/${transferId}/dispatch`, {
         method: 'POST',
-        headers: { 'X-Tenant-Id': tenantId, 'X-Company-Id': companyId, 'X-User-Id': userId }
-      });
+        headers: { 'X-User-Id': userId }
+      }, { tenantId, companyId }, false);
       if (res.ok) {
         setTransferMessage(`Transfer dispatched successfully. Sender GL Journal posted.`);
         await loadTransfers();
@@ -173,18 +168,16 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
 
   const handleReceive = async (transferId: string) => {
     try {
-      const res = await fetch(`/api/v1/intercompany/transfers/${transferId}/receive`, {
+      const res = await apiFetch(`/api/v1/intercompany/transfers/${transferId}/receive`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Tenant-Id': tenantId,
-          'X-Company-Id': companyId,
           'X-User-Id': userId
         },
         body: JSON.stringify({
           receiptDate: new Date().toISOString().split('T')[0]
         })
-      });
+      }, { tenantId, companyId }, false);
       if (res.ok) {
         setTransferMessage(`Transfer received. Receiver GL Journal posted and FIFO layers created.`);
         await loadTransfers();
@@ -199,9 +192,7 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
 
   const loadRuns = async () => {
     try {
-      const res = await fetch('/api/v1/consolidations/runs', {
-        headers: { 'X-Tenant-Id': tenantId }
-      });
+      const res = await apiFetch('/api/v1/consolidations/runs', {}, { tenantId, companyId }, false);
       if (res.ok) {
         setRuns(await res.json());
       }
@@ -213,9 +204,7 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
   const handleSelectRun = async (run: any) => {
     setSelectedRun(run);
     try {
-      const res = await fetch(`/api/v1/consolidations/runs/${run.id}/statements?type=${statementType}`, {
-        headers: { 'X-Tenant-Id': tenantId }
-      });
+      const res = await apiFetch(`/api/v1/consolidations/runs/${run.id}/statements?type=${statementType}`, {}, { tenantId, companyId }, false);
       if (res.ok) {
         setStatement(await res.json());
       }
@@ -227,9 +216,9 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
   const loadIntegrations = async () => {
     try {
       const [whRes, delRes, partRes] = await Promise.all([
-        fetch('/api/v1/integrations/webhooks', { headers: { 'X-Tenant-Id': tenantId, 'X-Company-Id': companyId } }),
-        fetch('/api/v1/integrations/deliveries', { headers: { 'X-Tenant-Id': tenantId } }),
-        fetch('/api/v1/integrations/partners', { headers: { 'X-Tenant-Id': tenantId, 'X-Company-Id': companyId } })
+        apiFetch('/api/v1/integrations/webhooks', {}, { tenantId, companyId }, false),
+        apiFetch('/api/v1/integrations/deliveries', {}, { tenantId, companyId }, false),
+        apiFetch('/api/v1/integrations/partners', {}, { tenantId, companyId }, false)
       ]);
 
       if (whRes.ok) setWebhooks(await whRes.json());
@@ -248,18 +237,16 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
     }
 
     try {
-      const res = await fetch('/api/v1/integrations/webhooks', {
+      const res = await apiFetch('/api/v1/integrations/webhooks', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Tenant-Id': tenantId,
-          'X-Company-Id': companyId
         },
         body: JSON.stringify({
           eventType: webhookEventType,
           targetUrl: webhookUrl
         })
-      });
+      }, { tenantId, companyId }, false);
 
       if (res.ok) {
         const result = await res.json();

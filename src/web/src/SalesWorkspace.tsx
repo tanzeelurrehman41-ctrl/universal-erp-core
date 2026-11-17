@@ -1496,6 +1496,41 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
                     <option value="credit">📑 Customer Credit Account</option>
                   </select>
                 </label>
+
+                <div style={{ flex: "1 1 100%", marginTop: "4px" }}>
+                  <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "6px" }}>
+                    Quick Payment Tender:
+                  </div>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    {[
+                      { id: "cash", label: "💵 Cash" },
+                      { id: "card", label: "💳 Card" },
+                      { id: "bank_transfer", label: "🏛 Bank Transfer" },
+                      { id: "mobile_wallet", label: "📱 Mobile Wallet" },
+                      { id: "credit", label: "📑 Credit" },
+                    ].map((pm) => (
+                      <button
+                        key={pm.id}
+                        type="button"
+                        onClick={() => setPosPaymentMethod(pm.id)}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: "6px",
+                          border: "1px solid",
+                          borderColor: posPaymentMethod === pm.id ? "var(--primary)" : "var(--border-base)",
+                          background: posPaymentMethod === pm.id ? "var(--primary-50)" : "var(--bg-surface)",
+                          color: posPaymentMethod === pm.id ? "var(--primary-700)" : "var(--text-primary)",
+                          fontWeight: posPaymentMethod === pm.id ? 700 : 500,
+                          fontSize: "12px",
+                          cursor: "pointer",
+                          transition: "all var(--transition-fast)",
+                        }}
+                      >
+                        {pm.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
               <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
@@ -1534,6 +1569,63 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
                       ))}
                   </select>
                 </label>
+              </div>
+
+              {/* Fast Cashier Quick Product Bar */}
+              <div
+                style={{
+                  padding: "10px 14px",
+                  background: "var(--bg-subtle)",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-base)",
+                  marginTop: "12px",
+                }}
+              >
+                <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-secondary)", marginBottom: "6px" }}>
+                  ⚡ Quick Add to Cart (Click product to add):
+                </div>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", maxHeight: "120px", overflowY: "auto" }}>
+                  {variants
+                    .filter((v) => v.isActive)
+                    .map((v) => (
+                      <button
+                        key={v.variantId}
+                        type="button"
+                        onClick={() => {
+                          const existingIdx = posLines.findIndex((l) => l.variantId === v.variantId);
+                          if (existingIdx >= 0) {
+                            setPosLines(
+                              posLines.map((l, i) =>
+                                i === existingIdx
+                                  ? { ...l, qty: String((parseStrictNumber(l.qty) ?? 0) + 1) }
+                                  : l
+                              )
+                            );
+                          } else {
+                            setPosLines([
+                              ...posLines.filter((l) => l.variantId !== ""),
+                              { variantId: v.variantId, qty: "1", price: "50", taxRate: "0" },
+                            ]);
+                          }
+                        }}
+                        style={{
+                          padding: "5px 10px",
+                          borderRadius: "6px",
+                          border: "1px solid var(--border-base)",
+                          background: "var(--bg-surface)",
+                          color: "var(--text-primary)",
+                          fontSize: "12px",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "4px",
+                        }}
+                      >
+                        <span>+ {v.sku}</span>
+                        <span style={{ color: "var(--text-muted)", fontSize: "11px" }}>({v.productName})</span>
+                      </button>
+                    ))}
+                </div>
               </div>
 
               <h4 className="inventory-subheading" style={{ marginTop: "1rem" }}>
@@ -1756,15 +1848,18 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
           {/* POS Bill Summary & Recent Transactions */}
           <div>
             <article className="inventory-card" style={{ marginBottom: "1.5rem" }}>
-              <h3>Current Receipt Summary</h3>
-              <div style={{ fontSize: "0.9rem", lineHeight: "1.8" }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                <h3 style={{ margin: 0 }}>Register Receipt</h3>
+                <span className="tag tag-starter">{posLines.filter((l) => l.variantId).length} items</span>
+              </div>
+              <div style={{ fontSize: "0.9rem", lineHeight: "2" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)" }}>
                   <span>Gross Subtotal:</span>
                   <strong>
                     PKR {posSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                   </strong>
                 </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)" }}>
                   <span>Sales Tax:</span>
                   <strong>
                     PKR {posTaxTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
@@ -1775,7 +1870,7 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
                     style={{
                       display: "flex",
                       justifyContent: "space-between",
-                      color: "#e65100",
+                      color: "var(--warning-600)",
                     }}
                   >
                     <span>Discount:</span>
@@ -1787,18 +1882,23 @@ export default function SalesWorkspace({ enabled, workspace }: Props) {
                 )}
                 <div
                   style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    borderTop: "2px solid var(--border)",
-                    paddingTop: "0.5rem",
-                    marginTop: "0.5rem",
-                    fontSize: "1.15rem",
+                    background: "var(--primary-50)",
+                    border: "1px solid var(--primary-200)",
+                    borderRadius: "var(--radius-lg)",
+                    padding: "16px",
+                    marginTop: "12px",
+                    textAlign: "center",
                   }}
                 >
-                  <span>Total Payable:</span>
-                  <span style={{ color: "var(--color-primary, #0066cc)", fontWeight: "bold" }}>
+                  <div style={{ fontSize: "12px", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, color: "var(--primary-700)" }}>
+                    Total Payable
+                  </div>
+                  <div style={{ fontSize: "28px", fontWeight: 900, color: "var(--primary-700)", marginTop: "4px" }}>
                     PKR {posNetPayable.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                  </span>
+                  </div>
+                  <div style={{ fontSize: "11px", color: "var(--primary-600)", marginTop: "4px" }}>
+                    Tender: {posPaymentMethod.replace("_", " ").toUpperCase()}
+                  </div>
                 </div>
               </div>
             </article>

@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import DashboardWorkspace from "./DashboardWorkspace";
 import InventoryWorkspace from "./InventoryWorkspace";
 import WarehouseWorkspace from "./WarehouseWorkspace";
 import PurchasingWorkspace from "./PurchasingWorkspace";
@@ -12,6 +13,7 @@ import HRWorkspace from "./HRWorkspace";
 import { AnalyticsWorkspace } from "./AnalyticsWorkspace";
 import { ConsolidationWorkspace } from "./ConsolidationWorkspace";
 import { BranchDto } from "./branchHelpers";
+import { AppShell, Card, Button, Badge, type NavItem } from "./components";
 import {
   apiFetch,
   apiUrl,
@@ -108,6 +110,7 @@ export default function App() {
   const activeWorkspace = workspaces.find((workspace) => workspaceKey(workspace) === activeWorkspaceKey) ?? null;
   const queueOwnerKey = ownerKeyForUser(authUser);
   const [activeNavTab, setActiveNavTab] = useState<
+    | "overview"
     | "inventory"
     | "warehouse"
     | "purchasing"
@@ -120,7 +123,7 @@ export default function App() {
     | "consolidation"
     | "saas"
     | "all"
-  >("inventory");
+  >("overview");
   const [activeBranchId, setActiveBranchId] = useState<string>("");
   const [branches, setBranches] = useState<BranchDto[]>([]);
 
@@ -518,142 +521,178 @@ export default function App() {
   const inventoryEnabled = apiStatus === "online" && (!oidcConfigured || Boolean(authUser && !authUser.expired && activeWorkspace));
   const inventoryStorageScope = `${queueOwnerKey ?? "development"}:${activeWorkspace ? workspaceKey(activeWorkspace) : "local"}`;
 
-  return (
-    <main className="shell">
-      <header className="topbar">
-        <div className="brand-mark">UE</div>
-        <div>
-          <strong>Universal ERP</strong>
-          <small>Application foundation</small>
-        </div>
-        <span className={`status status-${apiStatus}`} role="status" aria-live="polite">
-          {apiStatusLabel}
-        </span>
-        {oidcConfigured && (
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            {authUser ? (
-              <>
-                <span style={{ fontSize: "12px", color: "#59677f", fontWeight: 600 }}>
-                  {authUser.displayName || authUser.email || "Authenticated User"}
-                </span>
-                <span style={{ fontSize: "11px", color: "#475569", background: "#f1f5f9", padding: "2px 6px", borderRadius: "4px", fontFamily: "monospace" }} title="Firebase UID">
-                  UID: {authUser.uid}
-                </span>
-                <button
-                  className="auth-button"
-                  disabled={!authReady || isAuthSubmitting}
-                  onClick={handleSignOut}
-                  type="button"
-                >
-                  Sign out
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  className="auth-button"
-                  disabled={!authReady || isAuthSubmitting}
-                  onClick={handleGoogleSignIn}
-                  type="button"
-                >
-                  Sign in with Google
-                </button>
-                <button
-                  className="auth-button"
-                  disabled={!authReady || isAuthSubmitting}
-                  onClick={() => setShowEmailAuth(!showEmailAuth)}
-                  type="button"
-                >
-                  {showEmailAuth ? "Cancel" : "Email & Password"}
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </header>
+  const navItems: NavItem[] = [
+    { id: "overview", label: "Executive Overview", icon: "📊", group: "overview" },
+    { id: "sales", label: "Sales & POS Checkout", icon: "💳", group: "operations" },
+    { id: "inventory", label: "Catalog & Stock", icon: "📦", group: "operations" },
+    { id: "warehouse", label: "Warehouse & Barcode", icon: "🏭", group: "operations" },
+    { id: "purchasing", label: "Purchasing & GRN", icon: "🛒", group: "operations" },
+    { id: "finance", label: "Finance & Ledger", icon: "💰", group: "finance" },
+    { id: "analytics", label: "Analytics & BI", icon: "📈", group: "finance" },
+    { id: "consolidation", label: "Multi-Branch & Group", icon: "🌐", group: "finance" },
+    { id: "manufacturing", label: "Manufacturing & BOM", icon: "⚙️", group: "organization" },
+    { id: "hr", label: "HR & Global Payroll", icon: "👥", group: "organization" },
+    { id: "foundation", label: "Identity & Roles", icon: "🏢", group: "organization" },
+    { id: "saas", label: "SaaS Admin & Tenants", icon: "☁️", group: "platform" },
+  ];
 
-      {oidcConfigured && !authUser && showEmailAuth && (
-        <form
-          onSubmit={handleEmailSignIn}
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "8px",
-            alignItems: "center",
-            padding: "12px 16px",
-            background: "#f4f6fa",
-            borderRadius: "9px",
-            margin: "12px 8px",
-            border: "1px solid #d8deea",
-          }}
+  return (
+    <AppShell
+      navItems={navItems}
+      activeNavId={activeNavTab}
+      onSelectNav={(id) => setActiveNavTab(id as any)}
+      companyName={activeWorkspace?.companyName || (oidcConfigured ? "Select a company" : "Universal ERP Enterprise")}
+      branchName={branches.find((b) => b.id === activeBranchId)?.branchName}
+      apiStatus={apiStatus}
+      userName={authUser?.displayName || authUser?.email || "System Administrator"}
+      userEmail={authUser?.email || "admin@universal-erp.io"}
+      onSignOut={authUser ? handleSignOut : undefined}
+    >
+      {/* Unauthenticated Login Card */}
+      {oidcConfigured && !authUser && (
+        <Card
+          title="Sign in to Universal ERP"
+          subtitle="Enterprise Multi-Company Authentication (OIDC & Firebase)"
+          icon="🔐"
+          className="mb-6"
         >
-          <input
-            type="email"
-            placeholder="Email address"
-            value={authEmail}
-            onChange={(event) => setAuthEmail(event.target.value)}
-            required
-            style={{ padding: "6px 10px", borderRadius: "6px", border: "1px solid #d8deea", font: "inherit", fontSize: "13px" }}
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={authPassword}
-            onChange={(event) => setAuthPassword(event.target.value)}
-            required
-            style={{ padding: "6px 10px", borderRadius: "6px", border: "1px solid #d8deea", font: "inherit", fontSize: "13px" }}
-          />
-          <button
-            type="submit"
-            className="auth-button"
-            disabled={isAuthSubmitting}
-            style={{ background: "#2563eb", color: "white", borderColor: "#2563eb" }}
-          >
-            Sign in
-          </button>
-          <button
-            type="button"
-            className="auth-button"
-            disabled={isAuthSubmitting}
-            onClick={handleEmailSignUp}
-          >
-            Create account
-          </button>
-        </form>
+          <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", marginBottom: "16px" }}>
+            <Button
+              variant="primary"
+              disabled={!authReady || isAuthSubmitting}
+              onClick={handleGoogleSignIn}
+            >
+              Sign in with Google
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={!authReady || isAuthSubmitting}
+              onClick={() => setShowEmailAuth(!showEmailAuth)}
+            >
+              {showEmailAuth ? "Hide Email Form" : "Sign in with Email & Password"}
+            </Button>
+          </div>
+
+          {showEmailAuth && (
+            <form
+              onSubmit={handleEmailSignIn}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr)) auto auto",
+                gap: "12px",
+                alignItems: "end",
+                padding: "16px",
+                background: "var(--bg-subtle)",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border-base)",
+              }}
+            >
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, fontWeight: 600 }}>
+                Email address
+                <input
+                  type="email"
+                  placeholder="name@company.com"
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  required
+                  style={{
+                    height: 38,
+                    padding: "0 10px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border-base)",
+                    background: "var(--bg-surface)",
+                    color: "var(--text-primary)",
+                  }}
+                />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, fontWeight: 600 }}>
+                Password
+                <input
+                  type="password"
+                  placeholder="••••••••"
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  required
+                  style={{
+                    height: 38,
+                    padding: "0 10px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border-base)",
+                    background: "var(--bg-surface)",
+                    color: "var(--text-primary)",
+                  }}
+                />
+              </label>
+              <Button type="submit" variant="primary" disabled={isAuthSubmitting}>
+                Sign in
+              </Button>
+              <Button type="button" variant="outline" disabled={isAuthSubmitting} onClick={handleEmailSignUp}>
+                Create account
+              </Button>
+            </form>
+          )}
+        </Card>
       )}
 
-      <section className="welcome">
-        <p className="eyebrow">MULTI-COMPANY BUSINESS PLATFORM</p>
-        <h1>One workspace for your business operations.</h1>
-        <p className="intro">
-          {oidcConfigured
-            ? "Sign in to access your company catalog. Saved offline entries remain on this device until the shared server confirms them."
-            : "The local product catalog is connected to PostgreSQL. Shared sign-in and hosting are configured separately."}
-        </p>
-      </section>
-
+      {/* Workspace Context Selector */}
       {oidcConfigured && authUser && (
-        <section className="workspace-picker" aria-label="Company workspace">
-          <label htmlFor="workspace-select">Company</label>
-          <select
-            id="workspace-select"
-            value={activeWorkspaceKey}
-            onChange={(event) => changeWorkspace(event.target.value)}
-          >
-            <option value="">Select a company</option>
-            {workspaces.map((workspace) => (
-              <option key={workspaceKey(workspace)} value={workspaceKey(workspace)}>
-                {workspace.tenantName} · {workspace.companyName}
-              </option>
-            ))}
-          </select>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "16px",
+            padding: "12px 18px",
+            background: "var(--bg-surface)",
+            borderRadius: "var(--radius-lg)",
+            border: "1px solid var(--border-base)",
+            marginBottom: "var(--space-5)",
+            boxShadow: "var(--shadow-xs)",
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)" }}>Company:</span>
+            <select
+              id="workspace-select"
+              value={activeWorkspaceKey}
+              onChange={(event) => changeWorkspace(event.target.value)}
+              style={{
+                height: 34,
+                padding: "0 10px",
+                border: "1px solid var(--border-base)",
+                borderRadius: 6,
+                background: "var(--bg-subtle)",
+                color: "var(--text-primary)",
+                fontWeight: 600,
+                fontSize: 13,
+              }}
+            >
+              <option value="">Select a company</option>
+              {workspaces.map((workspace) => (
+                <option key={workspaceKey(workspace)} value={workspaceKey(workspace)}>
+                  {workspace.tenantName} · {workspace.companyName}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {branches.length > 0 && (
-            <>
-              <label htmlFor="branch-select" style={{ marginLeft: "12px" }}>Branch</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)" }}>Branch:</span>
               <select
                 id="branch-select"
                 value={activeBranchId}
                 onChange={(event) => setActiveBranchId(event.target.value)}
+                style={{
+                  height: 34,
+                  padding: "0 10px",
+                  border: "1px solid var(--border-base)",
+                  borderRadius: 6,
+                  background: "var(--bg-subtle)",
+                  color: "var(--text-primary)",
+                  fontWeight: 600,
+                  fontSize: 13,
+                }}
               >
                 <option value="">All Branches / HQ</option>
                 {branches.map((b) => (
@@ -662,236 +701,43 @@ export default function App() {
                   </option>
                 ))}
               </select>
-            </>
+            </div>
           )}
-          <span>{authUser.expired ? "Session expired. Sign in again to sync saved work." : "Changes are checked against your current membership."}</span>
-        </section>
-      )}
-      {oidcConfigured && authMessage && <p className="auth-message" role="status">{authMessage}</p>}
-      {!oidcConfigured && !import.meta.env.DEV && (
-        <p className="auth-message" role="status">Shared sign-in is not configured for this deployment.</p>
+
+          <div style={{ marginLeft: "auto", fontSize: 12, color: "var(--text-muted)" }}>
+            {authUser.expired ? (
+              <span style={{ color: "var(--danger-600)", fontWeight: 700 }}>Session expired. Sign in again.</span>
+            ) : (
+              <span style={{ color: "var(--success-600)" }}>✓ Active Tenant Session</span>
+            )}
+          </div>
+        </div>
       )}
 
-      <nav
-        aria-label="ERP Modules"
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: "8px",
-          marginTop: "16px",
-          marginBottom: "16px",
-          padding: "8px 12px",
-          background: "#ffffff",
-          borderRadius: "8px",
-          border: "1px solid #d8deea",
-          boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
-        }}
-      >
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("inventory")}
+      {oidcConfigured && authMessage && (
+        <div
           style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "inventory" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "inventory" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "inventory" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
+            padding: "10px 16px",
+            background: "var(--warning-bg)",
+            border: "1px solid var(--warning-border)",
+            borderRadius: "var(--radius-md)",
+            color: "var(--warning-text)",
+            fontSize: 13,
+            marginBottom: "var(--space-4)",
           }}
+          role="status"
         >
-          📦 Catalog & Inventory
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("warehouse")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "warehouse" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "warehouse" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "warehouse" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          🏭 Warehouse & Barcode
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("purchasing")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "purchasing" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "purchasing" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "purchasing" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          🛒 Purchasing & GRN
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("sales")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "sales" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "sales" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "sales" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          💳 Sales & POS
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("finance")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "finance" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "finance" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "finance" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          💰 Finance & Ledger
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("manufacturing")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "manufacturing" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "manufacturing" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "manufacturing" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          🏭 Manufacturing & BOM
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("foundation")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "foundation" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "foundation" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "foundation" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          🏢 Foundation & Admin
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("hr")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "hr" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "hr" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "hr" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          👥 HR & Payroll
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("analytics")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "analytics" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "analytics" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "analytics" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          📊 Analytics & BI
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("consolidation")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "consolidation" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "consolidation" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "consolidation" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          🌐 Multi-Branch & Consolidation
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("saas")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "saas" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "saas" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "saas" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          🌐 SaaS & Tenants
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("all")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "all" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "all" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "all" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          📑 View All
-        </button>
-      </nav>
+          {authMessage}
+        </div>
+      )}
+
+      {/* Dashboard Executive Overview */}
+      {(activeNavTab === "overview" || activeNavTab === "all") && (
+        <DashboardWorkspace
+          workspace={activeWorkspace}
+          onNavigate={(target) => setActiveNavTab(target as any)}
+        />
+      )}
 
       {(activeNavTab === "inventory" || activeNavTab === "all") && (
         <>
@@ -1110,7 +956,6 @@ export default function App() {
         ))}
       </section>
 
-      <footer>English · Urdu-ready · Web client starter</footer>
-    </main>
+    </AppShell>
   );
 }

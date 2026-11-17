@@ -6,13 +6,15 @@ type Props = {
   workspace: TenantCompanyContext | null;
 };
 
+type RoleDetail = string | { roleCode?: string; name?: string };
+
 type UserProfile = {
   userId: string;
   email: string;
   displayName: string;
   tenantId: string;
   companyId: string;
-  roles: string[];
+  roles: RoleDetail[];
   permissions: string[];
 };
 
@@ -33,9 +35,11 @@ type CompanyUser = {
   email: string;
   displayName: string;
   status: string;
-  assignedRoles: string[];
+  roles?: RoleDetail[];
+  assignedRoles?: RoleDetail[];
   invitedAt?: string | null;
   joinedAt?: string | null;
+  createdAt?: string | null;
 };
 
 type RoleInfo = {
@@ -279,20 +283,29 @@ export default function FoundationWorkspace({ enabled, workspace }: Props) {
             <p><strong>Roles:</strong></p>
             <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "12px" }}>
               {profile?.roles && profile.roles.length > 0 ? (
-                profile.roles.map((r) => (
-                  <span key={r} className="tag tag-starter" style={{ fontSize: "12px" }}>{r}</span>
-                ))
+                profile.roles.map((r, idx) => {
+                  const roleName = typeof r === "string" ? r : (r.name || r.roleCode || "Role");
+                  const roleKey = typeof r === "string" ? `${r}-${idx}` : (r.roleCode || r.name || idx);
+                  return (
+                    <span key={roleKey} className="tag tag-starter" style={{ fontSize: "12px" }}>
+                      {roleName}
+                    </span>
+                  );
+                })
               ) : (
                 <span style={{ color: "#64748b" }}>Standard Member</span>
               )}
             </div>
             <p><strong>Effective Permissions ({profile?.permissions?.length ?? 0}):</strong></p>
             <div style={{ maxHeight: "150px", overflowY: "auto", display: "flex", flexWrap: "wrap", gap: "4px" }}>
-              {profile?.permissions?.map((p) => (
-                <span key={p} style={{ fontSize: "11px", background: "#e2e8f0", padding: "2px 6px", borderRadius: "4px" }}>
-                  {p}
-                </span>
-              ))}
+              {profile?.permissions?.map((p, idx) => {
+                const permText = typeof p === "string" ? p : JSON.stringify(p);
+                return (
+                  <span key={`${permText}-${idx}`} style={{ fontSize: "11px", background: "#e2e8f0", padding: "2px 6px", borderRadius: "4px" }}>
+                    {permText}
+                  </span>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -419,18 +432,25 @@ export default function FoundationWorkspace({ enabled, workspace }: Props) {
                     <span className={`tag ${u.status === "active" ? "tag-starter" : "tag-progress"}`}>{u.status}</span>
                   </td>
                   <td style={{ padding: "8px", border: "1px solid #e2e8f0" }}>
-                    {u.assignedRoles && u.assignedRoles.length > 0 ? (
-                      u.assignedRoles.map((r) => (
-                        <span key={r} style={{ background: "#e2e8f0", padding: "2px 6px", borderRadius: "4px", marginRight: "4px", fontSize: "11px" }}>
-                          {r}
-                        </span>
-                      ))
-                    ) : (
-                      <span style={{ color: "#94a3b8" }}>None</span>
-                    )}
+                    {(() => {
+                      const userRoles = u.roles || u.assignedRoles || [];
+                      return userRoles && userRoles.length > 0 ? (
+                        userRoles.map((r, idx) => {
+                          const roleName = typeof r === "string" ? r : (r.name || r.roleCode || "Role");
+                          const roleKey = typeof r === "string" ? `${r}-${idx}` : (r.roleCode || r.name || idx);
+                          return (
+                            <span key={roleKey} style={{ background: "#e2e8f0", padding: "2px 6px", borderRadius: "4px", marginRight: "4px", fontSize: "11px" }}>
+                              {roleName}
+                            </span>
+                          );
+                        })
+                      ) : (
+                        <span style={{ color: "#94a3b8" }}>None</span>
+                      );
+                    })()}
                   </td>
                   <td style={{ padding: "8px", border: "1px solid #e2e8f0" }}>
-                    {u.joinedAt ? new Date(u.joinedAt).toLocaleDateString() : "Pending"}
+                    {u.joinedAt || u.createdAt ? new Date(u.joinedAt || u.createdAt!).toLocaleDateString() : "Pending"}
                   </td>
                 </tr>
               ))}
