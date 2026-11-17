@@ -94,11 +94,11 @@ export function mapFirebaseUser(user: FirebaseUser | null): ErpAuthUser | null {
   };
 }
 
-export async function getAccessToken(): Promise<string | null> {
+export async function getAccessToken(forceRefresh = false): Promise<string | null> {
   const firebaseAuth = getFirebaseAuth();
   if (!firebaseAuth || !firebaseAuth.currentUser) return null;
   try {
-    return await firebaseAuth.currentUser.getIdToken();
+    return await firebaseAuth.currentUser.getIdToken(forceRefresh);
   } catch {
     return null;
   }
@@ -193,8 +193,22 @@ export async function apiFetch(
     headers.set("X-Company-Id", workspace.companyId);
   }
 
-  return fetch(resolvedInput, {
+  let response = await fetch(resolvedInput, {
     ...init,
     headers,
   });
+
+  // If token expired, perform a transparent single-attempt token refresh and retry
+  if (response.status === 401 && authConfigured) {
+    const freshToken = await getAccessToken(true);
+    if (freshToken && freshToken !== token) {
+      headers.set("Authorization", `Bearer ${freshToken}`);
+      response = await fetch(resolvedInput, {
+        ...init,
+        headers,
+      });
+    }
+  }
+
+  return response;
 }

@@ -544,7 +544,7 @@ if (isDevelopment)
 }
 
 var productApi = app.MapGroup("/api/v1");
-if (!isDevelopment)
+if (!isDevelopment || isAuthExplicitlyConfigured)
 {
     productApi.RequireAuthorization();
     productApi.MapGet("/contexts", async (
@@ -552,8 +552,10 @@ if (!isDevelopment)
         TenantCompanyContextCatalog catalog,
         CancellationToken cancellationToken) =>
     {
-        var issuer = principal.FindFirst("erp:issuer")?.Value;
-        var subject = principal.FindFirst("sub")?.Value;
+        var issuer = principal.FindFirst("erp:issuer")?.Value
+            ?? principal.FindFirst("iss")?.Value;
+        var subject = principal.FindFirst("sub")?.Value
+            ?? principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
         if (string.IsNullOrWhiteSpace(issuer) || string.IsNullOrWhiteSpace(subject))
         {
             return Results.Unauthorized();

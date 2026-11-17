@@ -149,7 +149,12 @@ export default function App() {
 
       try {
         const response = await apiFetch("/api/v1/contexts", {}, undefined, false);
-        if (!response.ok) throw new Error(`Workspace lookup returned HTTP ${response.status}.`);
+        if (!response.ok) {
+          if (response.status === 401) {
+            throw new Error("Authentication expired or invalid. Please sign in again.");
+          }
+          throw new Error(`Workspace lookup returned HTTP ${response.status}.`);
+        }
         const available = (await response.json()) as TenantCompanyContext[];
         if (!isMounted) return;
         setWorkspaces(available);

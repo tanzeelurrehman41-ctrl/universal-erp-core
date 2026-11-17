@@ -92,12 +92,28 @@ public sealed class NetworkSynchronizedClock : IClock
                         {
                             clockField.SetValue(verifierInstance, new NetworkSynchronizedClock());
                             logger.LogInformation("Successfully configured NetworkSynchronizedClock on FirebaseTokenVerifier.");
-                            _applied = true;
-                            return;
                         }
                     }
                 }
-                logger.LogWarning("Could not access idTokenVerifier field on FirebaseAuth instance.");
+
+                var tokenFactoryField = baseType?.GetField("tokenFactory", BindingFlags.NonPublic | BindingFlags.Instance);
+                var lazyFactory = tokenFactoryField?.GetValue(authInstance);
+                if (lazyFactory != null)
+                {
+                    var valueProperty = lazyFactory.GetType().GetProperty("Value");
+                    var factoryInstance = valueProperty?.GetValue(lazyFactory);
+                    if (factoryInstance != null)
+                    {
+                        var factoryClockField = factoryInstance.GetType().GetField("<Clock>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (factoryClockField != null)
+                        {
+                            factoryClockField.SetValue(factoryInstance, new NetworkSynchronizedClock());
+                            logger.LogInformation("Successfully configured NetworkSynchronizedClock on FirebaseTokenFactory.");
+                        }
+                    }
+                }
+
+                _applied = true;
             }
             catch (Exception ex)
             {

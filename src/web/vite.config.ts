@@ -17,4 +17,18 @@ export default defineConfig({
       },
     },
   },
+  preview: {
+    host: "127.0.0.1",
+    port: 4173,
+    proxy: {
+      "/api": {
+        target: "https://universal-erp-core.onrender.com",
+        changeOrigin: true,
+      },
+      "/health": {
+        target: "https://universal-erp-core.onrender.com",
+        changeOrigin: true,
+      },
+    },
+  },
 });
