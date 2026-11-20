@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Warehouse;
 using UniversalErp.Domain.Tenancy;
@@ -14,6 +15,10 @@ public static class WarehouseEndpointMappings
     public static IEndpointRouteBuilder MapWarehouseEndpoints(this IEndpointRouteBuilder endpoints, bool isDevelopment)
     {
         var group = endpoints.MapGroup("/api/v1/warehouse").WithTags("Warehouse");
+        if (!isDevelopment)
+        {
+            group.RequireAuthorization();
+        }
 
         // 1. Zones
         group.MapGet("/zones", async (
@@ -413,14 +418,18 @@ public static class WarehouseEndpointMappings
 
     private static TenantContext ExtractContext(HttpContext httpContext)
     {
+        var accessor = httpContext.RequestServices.GetService<ITenantContextAccessor>();
+        if (accessor?.Current is { } current && current.TenantId != Guid.Empty)
+        {
+            return current;
+        }
+
         var tenantIdStr = httpContext.Request.Headers["X-Tenant-Id"].ToString();
         var companyIdStr = httpContext.Request.Headers["X-Company-Id"].ToString();
-        var userIdStr = httpContext.Request.Headers["X-User-Id"].ToString();
 
         var tenantId = Guid.TryParse(tenantIdStr, out var tid) ? tid : Guid.Empty;
         var companyId = Guid.TryParse(companyIdStr, out var cid) ? cid : Guid.Empty;
-        var userId = Guid.TryParse(userIdStr, out var uid) ? uid : Guid.Empty;
 
-        return new TenantContext(tenantId, companyId, userId);
+        return new TenantContext(tenantId, companyId, Guid.Empty);
     }
 }

@@ -152,7 +152,6 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
     try {
       const res = await apiFetch(`/api/v1/intercompany/transfers/${transferId}/dispatch`, {
         method: 'POST',
-        headers: { 'X-User-Id': userId }
       }, { tenantId, companyId }, false);
       if (res.ok) {
         setTransferMessage(`Transfer dispatched successfully. Sender GL Journal posted.`);
@@ -172,7 +171,6 @@ export const ConsolidationWorkspace: React.FC<ConsolidationWorkspaceProps> = ({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': userId
         },
         body: JSON.stringify({
           receiptDate: new Date().toISOString().split('T')[0]

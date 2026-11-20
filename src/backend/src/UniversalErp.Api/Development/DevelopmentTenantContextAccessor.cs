@@ -1,3 +1,6 @@
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using UniversalErp.Application.Abstractions;
 using UniversalErp.Domain.Tenancy;
 
@@ -5,8 +8,13 @@ namespace UniversalErp.Api.Development;
 
 public sealed class DevelopmentTenantContextAccessor : ITenantContextAccessor
 {
-    public DevelopmentTenantContextAccessor(IConfiguration configuration)
+    public DevelopmentTenantContextAccessor(IConfiguration configuration, IWebHostEnvironment? environment = null)
     {
+        if (environment != null && !environment.IsDevelopment())
+        {
+            throw new InvalidOperationException("DevelopmentTenantContextAccessor cannot be used in a non-development environment.");
+        }
+
         var settings = configuration.GetSection("DevelopmentTenant");
         Current = new TenantContext(
             Guid.Parse(settings["TenantId"] ?? throw new InvalidOperationException("Development tenant ID is missing.")),

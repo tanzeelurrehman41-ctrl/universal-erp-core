@@ -1,8 +1,11 @@
 using System;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Analytics;
 using UniversalErp.Domain.Tenancy;
@@ -14,6 +17,10 @@ public static class AnalyticsEndpointMappings
     public static IEndpointRouteBuilder MapAnalyticsEndpoints(this IEndpointRouteBuilder endpoints, bool isDevelopment)
     {
         var group = endpoints.MapGroup("/api/v1/analytics").WithTags("Analytics & BI");
+        if (!isDevelopment)
+        {
+            group.RequireAuthorization();
+        }
 
         // 1. Executive Dashboard
         group.MapGet("/dashboard", async (
@@ -27,7 +34,7 @@ public static class AnalyticsEndpointMappings
             HttpContext httpContext) =>
         {
             var ctx = ResolveContext(httpContext, ctxAccessor);
-            bool hasSalaryView = httpContext.User.HasClaim("permissions", "payroll.salary.view") || isDevelopment;
+            bool hasSalaryView = await CheckSalaryViewPermissionAsync(httpContext, isDevelopment);
             var filter = new AnalyticsDateRangeFilter(startDate, endDate, warehouseId, departmentId, productId);
             var dash = await service.GetExecutiveDashboardAsync(ctx.TenantId, ctx.CompanyId, filter, hasSalaryView, httpContext.RequestAborted);
             return Results.Ok(dash);
@@ -128,7 +135,7 @@ public static class AnalyticsEndpointMappings
             HttpContext httpContext) =>
         {
             var ctx = ResolveContext(httpContext, ctxAccessor);
-            bool hasSalaryView = httpContext.User.HasClaim("permissions", "payroll.salary.view") || isDevelopment;
+            bool hasSalaryView = await CheckSalaryViewPermissionAsync(httpContext, isDevelopment);
             var filter = new AnalyticsDateRangeFilter(startDate, endDate, DepartmentId: departmentId);
             var wf = await service.GetWorkforceCostAnalyticsAsync(ctx.TenantId, ctx.CompanyId, filter, hasSalaryView, httpContext.RequestAborted);
             return Results.Ok(wf);
@@ -200,7 +207,7 @@ public static class AnalyticsEndpointMappings
             HttpContext httpContext) =>
         {
             var ctx = ResolveContext(httpContext, ctxAccessor);
-            bool hasSalaryView = httpContext.User.HasClaim("permissions", "payroll.salary.view") || isDevelopment;
+            bool hasSalaryView = await CheckSalaryViewPermissionAsync(httpContext, isDevelopment);
             var exp = await service.ExportAnalyticsDataAsync(ctx.TenantId, ctx.CompanyId, req, hasSalaryView, httpContext.RequestAborted);
             return Results.Ok(exp);
         });
@@ -208,16 +215,30 @@ public static class AnalyticsEndpointMappings
         return endpoints;
     }
 
+    private static async Task<bool> CheckSalaryViewPermissionAsync(HttpContext httpContext, bool isDevelopment)
+    {
+        var authService = httpContext.RequestServices.GetService<IAuthorizationService>();
+        if (authService != null)
+        {
+            var authResult = await authService.AuthorizeAsync(httpContext.User, "payroll.salary.view");
+            return authResult.Succeeded;
+        }
+        return isDevelopment;
+    }
+
     private static TenantContext ResolveContext(HttpContext httpContext, ITenantContextAccessor accessor)
     {
+        if (accessor?.Current is { } current && current.TenantId != Guid.Empty)
+        {
+            return current;
+        }
+
         var tenantIdStr = httpContext.Request.Headers["X-Tenant-Id"].ToString();
         var companyIdStr = httpContext.Request.Headers["X-Company-Id"].ToString();
-        var userIdStr = httpContext.Request.Headers["X-User-Id"].ToString();
 
-        var tenantId = Guid.TryParse(tenantIdStr, out var tid) && tid != Guid.Empty ? tid : accessor.Current.TenantId;
-        var companyId = Guid.TryParse(companyIdStr, out var cid) && cid != Guid.Empty ? cid : accessor.Current.CompanyId;
-        var userId = Guid.TryParse(userIdStr, out var uid) && uid != Guid.Empty ? uid : accessor.Current.UserId;
+        var tenantId = Guid.TryParse(tenantIdStr, out var tid) && tid != Guid.Empty ? tid : Guid.Empty;
+        var companyId = Guid.TryParse(companyIdStr, out var cid) && cid != Guid.Empty ? cid : Guid.Empty;
 
-        return new TenantContext(tenantId, companyId, userId);
+        return new TenantContext(tenantId, companyId, Guid.Empty);
     }
 }

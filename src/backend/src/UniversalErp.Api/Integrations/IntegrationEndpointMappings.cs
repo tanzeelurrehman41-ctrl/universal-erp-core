@@ -14,6 +14,10 @@ public static class IntegrationEndpointMappings
     public static IEndpointRouteBuilder MapIntegrationEndpoints(this IEndpointRouteBuilder endpoints, bool isDevelopment)
     {
         var group = endpoints.MapGroup("/api/v1/integrations").WithTags("External Integrations Hub");
+        if (!isDevelopment)
+        {
+            group.RequireAuthorization();
+        }
 
         // ── Webhooks ────────────────────────────────────────────────────────
         group.MapGet("/webhooks", async (
@@ -144,14 +148,17 @@ public static class IntegrationEndpointMappings
 
     private static TenantContext ResolveContext(HttpContext httpContext, ITenantContextAccessor accessor)
     {
+        if (accessor?.Current is { } current && current.TenantId != Guid.Empty)
+        {
+            return current;
+        }
+
         var tenantIdStr = httpContext.Request.Headers["X-Tenant-Id"].ToString();
         var companyIdStr = httpContext.Request.Headers["X-Company-Id"].ToString();
-        var userIdStr = httpContext.Request.Headers["X-User-Id"].ToString();
 
-        var tenantId = Guid.TryParse(tenantIdStr, out var tid) && tid != Guid.Empty ? tid : accessor.Current.TenantId;
-        var companyId = Guid.TryParse(companyIdStr, out var cid) && cid != Guid.Empty ? cid : accessor.Current.CompanyId;
-        var userId = Guid.TryParse(userIdStr, out var uid) && uid != Guid.Empty ? uid : accessor.Current.UserId;
+        var tenantId = Guid.TryParse(tenantIdStr, out var tid) && tid != Guid.Empty ? tid : Guid.Empty;
+        var companyId = Guid.TryParse(companyIdStr, out var cid) && cid != Guid.Empty ? cid : Guid.Empty;
 
-        return new TenantContext(tenantId, companyId, userId);
+        return new TenantContext(tenantId, companyId, Guid.Empty);
     }
 }
