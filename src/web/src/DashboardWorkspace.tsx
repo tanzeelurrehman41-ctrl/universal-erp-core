@@ -1,6 +1,13 @@
 import React, { useState, useEffect } from "react";
 import { Card, KPICard, Badge, Button, PageHeader } from "./components";
 import { apiFetch, type TenantCompanyContext } from "./auth";
+import {
+  formatMoneyWithCurrency,
+  resolveDashboardCurrencyState,
+  type ResolvedDashboardCurrencyState,
+  type TrialBalanceRowSummary,
+  type ValuationReportResponse,
+} from "./dashboardCurrencyHelpers";
 
 interface DashboardWorkspaceProps {
   workspace: TenantCompanyContext | null;
@@ -86,24 +93,19 @@ export default function DashboardWorkspace({
     variance: null,
   });
 
+  const [currencyState, setCurrencyState] = useState<ResolvedDashboardCurrencyState>(() =>
+    resolveDashboardCurrencyState(workspace?.baseCurrencyCode, null, null)
+  );
+
   const [binDistributions, setBinDistributions] = useState<BinDistribution[]>([]);
   const [binApiError, setBinApiError] = useState(false);
   const [auditEvents, setAuditEvents] = useState<AuditEventItem[]>([]);
 
-  // Format financial values dynamically using the active company's baseCurrencyCode
-  // Never default to USD or PKR if missing — display plain number or 'Unspecified'
-  const baseCurrency = workspace?.baseCurrencyCode?.trim().toUpperCase() || null;
+  // Format financial values strictly using verified functional currency
+  const baseCurrency = currencyState.companyBaseCurrency || workspace?.baseCurrencyCode?.trim().toUpperCase() || null;
 
-  const formatMoney = (val: number | null | undefined): string => {
-    if (val === null || val === undefined || isNaN(val)) {
-      return "Unavailable";
-    }
-    const formatted = val.toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
-    return baseCurrency ? `${baseCurrency} ${formatted}` : formatted;
-  };
+  const formatMoney = (val: number | null | undefined): string =>
+    formatMoneyWithCurrency(val, baseCurrency, 2);
 
   useEffect(() => {
     let isMounted = true;
@@ -131,29 +133,13 @@ export default function DashboardWorkspace({
 
         if (!isMounted) return;
 
-        // 1. Process Valuation Report
-        let totalPhysicalStock: number | null = null;
-        let fifoValuation: number | null = null;
-        let reportGl1200: number | null = null;
-
+        // 1. Process Currency-Safe Valuation Report
+        let valData: ValuationReportResponse | null = null;
         if (valResResult.status === "fulfilled" && valResResult.value.ok) {
           try {
-            const valData = await valResResult.value.json();
-            if (valData) {
-              if (valData.totalPhysicalStock !== undefined && valData.totalPhysicalStock !== null) {
-                totalPhysicalStock = Number(valData.totalPhysicalStock);
-              }
-              // The API's totalValuationPkr field represents the company's functional currency valuation
-              if (valData.totalValuationPkr !== undefined && valData.totalValuationPkr !== null) {
-                fifoValuation = Number(valData.totalValuationPkr);
-              } else if (valData.totalValuation !== undefined && valData.totalValuation !== null) {
-                fifoValuation = Number(valData.totalValuation);
-              }
-              if (valData.generalLedger1200BalancePkr !== undefined && valData.generalLedger1200BalancePkr !== null) {
-                reportGl1200 = Number(valData.generalLedger1200BalancePkr);
-              } else if (valData.generalLedger1200Balance !== undefined && valData.generalLedger1200Balance !== null) {
-                reportGl1200 = Number(valData.generalLedger1200Balance);
-              }
+            const parsed = await valResResult.value.json();
+            if (parsed && typeof parsed === "object") {
+              valData = parsed as ValuationReportResponse;
             }
           } catch {
             // keep null
@@ -220,10 +206,29 @@ export default function DashboardWorkspace({
           });
         }
 
+        // 3. Process Trial Balance and resolve currency-safe dashboard state
+        let tbData: TrialBalanceRowSummary[] | null = null;
+        if (tbResResult.status === "fulfilled" && tbResResult.value.ok) {
+          try {
+            const parsedTb = await tbResResult.value.json();
+            if (Array.isArray(parsedTb)) {
+              tbData = parsedTb as TrialBalanceRowSummary[];
+            }
+          } catch {
+            // keep null
+          }
+        }
+
+        const resolvedCurrencyState = resolveDashboardCurrencyState(
+          workspace.baseCurrencyCode,
+          valData,
+          tbData
+        );
+
         // Effective physical stock: prefer valuation report, fallback to sum of balances, or null if both failed
         let effectiveTotalUnits: number | null = null;
-        if (totalPhysicalStock !== null) {
-          effectiveTotalUnits = totalPhysicalStock;
+        if (resolvedCurrencyState.totalPhysicalStock !== null) {
+          effectiveTotalUnits = resolvedCurrencyState.totalPhysicalStock;
         } else if (sumAvailableUnits !== null) {
           effectiveTotalUnits = sumAvailableUnits;
         }
@@ -251,53 +256,19 @@ export default function DashboardWorkspace({
           distributions.sort((a, b) => b.quantity - a.quantity || a.binCode.localeCompare(b.binCode));
         }
 
-        // 3. Process Authoritative Trial Balance for GL Account 1200
-        let directGl1200: number | null = null;
-        let tbBalanced: boolean | null = null;
-
-        if (tbResResult.status === "fulfilled" && tbResResult.value.ok) {
-          try {
-            const tbData: TrialBalanceRow[] = await tbResResult.value.json();
-            if (Array.isArray(tbData) && tbData.length > 0) {
-              const row1200 = tbData.find(
-                (r) => r.accountCode === "1200" || (typeof r.accountCode === "string" && r.accountCode.startsWith("1200"))
-              );
-              if (row1200) {
-                directGl1200 = Number(
-                  row1200.netBalance ??
-                  (Number(row1200.totalDebit ?? 0) - Number(row1200.totalCredit ?? 0))
-                );
-              }
-              const totalDebits = tbData.reduce((acc, r) => acc + (Number(r.totalDebit) || 0), 0);
-              const totalCredits = tbData.reduce((acc, r) => acc + (Number(r.totalCredit) || 0), 0);
-              tbBalanced = Math.abs(totalDebits - totalCredits) < 0.01;
-            }
-          } catch {
-            // keep null
-          }
-        }
-
-        // Determine effective GL 1200 balance from authoritative finance or valuation report
-        const effectiveGl1200 = directGl1200 !== null ? directGl1200 : reportGl1200;
-
-        // Calculate dynamic monetary variance: Math.abs(fifoValuation - gl1200)
-        // Strictly requires both values to be present; otherwise null (unavailable)
-        let calculatedVariance: number | null = null;
-        if (fifoValuation !== null && effectiveGl1200 !== null) {
-          calculatedVariance = Math.abs(fifoValuation - effectiveGl1200);
-        }
+        setCurrencyState(resolvedCurrencyState);
 
         setInventoryStats({
           totalUnits: effectiveTotalUnits,
-          valuation: fifoValuation,
+          valuation: resolvedCurrencyState.functionalValuation,
           activeWarehouses: warehouses !== null ? warehouses.length : null,
           activeBins: bins !== null ? activeBinsList.length : null,
         });
 
         setFinanceStats({
-          gl1200Debit: effectiveGl1200,
-          trialBalanceBalanced: tbBalanced,
-          variance: calculatedVariance,
+          gl1200Debit: resolvedCurrencyState.functionalGl1200Balance,
+          trialBalanceBalanced: resolvedCurrencyState.trialBalanceBalanced,
+          variance: resolvedCurrencyState.functionalVariance,
         });
 
         setBinDistributions(distributions);
@@ -438,16 +409,71 @@ export default function DashboardWorkspace({
               ? "amber"
               : "blue"
           }
-          change={
-            financeStats.gl1200Debit !== null
-              ? `GL 1200: ${formatMoney(financeStats.gl1200Debit)}`
-              : "GL 1200: Unavailable"
+          details={
+            loading ? undefined : currencyState.isCurrencyUnresolved ? (
+              <>
+                <span>
+                  Source valuation: {currencyState.sourceValuationBalancesText || "Unavailable"}
+                </span>
+                <span>
+                  Company base currency: {currencyState.companyBaseCurrency || "Unspecified"}
+                </span>
+                <span>Functional valuation: Unavailable</span>
+              </>
+            ) : (
+              <>
+                <span>
+                  {financeStats.gl1200Debit !== null
+                    ? `GL 1200: ${formatMoney(financeStats.gl1200Debit)}`
+                    : "GL 1200: Unavailable"}
+                </span>
+                <span>
+                  Company base currency: {currencyState.companyBaseCurrency || "Unspecified"}
+                </span>
+              </>
+            )
           }
-          changeType={isBalanced ? "up" : hasDiscrepancy ? "down" : "neutral"}
-          changePeriod={
-            financeStats.gl1200Debit !== null
-              ? `GL balance: ${formatMoney(financeStats.gl1200Debit)}`
-              : "Authoritative GL balance unavailable"
+          onClick={() => onNavigate("finance")}
+        />
+
+        <KPICard
+          title="GL Account 1200"
+          value={
+            loading
+              ? "Loading..."
+              : currencyState.isGlCurrencyAligned && financeStats.gl1200Debit !== null
+              ? formatMoney(financeStats.gl1200Debit)
+              : "Unavailable"
+          }
+          icon="📒"
+          color={
+            currencyState.isCurrencyUnresolved
+              ? "amber"
+              : isBalanced
+              ? "green"
+              : hasDiscrepancy
+              ? "red"
+              : "amber"
+          }
+          details={
+            loading ? undefined : (
+              <>
+                <span>
+                  Source ledger balance:{" "}
+                  {currencyState.sourceLedgerBalancesText || "Unavailable"}
+                </span>
+                <span>
+                  Company base currency: {currencyState.companyBaseCurrency || "Unspecified"}
+                </span>
+                <span>
+                  Functional GL balance:{" "}
+                  {currencyState.isGlCurrencyAligned
+                    ? formatMoney(financeStats.gl1200Debit)
+                    : "Unavailable"}
+                </span>
+                <span>Reconciliation: {currencyState.reconciliationLabel}</span>
+              </>
+            )
           }
           onClick={() => onNavigate("finance")}
         />
@@ -464,7 +490,9 @@ export default function DashboardWorkspace({
               : "red"
           }
           change={
-            financeStats.variance === null
+            currencyState.isCurrencyUnresolved
+              ? currencyState.reconciliationLabel
+              : financeStats.variance === null
               ? "Unavailable"
               : isBalanced
               ? "0.00 (Balanced)"
@@ -472,7 +500,9 @@ export default function DashboardWorkspace({
           }
           changeType={isBalanced ? "neutral" : financeStats.variance !== null ? "down" : "neutral"}
           changePeriod={
-            financeStats.variance === null
+            currencyState.isCurrencyUnresolved
+              ? `Company base currency: ${currencyState.companyBaseCurrency || "Unspecified"}`
+              : financeStats.variance === null
               ? "Variance calculation unavailable"
               : isBalanced
               ? "Zero discrepancy baseline"
@@ -699,7 +729,28 @@ export default function DashboardWorkspace({
             )}
 
             {/* Reconciliation Banner */}
-            {inventoryStats.totalUnits === null || financeStats.variance === null ? (
+            {currencyState.isCurrencyUnresolved ? (
+              <div
+                style={{
+                  marginTop: "var(--space-3)",
+                  padding: "var(--space-3)",
+                  background: "var(--warning-bg, #fffbeb)",
+                  border: "1px solid var(--warning-border, #fde68a)",
+                  borderRadius: "var(--radius-md)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "var(--space-3)",
+                }}
+              >
+                <span style={{ fontSize: 18 }}>⚠️</span>
+                <div style={{ fontSize: "var(--font-size-xs)", color: "var(--warning-text, #92400e)" }}>
+                  <strong>Reconciliation: {currencyState.reconciliationLabel}.</strong>{" "}
+                  Source ledger balance: {currencyState.sourceLedgerBalancesText || "Unavailable"} · Company base currency:{" "}
+                  {currencyState.companyBaseCurrency || "Unspecified"} · Functional GL balance:{" "}
+                  {currencyState.isGlCurrencyAligned ? formatMoney(financeStats.gl1200Debit) : "Unavailable"}.
+                </div>
+              </div>
+            ) : inventoryStats.totalUnits === null || financeStats.variance === null ? (
               <div
                 style={{
                   marginTop: "var(--space-3)",

@@ -8,6 +8,7 @@ export interface KPICardProps {
   change?: string;
   changeType?: "up" | "down" | "neutral";
   changePeriod?: string;
+  details?: React.ReactNode;
   className?: string;
   onClick?: () => void;
 }
@@ -20,6 +21,7 @@ export function KPICard({
   change,
   changeType = "neutral",
   changePeriod = "vs last period",
+  details,
   className = "",
   onClick,
 }: KPICardProps) {
@@ -34,7 +36,22 @@ export function KPICard({
         {icon && <div className={`erp-kpi-icon ${color}`}>{icon}</div>}
       </div>
       <div className="erp-kpi-value">{value}</div>
-      {(change || changePeriod) && (
+      {details && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+            fontSize: "var(--font-size-xs)",
+            color: "var(--text-muted)",
+            marginTop: 4,
+            lineHeight: 1.4,
+          }}
+        >
+          {details}
+        </div>
+      )}
+      {!details && (change || changePeriod) && (
         <div className="erp-kpi-footer">
           {change && (
             <span className={`erp-kpi-trend ${changeType}`}>
