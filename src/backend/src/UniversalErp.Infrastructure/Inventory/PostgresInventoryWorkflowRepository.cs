@@ -1361,6 +1361,119 @@ public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSou
         return (commandCode, requestHash, receipt);
     }
 
+    /// <summary>
+    /// Computes FIFO layer valuation and GL Account 1200 reconciliation from existing production tables (M002/M013/M026).
+    /// </summary>
+    public async Task<InventoryValuationReportSummary> GetInventoryValuationReportAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(tenantId, companyId, cancellationToken);
+
+        var layers = new List<InventoryValuationLayerReportItem>();
+        decimal totalValuedStock = 0m;
+        decimal totalValuation = 0m;
+
+        await using (var cmd = new NpgsqlCommand(
+            """
+            SELECT cl.layer_id, cl.parent_layer_id, cl.variant_id, v.sku,
+                   cl.warehouse_id, w.code AS warehouse_code,
+                   cl.bin_id, b.code AS bin_code,
+                   cl.source_document_type, cl.source_document_id,
+                   cl.received_at, cl.original_qty, cl.remaining_qty,
+                   cl.unit_cost, (cl.remaining_qty * cl.unit_cost) AS ext_val,
+                   cl.currency_code, cl.status_code
+            FROM erp_inventory.inventory_cost_layer cl
+            JOIN erp_inventory.product_variant v ON v.tenant_id = cl.tenant_id AND v.variant_id = cl.variant_id
+            JOIN erp_inventory.warehouse w ON w.tenant_id = cl.tenant_id AND w.company_id = cl.company_id AND w.warehouse_id = cl.warehouse_id
+            JOIN erp_inventory.stock_bin b ON b.tenant_id = cl.tenant_id AND b.company_id = cl.company_id AND b.bin_id = cl.bin_id
+            WHERE cl.tenant_id = @tenantId AND cl.company_id = @companyId AND cl.remaining_qty > 0
+            ORDER BY cl.received_at ASC, cl.layer_id ASC;
+            """,
+            db.Connection,
+            db.Transaction))
+        {
+            cmd.Parameters.AddWithValue("tenantId", tenantId);
+            cmd.Parameters.AddWithValue("companyId", companyId);
+            await using var r = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await r.ReadAsync(cancellationToken))
+            {
+                var remQty = r.GetDecimal(12);
+                var unitCost = r.GetDecimal(13);
+                var extVal = r.GetDecimal(14);
+                totalValuedStock += remQty;
+                totalValuation += extVal;
+
+                layers.Add(new InventoryValuationLayerReportItem(
+                    LayerId: r.GetGuid(0),
+                    ParentLayerId: r.IsDBNull(1) ? null : r.GetGuid(1),
+                    VariantId: r.GetGuid(2),
+                    Sku: r.GetString(3),
+                    WarehouseId: r.GetGuid(4),
+                    WarehouseCode: r.GetString(5),
+                    BinId: r.GetGuid(6),
+                    BinCode: r.GetString(7),
+                    SourceDocumentType: r.GetString(8),
+                    SourceDocumentId: r.IsDBNull(9) ? null : r.GetGuid(9),
+                    ReceivedAt: r.GetFieldValue<DateTimeOffset>(10),
+                    OriginalQty: r.GetDecimal(11),
+                    RemainingQty: remQty,
+                    UnitCost: unitCost,
+                    ExtendedValuation: extVal,
+                    CurrencyCode: r.GetString(15),
+                    StatusCode: r.GetString(16)));
+            }
+            await r.CloseAsync();
+        }
+
+        decimal totalPhysicalStock = 0m;
+        await using (var physCmd = new NpgsqlCommand(
+            "SELECT COALESCE(SUM(on_hand_qty), 0) FROM erp_inventory.stock_balance WHERE tenant_id = @tenantId AND company_id = @companyId AND status_code = 'available';",
+            db.Connection,
+            db.Transaction))
+        {
+            physCmd.Parameters.AddWithValue("tenantId", tenantId);
+            physCmd.Parameters.AddWithValue("companyId", companyId);
+            totalPhysicalStock = Convert.ToDecimal(await physCmd.ExecuteScalarAsync(cancellationToken) ?? 0m);
+        }
+
+        decimal gl1200Balance = 0m;
+        await using (var glCmd = new NpgsqlCommand(
+            """
+            SELECT COALESCE(SUM(jl.debit_functional) - SUM(jl.credit_functional), 0)
+            FROM finance.journal_lines jl
+            JOIN finance.accounts a ON a.tenant_id = jl.tenant_id AND a.company_id = jl.company_id AND a.id = jl.account_id
+            JOIN finance.journals j ON j.tenant_id = jl.tenant_id AND j.company_id = jl.company_id AND j.id = jl.journal_id
+            WHERE jl.tenant_id = @tenantId AND jl.company_id = @companyId
+              AND a.account_code = '1200' AND j.status = 'posted';
+            """,
+            db.Connection,
+            db.Transaction))
+        {
+            glCmd.Parameters.AddWithValue("tenantId", tenantId);
+            glCmd.Parameters.AddWithValue("companyId", companyId);
+            gl1200Balance = Convert.ToDecimal(await glCmd.ExecuteScalarAsync(cancellationToken) ?? 0m);
+        }
+
+        decimal unvaluedStock = Math.Max(0m, totalPhysicalStock - totalValuedStock);
+        decimal variance = totalValuation - gl1200Balance;
+        bool isReconciled = variance == 0m;
+
+        await db.Transaction.CommitAsync(cancellationToken);
+        return new InventoryValuationReportSummary(
+            GeneratedAt: DateTimeOffset.UtcNow,
+            TotalActiveLayers: layers.Count,
+            TotalPhysicalStock: totalPhysicalStock,
+            TotalValuedStock: totalValuedStock,
+            TotalUnvaluedStock: unvaluedStock,
+            TotalValuationPkr: totalValuation,
+            GeneralLedger1200BalancePkr: gl1200Balance,
+            ReconciliationVariancePkr: variance,
+            IsReconciled: isReconciled,
+            Layers: layers);
+    }
+
     private async Task<DbScope> OpenScopeAsync(Guid tenantId, Guid? companyId, CancellationToken cancellationToken)
     {
         var connection = await dataSource.OpenConnectionAsync(cancellationToken);

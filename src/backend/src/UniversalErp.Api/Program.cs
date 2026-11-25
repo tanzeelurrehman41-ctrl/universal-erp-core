@@ -102,14 +102,20 @@ builder.Services.AddScoped<FoundationService>();
 
 var authProvider = builder.Configuration["Authentication:Provider"]?.Trim();
 var isAuthExplicitlyConfigured = !string.IsNullOrWhiteSpace(authProvider);
+var effectiveDevMode = isDevelopment && !isAuthExplicitlyConfigured;
 
-if (isDevelopment && !isAuthExplicitlyConfigured)
+if (effectiveDevMode)
 {
     builder.Services.AddSingleton<ITenantContextAccessor, DevelopmentTenantContextAccessor>();
 }
 else
 {
     var effectiveProvider = string.IsNullOrWhiteSpace(authProvider) ? "OIDC" : authProvider;
+    if (!effectiveProvider.Equals("Firebase", StringComparison.OrdinalIgnoreCase) &&
+        !effectiveProvider.Equals("OIDC", StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidOperationException($"Unsupported authentication provider '{effectiveProvider}'. Supported providers are 'Firebase' and 'OIDC'.");
+    }
 
     if (effectiveProvider.Equals("Firebase", StringComparison.OrdinalIgnoreCase))
     {
@@ -231,6 +237,11 @@ else
             }
             else
             {
+                if (!isDevelopment)
+                {
+                    throw new InvalidOperationException(
+                        "Production fail-closed check: Firebase credentials (FIREBASE_CREDENTIAL_JSON, FIREBASE_CREDENTIAL_BASE64, or Firebase:CredentialPath) are missing, invalid, or unreadable.");
+                }
                 startupLogger.LogWarning("Firebase credentials not configured at startup. Firebase Authentication requests will fail until valid credentials are provided.");
             }
         }
@@ -338,7 +349,7 @@ else
 var app = builder.Build();
 app.UseCors();
 
-if (!isDevelopment || isAuthExplicitlyConfigured)
+if (!effectiveDevMode)
 {
     app.UseAuthentication();
     app.UseMiddleware<AuthenticatedTenantContextMiddleware>();
@@ -383,10 +394,10 @@ app.MapHealthChecks("/health", new HealthCheckOptions
     }
 });
 app.MapGet("/api/modules", () => Results.Ok(moduleCatalog));
-app.MapSyncChangeEndpoints(isDevelopment);
-app.MapOfflineReceiptSyncEndpoints(isDevelopment);
+app.MapSyncChangeEndpoints(effectiveDevMode);
+app.MapOfflineReceiptSyncEndpoints(effectiveDevMode);
 
-if (isDevelopment)
+if (effectiveDevMode)
 {
     app.MapPost("/api/v1/sync/operations:batch", async (
         ProductSyncBatchRequest batch,
@@ -442,7 +453,7 @@ if (isDevelopment)
 }
 
 var productApi = app.MapGroup("/api/v1");
-if (!isDevelopment)
+if (!effectiveDevMode)
 {
     productApi.RequireAuthorization();
     productApi.MapGet("/contexts", async (
@@ -450,8 +461,10 @@ if (!isDevelopment)
         TenantCompanyContextCatalog catalog,
         CancellationToken cancellationToken) =>
     {
-        var issuer = principal.FindFirst("erp:issuer")?.Value;
-        var subject = principal.FindFirst("sub")?.Value;
+        var issuer = principal.FindFirst("erp:issuer")?.Value
+            ?? principal.FindFirst("iss")?.Value;
+        var subject = principal.FindFirst("sub")?.Value
+            ?? principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
         if (string.IsNullOrWhiteSpace(issuer) || string.IsNullOrWhiteSpace(subject))
         {
             return Results.Unauthorized();
@@ -505,18 +518,18 @@ var createProduct = productApi.MapPost("/products", async (
     return Results.Created($"/api/v1/products/{product.ProductId}", product);
 });
 
-if (!isDevelopment)
+if (!effectiveDevMode)
 {
     listProducts.RequireAuthorization("inventory.product.view");
     getProduct.RequireAuthorization("inventory.product.view");
     createProduct.RequireAuthorization("inventory.product.create");
 }
 
-app.MapInventoryEndpoints(isDevelopment);
-app.MapPurchasingEndpoints(isDevelopment);
-app.MapSalesEndpoints(isDevelopment);
-app.MapTenantEndpoints(isDevelopment);
-app.MapFinanceEndpoints(isDevelopment);
+app.MapInventoryEndpoints(effectiveDevMode);
+app.MapPurchasingEndpoints(effectiveDevMode);
+app.MapSalesEndpoints(effectiveDevMode);
+app.MapTenantEndpoints(effectiveDevMode);
+app.MapFinanceEndpoints(effectiveDevMode);
 productApi.MapFoundationEndpoints();
 
 app.MapGet("/", () => Results.Ok(new

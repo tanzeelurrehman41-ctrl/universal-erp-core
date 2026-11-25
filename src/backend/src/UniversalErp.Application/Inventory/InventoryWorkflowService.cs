@@ -165,6 +165,37 @@ public sealed record InventoryAdjustmentSummary(
     string ReasonCode,
     DateTimeOffset PostedAt);
 
+public sealed record InventoryValuationLayerReportItem(
+    Guid LayerId,
+    Guid? ParentLayerId,
+    Guid VariantId,
+    string Sku,
+    Guid WarehouseId,
+    string WarehouseCode,
+    Guid BinId,
+    string BinCode,
+    string SourceDocumentType,
+    Guid? SourceDocumentId,
+    DateTimeOffset ReceivedAt,
+    decimal OriginalQty,
+    decimal RemainingQty,
+    decimal UnitCost,
+    decimal ExtendedValuation,
+    string CurrencyCode,
+    string StatusCode);
+
+public sealed record InventoryValuationReportSummary(
+    DateTimeOffset GeneratedAt,
+    int TotalActiveLayers,
+    decimal TotalPhysicalStock,
+    decimal TotalValuedStock,
+    decimal TotalUnvaluedStock,
+    decimal TotalValuationPkr,
+    decimal GeneralLedger1200BalancePkr,
+    decimal ReconciliationVariancePkr,
+    bool IsReconciled,
+    IReadOnlyList<InventoryValuationLayerReportItem> Layers);
+
 public interface IInventoryWorkflowRepository
 {
     Task<IReadOnlyList<ProductCategorySummary>> ListCategoriesAsync(Guid tenantId, CancellationToken cancellationToken);
@@ -182,6 +213,7 @@ public interface IInventoryWorkflowRepository
     Task<Result<InventoryReceiptSummary>> PostReceiptAsync(TenantContext context, Guid transactionId, string requestHash, PostInventoryReceiptRequest request, CancellationToken cancellationToken);
     Task<Result<InventoryTransferSummary>> PostTransferAsync(TenantContext context, Guid transactionId, string requestHash, PostInventoryTransferRequest request, CancellationToken cancellationToken);
     Task<Result<InventoryAdjustmentSummary>> PostAdjustmentAsync(TenantContext context, Guid transactionId, string requestHash, PostInventoryAdjustmentRequest request, CancellationToken cancellationToken);
+    Task<InventoryValuationReportSummary> GetInventoryValuationReportAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken);
 }
 
 public sealed class InventoryWorkflowService(
@@ -342,6 +374,20 @@ public sealed class InventoryWorkflowService(
     {
         var context = tenantContextAccessor.Current;
         return repository.ListAvailabilityAsync(context.TenantId, context.CompanyId, variantId, warehouseId, ct);
+    }
+
+    /// <summary>
+    /// Returns active FIFO layer valuation reconciled against physical available stock and GL Account 1200.
+    /// </summary>
+    public Task<InventoryValuationReportSummary> GetInventoryValuationReportAsync(CancellationToken ct)
+    {
+        var context = tenantContextAccessor.Current;
+        if (context.TenantId == Guid.Empty || context.CompanyId == Guid.Empty)
+        {
+            throw new InvalidOperationException("A valid tenant and company context is required to generate an inventory valuation report.");
+        }
+
+        return repository.GetInventoryValuationReportAsync(context.TenantId, context.CompanyId, ct);
     }
 
     public async Task<Result<InventoryReceiptSummary>> PostReceiptAsync(

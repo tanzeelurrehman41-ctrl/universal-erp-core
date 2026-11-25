@@ -150,6 +150,9 @@ public sealed class InventoryAcceptanceTests
 
         public Task<IReadOnlyList<InventoryMovementSummary>> ListMovementsAsync(Guid tenantId, Guid companyId, int limit, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<InventoryMovementSummary>>(_movements);
+
+        public Task<InventoryValuationReportSummary> GetInventoryValuationReportAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken) =>
+            Task.FromResult(new InventoryValuationReportSummary(DateTimeOffset.UtcNow, 0, 0m, 0m, 0m, 0m, 0m, 0m, true, []));
     }
 
     private static readonly TenantContext DemoContext = new(

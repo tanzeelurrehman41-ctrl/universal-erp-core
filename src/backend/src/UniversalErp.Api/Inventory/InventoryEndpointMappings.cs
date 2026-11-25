@@ -122,6 +122,11 @@ public static class InventoryEndpointMappings
                 : ToFailure(result);
         });
 
+        var getValuationReport = inventory.MapGet("/valuation-report", async (
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.GetInventoryValuationReportAsync(cancellationToken)));
+
         if (!isDevelopment)
         {
             listCategories.RequireAuthorization("inventory.product.view");
@@ -139,6 +144,7 @@ public static class InventoryEndpointMappings
             postReceipt.RequireAuthorization("inventory.receipt.create", "inventory.receipt.post");
             postTransfer.RequireAuthorization("inventory.transfer.create");
             postAdjustment.RequireAuthorization("inventory.adjustment.create");
+            getValuationReport.RequireAuthorization("inventory.valuation.view");
         }
 
         return endpoints;
