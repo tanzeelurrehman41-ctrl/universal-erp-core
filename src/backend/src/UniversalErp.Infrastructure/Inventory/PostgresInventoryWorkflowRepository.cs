@@ -1362,7 +1362,8 @@ public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSou
     }
 
     /// <summary>
-    /// Computes FIFO layer valuation and GL Account 1200 reconciliation from existing production tables (M002/M013/M026).
+    /// Computes currency-aware FIFO layer valuation and GL Account 1200 reconciliation
+    /// from existing production tables (M002/M013/M022/M026).
     /// </summary>
     public async Task<InventoryValuationReportSummary> GetInventoryValuationReportAsync(
         Guid tenantId,
@@ -1371,9 +1372,25 @@ public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSou
     {
         await using var db = await OpenScopeAsync(tenantId, companyId, cancellationToken);
 
-        var layers = new List<InventoryValuationLayerReportItem>();
-        decimal totalValuedStock = 0m;
-        decimal totalValuation = 0m;
+        string functionalCurrency;
+        await using (var currencyCmd = new NpgsqlCommand(
+            "SELECT NULLIF(UPPER(TRIM(identity.get_company_settings(@tenantId, @companyId) ->> 'currencyCode')), '');",
+            db.Connection,
+            db.Transaction))
+        {
+            currencyCmd.Parameters.AddWithValue("tenantId", tenantId);
+            currencyCmd.Parameters.AddWithValue("companyId", companyId);
+            var rawCurrency = await currencyCmd.ExecuteScalarAsync(cancellationToken) as string;
+            if (string.IsNullOrWhiteSpace(rawCurrency))
+            {
+                throw new InvalidOperationException(
+                    $"Unable to resolve base currency for tenant '{tenantId}' and company '{companyId}'.");
+            }
+            functionalCurrency = rawCurrency;
+        }
+
+        var sourceLayers = new List<InventoryValuationSourceLayerInput>();
+        var foreignCurrencies = new HashSet<string>(StringComparer.Ordinal);
 
         await using (var cmd = new NpgsqlCommand(
             """
@@ -1382,8 +1399,8 @@ public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSou
                    cl.bin_id, b.code AS bin_code,
                    cl.source_document_type, cl.source_document_id,
                    cl.received_at, cl.original_qty, cl.remaining_qty,
-                   cl.unit_cost, (cl.remaining_qty * cl.unit_cost) AS ext_val,
-                   cl.currency_code, cl.status_code
+                   cl.unit_cost, UPPER(TRIM(cl.currency_code)) AS source_currency_code,
+                   cl.status_code
             FROM erp_inventory.inventory_cost_layer cl
             JOIN erp_inventory.product_variant v ON v.tenant_id = cl.tenant_id AND v.variant_id = cl.variant_id
             JOIN erp_inventory.warehouse w ON w.tenant_id = cl.tenant_id AND w.company_id = cl.company_id AND w.warehouse_id = cl.warehouse_id
@@ -1399,13 +1416,13 @@ public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSou
             await using var r = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await r.ReadAsync(cancellationToken))
             {
-                var remQty = r.GetDecimal(12);
-                var unitCost = r.GetDecimal(13);
-                var extVal = r.GetDecimal(14);
-                totalValuedStock += remQty;
-                totalValuation += extVal;
+                var sourceCurrency = r.GetString(14);
+                if (!string.Equals(sourceCurrency, functionalCurrency, StringComparison.Ordinal))
+                {
+                    foreignCurrencies.Add(sourceCurrency);
+                }
 
-                layers.Add(new InventoryValuationLayerReportItem(
+                sourceLayers.Add(new InventoryValuationSourceLayerInput(
                     LayerId: r.GetGuid(0),
                     ParentLayerId: r.IsDBNull(1) ? null : r.GetGuid(1),
                     VariantId: r.GetGuid(2),
@@ -1418,13 +1435,49 @@ public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSou
                     SourceDocumentId: r.IsDBNull(9) ? null : r.GetGuid(9),
                     ReceivedAt: r.GetFieldValue<DateTimeOffset>(10),
                     OriginalQty: r.GetDecimal(11),
-                    RemainingQty: remQty,
-                    UnitCost: unitCost,
-                    ExtendedValuation: extVal,
-                    CurrencyCode: r.GetString(15),
-                    StatusCode: r.GetString(16)));
+                    RemainingQty: r.GetDecimal(12),
+                    SourceUnitCost: r.GetDecimal(13),
+                    SourceCurrencyCode: sourceCurrency,
+                    StatusCode: r.GetString(15)));
             }
             await r.CloseAsync();
+        }
+
+        var exchangeRates = new List<InventoryValuationExchangeRateInput>();
+        if (foreignCurrencies.Count > 0)
+        {
+            await using var fxCmd = new NpgsqlCommand(
+                """
+                SELECT UPPER(TRIM(from_currency)) AS from_currency,
+                       UPPER(TRIM(to_currency)) AS to_currency,
+                       effective_at,
+                       rate,
+                       created_at
+                FROM finance.exchange_rates
+                WHERE tenant_id = @tenantId
+                  AND (
+                      (UPPER(TRIM(from_currency)) = ANY(@foreignCurrencies) AND UPPER(TRIM(to_currency)) = @functionalCurrency)
+                      OR
+                      (UPPER(TRIM(from_currency)) = @functionalCurrency AND UPPER(TRIM(to_currency)) = ANY(@foreignCurrencies))
+                  )
+                ORDER BY effective_at ASC, created_at ASC;
+                """,
+                db.Connection,
+                db.Transaction);
+            fxCmd.Parameters.AddWithValue("tenantId", tenantId);
+            fxCmd.Parameters.AddWithValue("functionalCurrency", functionalCurrency);
+            fxCmd.Parameters.AddWithValue("foreignCurrencies", foreignCurrencies.ToArray());
+            await using var fxReader = await fxCmd.ExecuteReaderAsync(cancellationToken);
+            while (await fxReader.ReadAsync(cancellationToken))
+            {
+                exchangeRates.Add(new InventoryValuationExchangeRateInput(
+                    FromCurrencyCode: fxReader.GetString(0),
+                    ToCurrencyCode: fxReader.GetString(1),
+                    EffectiveAt: fxReader.GetFieldValue<DateTimeOffset>(2),
+                    Rate: fxReader.GetDecimal(3),
+                    CreatedAt: fxReader.GetFieldValue<DateTimeOffset>(4)));
+            }
+            await fxReader.CloseAsync();
         }
 
         decimal totalPhysicalStock = 0m;
@@ -1438,40 +1491,44 @@ public sealed class PostgresInventoryWorkflowRepository(NpgsqlDataSource dataSou
             totalPhysicalStock = Convert.ToDecimal(await physCmd.ExecuteScalarAsync(cancellationToken) ?? 0m);
         }
 
-        decimal gl1200Balance = 0m;
+        var glBalancesByCurrency = new List<InventoryValuationGlCurrencyBalanceInput>();
         await using (var glCmd = new NpgsqlCommand(
             """
-            SELECT COALESCE(SUM(jl.debit_functional) - SUM(jl.credit_functional), 0)
+            SELECT UPPER(TRIM(j.functional_currency)) AS journal_currency,
+                   COUNT(DISTINCT j.id)::integer AS journal_count,
+                   COALESCE(SUM(jl.debit_functional) - SUM(jl.credit_functional), 0) AS net_balance
             FROM finance.journal_lines jl
             JOIN finance.accounts a ON a.tenant_id = jl.tenant_id AND a.company_id = jl.company_id AND a.id = jl.account_id
             JOIN finance.journals j ON j.tenant_id = jl.tenant_id AND j.company_id = jl.company_id AND j.id = jl.journal_id
             WHERE jl.tenant_id = @tenantId AND jl.company_id = @companyId
-              AND a.account_code = '1200' AND j.status = 'posted';
+              AND a.account_code = '1200' AND j.status = 'posted'
+            GROUP BY UPPER(TRIM(j.functional_currency))
+            ORDER BY journal_currency ASC;
             """,
             db.Connection,
             db.Transaction))
         {
             glCmd.Parameters.AddWithValue("tenantId", tenantId);
             glCmd.Parameters.AddWithValue("companyId", companyId);
-            gl1200Balance = Convert.ToDecimal(await glCmd.ExecuteScalarAsync(cancellationToken) ?? 0m);
+            await using var glReader = await glCmd.ExecuteReaderAsync(cancellationToken);
+            while (await glReader.ReadAsync(cancellationToken))
+            {
+                glBalancesByCurrency.Add(new InventoryValuationGlCurrencyBalanceInput(
+                    FunctionalCurrencyCode: glReader.GetString(0),
+                    JournalCount: glReader.GetInt32(1),
+                    NetBalance: glReader.GetDecimal(2)));
+            }
+            await glReader.CloseAsync();
         }
 
-        decimal unvaluedStock = Math.Max(0m, totalPhysicalStock - totalValuedStock);
-        decimal variance = totalValuation - gl1200Balance;
-        bool isReconciled = variance == 0m;
-
         await db.Transaction.CommitAsync(cancellationToken);
-        return new InventoryValuationReportSummary(
-            GeneratedAt: DateTimeOffset.UtcNow,
-            TotalActiveLayers: layers.Count,
-            TotalPhysicalStock: totalPhysicalStock,
-            TotalValuedStock: totalValuedStock,
-            TotalUnvaluedStock: unvaluedStock,
-            TotalValuationPkr: totalValuation,
-            GeneralLedger1200BalancePkr: gl1200Balance,
-            ReconciliationVariancePkr: variance,
-            IsReconciled: isReconciled,
-            Layers: layers);
+
+        return InventoryValuationCalculator.BuildReport(
+            companyBaseCurrencyCode: functionalCurrency,
+            sourceLayers: sourceLayers,
+            exchangeRates: exchangeRates,
+            totalPhysicalStock: totalPhysicalStock,
+            gl1200BalancesByCurrency: glBalancesByCurrency);
     }
 
     private async Task<DbScope> OpenScopeAsync(Guid tenantId, Guid? companyId, CancellationToken cancellationToken)
