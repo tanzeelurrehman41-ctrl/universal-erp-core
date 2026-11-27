@@ -19,6 +19,11 @@ public sealed class FinanceIdempotencyConflictException : Exception
 {
 }
 
+public sealed class ExchangeRateConflictException(string code = "DUPLICATE_OR_AMBIGUOUS_EXCHANGE_RATE")
+    : Exception(code)
+{
+}
+
 public interface IFinanceRepository
 {
     // ── Phase 4 Foundation ───────────────────────────────────────────────────
@@ -258,5 +263,43 @@ public interface IFinanceRepository
         Guid tenantId,
         Guid companyId,
         int limit,
+        CancellationToken cancellationToken);
+
+    // ── Company Currencies, Exchange Rates & IAS 21 Presentation Reporting ────
+
+    Task<IReadOnlyList<CurrencySummary>> ListCurrenciesAsync(CancellationToken cancellationToken);
+
+    Task<CompanyCurrencyContextInfo> GetCompanyCurrencyContextAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<ExchangeRateSummary>> ListExchangeRatesAsync(
+        Guid tenantId,
+        Guid companyId,
+        string? fromCurrency,
+        string? toCurrency,
+        string? rateType,
+        CancellationToken cancellationToken);
+
+    Task<ExchangeRateSummary> CreateExchangeRateAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        UpsertExchangeRateRequest request,
+        CancellationToken cancellationToken);
+
+    Task<ExchangeRateSummary?> UpdateExchangeRateAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        Guid exchangeRateId,
+        UpsertExchangeRateRequest request,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<Ias21PostedJournalLineInput>> ListPostedJournalLinesForTranslationAsync(
+        Guid tenantId,
+        Guid companyId,
+        DateOnly asOfDate,
         CancellationToken cancellationToken);
 }

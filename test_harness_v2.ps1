@@ -179,7 +179,7 @@ try {
     }
 
     Write-Host "`n====================================================================================" -ForegroundColor Green
-    Write-Host "=== [PASS] CI HARNESS V2: ALL 12 PREFLIGHT GATES & 32 INTEGRATION TESTS PASSED ===" -ForegroundColor Green
+    Write-Host "=== [PASS] CI HARNESS V2: ALL 12 PREFLIGHT GATES & 25 HISTORICAL INTEGRATION TESTS PASSED ===" -ForegroundColor Green
     Write-Host "====================================================================================" -ForegroundColor Green
 }
 finally {

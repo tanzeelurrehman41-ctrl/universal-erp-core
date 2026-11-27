@@ -12,6 +12,7 @@ import FoundationWorkspace from "./FoundationWorkspace";
 import HRWorkspace from "./HRWorkspace";
 import { AnalyticsWorkspace } from "./AnalyticsWorkspace";
 import { ConsolidationWorkspace } from "./ConsolidationWorkspace";
+import { resolveWorkspaceCurrencyDisplay } from "./adminCurrencyHelpers";
 import { BranchDto } from "./branchHelpers";
 import { AppShell, Card, Button, Badge, type NavItem } from "./components";
 import {
@@ -526,6 +527,22 @@ export default function App() {
       setAuthMessage(error instanceof Error ? error.message : "Sign-out could not finish.");
     });
   };
+  const refreshWorkspaces = async () => {
+    if (!oidcConfigured || !authUser) return;
+    try {
+      const response = await apiFetch("/api/v1/contexts", {}, undefined, false);
+      if (!response.ok) return;
+      const available = (await response.json()) as TenantCompanyContext[];
+      setWorkspaces(available);
+      try {
+        sessionStorage.setItem("universal-erp-workspaces", JSON.stringify(available));
+      } catch {
+        // ignore storage errors
+      }
+    } catch {
+      // ignore transient refresh failure
+    }
+  };
   const changeWorkspace = (nextKey: string) => {
     setActiveWorkspaceKey(nextKey);
     try {
@@ -566,7 +583,7 @@ export default function App() {
     { id: "consolidation", label: "Multi-Branch & Group", icon: "🌐", group: "finance" },
     { id: "manufacturing", label: "Manufacturing & BOM", icon: "⚙️", group: "organization" },
     { id: "hr", label: "HR & Global Payroll", icon: "👥", group: "organization" },
-    { id: "foundation", label: "Identity & Roles", icon: "🏢", group: "organization" },
+    { id: "foundation", label: "Admin & Company Settings", icon: "🏢", group: "organization" },
     { id: "saas", label: "SaaS Admin & Tenants", icon: "☁️", group: "platform" },
   ];
 
@@ -702,11 +719,14 @@ export default function App() {
               }}
             >
               <option value="">Select a company</option>
-              {workspaces.map((workspace) => (
-                <option key={workspaceKey(workspace)} value={workspaceKey(workspace)}>
-                  {workspace.tenantName} · {workspace.companyName} ({workspace.baseCurrencyCode})
-                </option>
-              ))}
+              {workspaces.map((workspace) => {
+                const display = resolveWorkspaceCurrencyDisplay(workspace);
+                return (
+                  <option key={workspaceKey(workspace)} value={workspaceKey(workspace)}>
+                    {workspace.tenantName} · {workspace.companyName} ({display.badgeText || workspace.baseCurrencyCode})
+                  </option>
+                );
+              })}
             </select>
             {activeWorkspace && (
               <span
@@ -722,7 +742,7 @@ export default function App() {
                   border: `1px solid ${activeWorkspace.tenantCode === "DEMO-CLOUD" ? "rgba(34, 197, 94, 0.3)" : "rgba(59, 130, 246, 0.3)"}`,
                 }}
               >
-                {activeWorkspace.tenantCode} · {activeWorkspace.baseCurrencyCode}
+                {activeWorkspace.tenantCode} · {resolveWorkspaceCurrencyDisplay(activeWorkspace).badgeText || activeWorkspace.baseCurrencyCode}
               </span>
             )}
           </div>
@@ -966,6 +986,7 @@ export default function App() {
           key={activeWorkspaceKey || "foundation"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
+          onCurrencySettingsUpdated={refreshWorkspaces}
         />
       )}
 

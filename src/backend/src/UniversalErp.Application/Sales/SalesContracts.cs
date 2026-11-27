@@ -14,7 +14,7 @@ public sealed record CreateCustomerRequest(
     string? StrnNumber = null,
     decimal CreditLimit = 0,
     int PaymentTermsDays = 0,
-    string CurrencyCode = "PKR");
+    string? CurrencyCode = null);
 
 public sealed record UpdateCustomerRequest(
     string Name,

@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using UniversalErp.Application.HrPayroll;
+using UniversalErp.Infrastructure.Finance;
 
 namespace UniversalErp.Infrastructure.HrPayroll;
 
@@ -265,6 +266,9 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             createdAt = ToDateTimeOffset(reader.GetValue(1));
         }
 
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, tenantId, companyId, ct);
+
         // Set initial compensation structure if base salary > 0
         CompensationStructureDto? comp = null;
         if (request.BaseSalaryPkr > 0)
@@ -311,7 +315,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 request.SpecialAllowancePkr,
                 gross,
                 "monthly",
-                "PKR",
+                functionalCurrency,
                 true,
                 ToDateTimeOffset(cReader.GetValue(1))
             );
@@ -586,7 +590,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             request.SpecialAllowancePkr,
             gross,
             request.PaymentFrequency.ToLowerInvariant(),
-            "PKR",
+            await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(conn, tx, tenantId, companyId, ct),
             true,
             ToDateTimeOffset(reader.GetValue(1))
         );
@@ -1912,6 +1916,9 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
         decimal totalPfEr = payslips.Sum(p => p.PfEmployerPkr);
         decimal totalEmployerStatutory = totalEobiEr + totalPfEr;
 
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, tenantId, companyId, ct);
+
         // Ensure accounts exist in finance.accounts
         async Task<Guid> EnsureAccountAsync(string code, string name, string type, string normalBalance)
         {
@@ -1925,7 +1932,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
 
             const string iSql = @"
                 INSERT INTO finance.accounts (tenant_id, company_id, account_code, account_name, account_type, normal_balance, currency_code)
-                VALUES (@tenantId, @companyId, @code, @name, @type, @nb, 'PKR')
+                VALUES (@tenantId, @companyId, @code, @name, @type, @nb, @cur)
                 RETURNING id;";
             await using var iCmd = new NpgsqlCommand(iSql, conn, tx);
             iCmd.Parameters.AddWithValue("tenantId", tenantId);
@@ -1934,6 +1941,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             iCmd.Parameters.AddWithValue("name", name);
             iCmd.Parameters.AddWithValue("type", type);
             iCmd.Parameters.AddWithValue("nb", normalBalance);
+            iCmd.Parameters.AddWithValue("cur", functionalCurrency);
             return (Guid)(await iCmd.ExecuteScalarAsync(ct))!;
         }
 
@@ -2008,7 +2016,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             )
             VALUES (
                 @tenantId, @companyId, @jrnNo, @jrnDate, @fpId, @desc,
-                'PKR', 'hr_payroll', 'payroll_period', @srcId, @idemp,
+                @funcCurr, 'hr_payroll', 'payroll_period', @srcId, @idemp,
                 'draft', @userId
             )
             RETURNING id;";
@@ -2022,6 +2030,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             jCmd.Parameters.AddWithValue("jrnDate", request.JournalDate);
             jCmd.Parameters.AddWithValue("fpId", fiscalPeriodId);
             jCmd.Parameters.AddWithValue("desc", $"{request.Description} - {period.PeriodName}");
+            jCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             jCmd.Parameters.AddWithValue("srcId", period.Id.ToString());
             jCmd.Parameters.AddWithValue("idemp", idempotencyKey);
             jCmd.Parameters.AddWithValue("userId", postedBy);
@@ -2042,7 +2051,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 )
                 VALUES (
                     @tenantId, @companyId, @jrnId, @lNo, @accId,
-                    @desc, 'PKR', @txAmt, 1.0,
+                    @desc, @txCurr, @txAmt, 1.0,
                     @debit, @credit
                 );";
             await using var lCmd = new NpgsqlCommand(lSql, conn, tx);
@@ -2052,6 +2061,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
             lCmd.Parameters.AddWithValue("lNo", lineNum++);
             lCmd.Parameters.AddWithValue("accId", accountId);
             lCmd.Parameters.AddWithValue("desc", desc);
+            lCmd.Parameters.AddWithValue("txCurr", functionalCurrency);
             lCmd.Parameters.AddWithValue("txAmt", txAmount);
             lCmd.Parameters.AddWithValue("debit", debit);
             lCmd.Parameters.AddWithValue("credit", credit);
@@ -2153,14 +2163,14 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
         // If posted to GL, create reversing journal
         if (period.GlJournalId != null)
         {
-            // Fetch original journal lines
+            // Fetch original journal lines (preserving historical transaction currency)
             const string fLinesSql = @"
-                SELECT line_no, account_id, description, debit_functional, credit_functional
+                SELECT line_no, account_id, description, debit_functional, credit_functional, transaction_currency
                 FROM finance.journal_lines
                 WHERE tenant_id = @tenantId AND company_id = @companyId AND journal_id = @jrnId
                 ORDER BY line_no;";
 
-            var lines = new List<(int lineNo, Guid accId, string desc, decimal debit, decimal credit)>();
+            var lines = new List<(int lineNo, Guid accId, string desc, decimal debit, decimal credit, string txCurr)>();
             await using (var lCmd = new NpgsqlCommand(fLinesSql, conn, tx))
             {
                 lCmd.Parameters.AddWithValue("tenantId", tenantId);
@@ -2169,7 +2179,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 await using var reader = await lCmd.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
                 {
-                    lines.Add((reader.GetInt32(0), reader.GetGuid(1), reader.GetString(2), reader.GetDecimal(3), reader.GetDecimal(4)));
+                    lines.Add((reader.GetInt32(0), reader.GetGuid(1), reader.GetString(2), reader.GetDecimal(3), reader.GetDecimal(4), reader.GetString(5)));
                 }
             }
 
@@ -2213,7 +2223,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                     )
                     VALUES (
                         @tenantId, @companyId, @jrnId, @lNo, @accId,
-                        @desc, 'PKR', @txAmt, 1.0,
+                        @desc, @txCurr, @txAmt, 1.0,
                         @credit, @debit
                     );";
                 await using var rlCmd = new NpgsqlCommand(insRevLineSql, conn, tx);
@@ -2223,6 +2233,7 @@ public class PostgresHrPayrollRepository : IHrPayrollRepository
                 rlCmd.Parameters.AddWithValue("lNo", l.lineNo);
                 rlCmd.Parameters.AddWithValue("accId", l.accId);
                 rlCmd.Parameters.AddWithValue("desc", $"[Reversal] {l.desc}");
+                rlCmd.Parameters.AddWithValue("txCurr", l.txCurr);
                 rlCmd.Parameters.AddWithValue("txAmt", txAmount);
                 rlCmd.Parameters.AddWithValue("credit", l.debit);
                 rlCmd.Parameters.AddWithValue("debit", l.credit);

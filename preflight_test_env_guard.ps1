@@ -140,7 +140,7 @@ if ($stagingExit -eq 0) {
     Write-Host "[FAIL-CLOSED] Gate 3: Network breach: test container reached staging host port at ${gatewayIp}:5433!" -ForegroundColor Red
     exit 1
 }
-$isRefusedOrTimeout = ($stagingReach -match "refused|timed out|timeout|failed")
+$isRefusedOrTimeout = ($stagingReach -match "refused|timed out|timeout|failed|unreachable|no route to host")
 if ($stagingExit -ne 1 -or -not $isRefusedOrTimeout) {
     Write-Host "[FAIL-CLOSED] Gate 3: Diagnostic error during staging probe (exit code $stagingExit): $stagingReach" -ForegroundColor Red
     exit 1
@@ -153,7 +153,7 @@ if ($egressExit -eq 0) {
     Write-Host "[FAIL-CLOSED] Gate 3: Egress isolation failure: container successfully connected to external Internet (1.1.1.1:53)!" -ForegroundColor Red
     exit 1
 }
-$isEgressBlocked = ($egressProbe -match "refused|timed out|timeout|failed")
+$isEgressBlocked = ($egressProbe -match "refused|timed out|timeout|failed|unreachable|no route to host")
 if ($egressExit -ne 1 -or -not $isEgressBlocked) {
     Write-Host "[FAIL-CLOSED] Gate 3: Diagnostic error during external egress probe (exit code $egressExit): $egressProbe" -ForegroundColor Red
     exit 1

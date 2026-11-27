@@ -36,6 +36,40 @@ public sealed class FoundationServiceTests
             return Task.FromResult<CompanySettingsResponse?>(Settings);
         }
 
+        public readonly List<CompanyCurrencyHistoryItem> CurrencyHistory = [];
+
+        public Task<CompanyCurrencySettingsResponse?> UpdateCompanyCurrencySettingsAsync(Guid tenantId, Guid companyId, Guid actorUserId, UpdateCompanyCurrencySettingsCommand command, CancellationToken ct = default)
+        {
+            if (Settings is null) return Task.FromResult<CompanyCurrencySettingsResponse?>(null);
+            var prevFunc = Settings.FunctionalCurrencyCode ?? Settings.CurrencyCode;
+            var prevPres = Settings.PresentationCurrencyCode ?? "USD";
+            var prevDate = Settings.CurrencyEffectiveDate ?? DateOnly.FromDateTime(DateTime.UtcNow);
+            Settings = Settings with
+            {
+                CurrencyCode = command.FunctionalCurrencyCode,
+                BaseCurrencyCode = command.FunctionalCurrencyCode,
+                FunctionalCurrencyCode = command.FunctionalCurrencyCode,
+                PresentationCurrencyCode = command.PresentationCurrencyCode,
+                CurrencyEffectiveDate = command.EffectiveDate,
+                UpdatedAt = DateTimeOffset.UtcNow
+            };
+            CurrencyHistory.Insert(0, new CompanyCurrencyHistoryItem(
+                Guid.NewGuid(), prevFunc, command.FunctionalCurrencyCode,
+                prevPres, command.PresentationCurrencyCode,
+                prevDate, command.EffectiveDate,
+                command.ConfirmFutureTransactions, command.ChangeReason,
+                actorUserId, "actor@example.com", "Actor", DateTimeOffset.UtcNow));
+            return Task.FromResult<CompanyCurrencySettingsResponse?>(new CompanyCurrencySettingsResponse(
+                Settings.CompanyId, Settings.TenantId, Settings.CompanyCode, Settings.Name,
+                command.FunctionalCurrencyCode, command.PresentationCurrencyCode,
+                command.EffectiveDate, Settings.HasPostedTransactions, Settings.UpdatedAt,
+                FoundationService.FunctionalCurrencyGuidanceText,
+                FoundationService.PresentationCurrencyGuidanceText));
+        }
+
+        public Task<IReadOnlyList<CompanyCurrencyHistoryItem>> ListCompanyCurrencyHistoryAsync(Guid tenantId, Guid companyId, int limit = 50, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<CompanyCurrencyHistoryItem>>(CurrencyHistory);
+
         public Task<IReadOnlyList<CompanyUserSummary>> ListCompanyUsersAsync(Guid tenantId, Guid companyId, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<CompanyUserSummary>>(Users);
 

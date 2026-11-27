@@ -307,9 +307,9 @@ public sealed class PostgresSaaSRepository : ISaaSRepository
         await using (var insComp = new NpgsqlCommand(
             """
             INSERT INTO organization.companies
-                (id, tenant_id, company_code, name, legal_name, registration_number, country_code, base_currency_code, timezone, status)
+                (id, tenant_id, company_code, name, legal_name, registration_number, country_code, base_currency_code, functional_currency_code, presentation_currency_code, currency_effective_date, timezone, status)
             VALUES
-                (@id, @tenantId, @code, @name, @legalName, NULL, @country, @currency, @tz, 'active')
+                (@id, @tenantId, @code, @name, @legalName, NULL, @country, @currency, @currency, @currency, CURRENT_DATE, @tz, 'active')
             """, conn, tx))
         {
             insComp.Parameters.AddWithValue("id", companyId);

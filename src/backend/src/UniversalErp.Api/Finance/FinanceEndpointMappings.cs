@@ -212,6 +212,85 @@ public static class FinanceEndpointMappings
             return Results.Ok(statements);
         });
 
+        var presentationFinancialStatements = group.MapGet("/financial-statements/presentation", async (
+            DateOnly? asOfDate,
+            string? incomeRateMethod,
+            FinanceService service,
+            CancellationToken cancellationToken) =>
+        {
+            var statements = await service.GetPresentationFinancialStatementsAsync(asOfDate, incomeRateMethod, cancellationToken);
+            return Results.Ok(statements);
+        });
+
+        // ── 4B. Currencies & Exchange Rates ───────────────────────────────────
+
+        var listCurrencies = group.MapGet("/currencies", async (
+            FinanceService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.ListCurrenciesAsync(cancellationToken)));
+
+        var listExchangeRates = group.MapGet("/exchange-rates", async (
+            string? fromCurrency,
+            string? toCurrency,
+            string? rateType,
+            FinanceService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.ListExchangeRatesAsync(fromCurrency, toCurrency, rateType, cancellationToken)));
+
+        var createExchangeRate = group.MapPost("/exchange-rates", async (
+            UpsertExchangeRateRequest req,
+            FinanceService service,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await service.CreateExchangeRateAsync(req, cancellationToken);
+            if (!result.IsSuccess)
+            {
+                var status = result.Error is "DUPLICATE_EXCHANGE_RATE" or "AMBIGUOUS_INVERSE_EXCHANGE_RATE" or "DUPLICATE_OR_AMBIGUOUS_EXCHANGE_RATE"
+                    ? StatusCodes.Status409Conflict
+                    : StatusCodes.Status400BadRequest;
+                return Results.Problem(
+                    statusCode: status,
+                    title: result.Error,
+                    detail: result.Error switch
+                    {
+                        "DUPLICATE_EXCHANGE_RATE" => "An exchange rate already exists for this currency pair, effective date, and rate type.",
+                        "AMBIGUOUS_INVERSE_EXCHANGE_RATE" => "An inverse exchange rate already exists for this date and rate type. Edit the existing rate instead of creating an ambiguous reverse entry.",
+                        "SAME_CURRENCY_PAIR_NOT_ALLOWED" => "From and To currencies must be different.",
+                        "INVALID_EXCHANGE_RATE" => "Exchange rate must be strictly greater than zero.",
+                        "INVALID_RATE_TYPE" => "Rate type must be one of: transaction, average, closing.",
+                        _ => "Invalid exchange rate request."
+                    },
+                    extensions: new Dictionary<string, object?> { ["code"] = result.Error });
+            }
+
+            var created = result.Value!;
+            return Results.Created($"/api/v1/finance/exchange-rates/{created.ExchangeRateId}", created);
+        });
+
+        var updateExchangeRate = group.MapPut("/exchange-rates/{id:guid}", async (
+            Guid id,
+            UpsertExchangeRateRequest req,
+            FinanceService service,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await service.UpdateExchangeRateAsync(id, req, cancellationToken);
+            if (!result.IsSuccess)
+            {
+                var status = result.Error switch
+                {
+                    "EXCHANGE_RATE_NOT_FOUND" => StatusCodes.Status404NotFound,
+                    "DUPLICATE_EXCHANGE_RATE" or "AMBIGUOUS_INVERSE_EXCHANGE_RATE" or "DUPLICATE_OR_AMBIGUOUS_EXCHANGE_RATE" => StatusCodes.Status409Conflict,
+                    _ => StatusCodes.Status400BadRequest,
+                };
+                return Results.Problem(
+                    statusCode: status,
+                    title: result.Error,
+                    extensions: new Dictionary<string, object?> { ["code"] = result.Error });
+            }
+
+            return Results.Ok(result.Value);
+        });
+
         // ── 5. Bank Accounts ──────────────────────────────────────────────────
 
         var listBankAccounts = group.MapGet("/bank-accounts", async (
@@ -405,6 +484,11 @@ public static class FinanceEndpointMappings
             reverseJournal.RequireAuthorization("finance.journal.reverse");
             trialBalance.RequireAuthorization("finance.reports.view");
             financialStatements.RequireAuthorization("finance.reports.view");
+            presentationFinancialStatements.RequireAuthorization("finance.reports.view");
+            listCurrencies.RequireAuthorization("admin.currency_settings.view");
+            listExchangeRates.RequireAuthorization("admin.currency_settings.view");
+            createExchangeRate.RequireAuthorization("finance.exchange_rate.manage");
+            updateExchangeRate.RequireAuthorization("finance.exchange_rate.manage");
             getControlDashboard.RequireAuthorization("finance.reports.view");
             listBankAccounts.RequireAuthorization("finance.bank.manage");
             createBankAccount.RequireAuthorization("finance.bank.manage");

@@ -4,6 +4,7 @@ using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Sales;
 using UniversalErp.Domain.Tenancy;
+using UniversalErp.Infrastructure.Finance;
 using UniversalErp.Infrastructure.Sync;
 
 namespace UniversalErp.Infrastructure.Sales;
@@ -88,6 +89,10 @@ public sealed partial class PostgresSalesRepository(
         cmd.Transaction = tx;
         await SetRls(cmd, Ctx);
 
+        var customerCurrency = string.IsNullOrWhiteSpace(req.CurrencyCode)
+            ? await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(conn, tx, Ctx.TenantId, Ctx.CompanyId, ct)
+            : req.CurrencyCode.Trim().ToUpperInvariant();
+
         cmd.CommandText = """
             INSERT INTO erp_sales.customer
                 (tenant_id, company_id, customer_code, name, customer_type, contact_name,
@@ -111,7 +116,7 @@ public sealed partial class PostgresSalesRepository(
         cmd.Parameters.AddWithValue("ntn", (object?)req.NtnNumber ?? DBNull.Value);
         cmd.Parameters.AddWithValue("strn", (object?)req.StrnNumber ?? DBNull.Value);
         cmd.Parameters.AddWithValue("credit", req.CreditLimit);
-        cmd.Parameters.AddWithValue("cur", req.CurrencyCode);
+        cmd.Parameters.AddWithValue("cur", customerCurrency);
         cmd.Parameters.AddWithValue("terms", req.PaymentTermsDays);
 
         var id = (Guid)(await cmd.ExecuteScalarAsync(ct))!;
@@ -286,6 +291,8 @@ public sealed partial class PostgresSalesRepository(
             tax += lineTax;
         }
         var total = subtotal + tax;
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
 
         cmd.CommandText = """
             INSERT INTO erp_sales.sales_order
@@ -294,7 +301,7 @@ public sealed partial class PostgresSalesRepository(
                  subtotal_amount, tax_amount, discount_amount, total_amount, note, created_by)
             VALUES
                 (@tid, @cid, @no, @cust, @wh,
-                 @type, 'draft', 'PKR', @date,
+                 @type, 'draft', @cur, @date,
                  @sub, @tax, 0, @tot, @note, @by)
             RETURNING order_id;
             """;
@@ -304,6 +311,7 @@ public sealed partial class PostgresSalesRepository(
         cmd.Parameters.AddWithValue("cust", req.CustomerId);
         cmd.Parameters.AddWithValue("wh", req.WarehouseId);
         cmd.Parameters.AddWithValue("type", req.OrderType);
+        cmd.Parameters.AddWithValue("cur", functionalCurrency);
         cmd.Parameters.AddWithValue("date", req.OrderDate?.ToDateTime(TimeOnly.MinValue) ?? DateTime.UtcNow.Date);
         cmd.Parameters.AddWithValue("sub", subtotal);
         cmd.Parameters.AddWithValue("tax", tax);
@@ -671,6 +679,8 @@ public sealed partial class PostgresSalesRepository(
         await cmd.ExecuteNonQueryAsync(ct);
 
         // 4. Create Inventory Movement Header
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var movementId = Guid.NewGuid();
         await using (var movCmd = conn.CreateCommand())
         {
@@ -783,7 +793,7 @@ public sealed partial class PostgresSalesRepository(
                         VALUES
                             (@tid, @cid, @allocId, @layerId, @movId,
                              'sales_invoice', @invId, @ln,
-                             @var, @qty, @cost, @extCost, 'PKR');
+                             @var, @qty, @cost, @extCost, @cur);
                         """;
                     insAlloc.Parameters.AddWithValue("tid", Ctx.TenantId);
                     insAlloc.Parameters.AddWithValue("cid", Ctx.CompanyId);
@@ -796,6 +806,7 @@ public sealed partial class PostgresSalesRepository(
                     insAlloc.Parameters.AddWithValue("qty", alloc.ConsumedQty);
                     insAlloc.Parameters.AddWithValue("cost", alloc.UnitCost);
                     insAlloc.Parameters.AddWithValue("extCost", alloc.ExtendedCost);
+                    insAlloc.Parameters.AddWithValue("cur", functionalCurrency);
                     await insAlloc.ExecuteNonQueryAsync(ct);
                 }
 
@@ -807,7 +818,7 @@ public sealed partial class PostgresSalesRepository(
                          entry_type, quantity, unit_cost, extended_cost, currency_code, posted_at)
                     VALUES
                         (@tid, @cid, @valId, @movId, @var,
-                         'issue_cost', @qty, @unitCost, @extCost, 'PKR', now());
+                         'issue_cost', @qty, @unitCost, @extCost, @cur, now());
                     """;
                 valEntryCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
                 valEntryCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
@@ -817,6 +828,7 @@ public sealed partial class PostgresSalesRepository(
                 valEntryCmd.Parameters.AddWithValue("qty", -l.Quantity);
                 valEntryCmd.Parameters.AddWithValue("unitCost", lineUnitCost);
                 valEntryCmd.Parameters.AddWithValue("extCost", -allocationResult.TotalCost);
+                valEntryCmd.Parameters.AddWithValue("cur", functionalCurrency);
                 await valEntryCmd.ExecuteNonQueryAsync(ct);
             }
 
@@ -984,7 +996,7 @@ public sealed partial class PostgresSalesRepository(
                      idempotency_key, status, created_by, posted_by, posted_at)
                 VALUES
                     (@id, @tid, @cid, @no, @date, @per,
-                     @desc, 'PKR', 'sales', 'sales_invoice', @srcId,
+                     @desc, @funcCurr, 'sales', 'sales_invoice', @srcId,
                      @key, 'posted', @by, @by, now());
                 """;
             jourCmd.Parameters.AddWithValue("id", journalId);
@@ -994,6 +1006,7 @@ public sealed partial class PostgresSalesRepository(
             jourCmd.Parameters.AddWithValue("date", invoiceDate);
             jourCmd.Parameters.AddWithValue("per", openPeriodId.Value);
             jourCmd.Parameters.AddWithValue("desc", $"GL posting for Invoice {req.InvoiceNumber}");
+            jourCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             jourCmd.Parameters.AddWithValue("srcId", invoiceId.ToString());
             jourCmd.Parameters.AddWithValue("key", glIdempotencyKey);
             jourCmd.Parameters.AddWithValue("by", createdBy == Guid.Empty ? DBNull.Value : (object)createdBy);
@@ -1006,7 +1019,7 @@ public sealed partial class PostgresSalesRepository(
                  transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
             VALUES
                 (@tid, @cid, @jId, @ln, @acc, @desc,
-                 'PKR', @amt, 1.0, @deb, @cred);
+                 @cur, @amt, 1.0, @deb, @cred);
             """;
 
         var lineNo = 1;
@@ -1024,6 +1037,7 @@ public sealed partial class PostgresSalesRepository(
             lineCmd.Parameters.AddWithValue("ln", lineNo++);
             lineCmd.Parameters.AddWithValue("acc", accountId);
             lineCmd.Parameters.AddWithValue("desc", description);
+            lineCmd.Parameters.AddWithValue("cur", functionalCurrency);
             lineCmd.Parameters.AddWithValue("amt", debit > 0 ? debit : credit);
             lineCmd.Parameters.AddWithValue("deb", debit);
             lineCmd.Parameters.AddWithValue("cred", credit);

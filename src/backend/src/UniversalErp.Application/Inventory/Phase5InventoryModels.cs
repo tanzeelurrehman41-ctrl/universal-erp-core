@@ -235,6 +235,12 @@ public sealed record BinMovementHistoryItem(
     DateTimeOffset PostedAt,
     string? Note);
 
+public sealed record InventoryValuationCurrencyTotal(
+    string CurrencyCode,
+    decimal Amount,
+    int ItemCount,
+    decimal? Quantity = null);
+
 public sealed record InventoryValuationLayerReportItem(
     Guid LayerId,
     Guid? ParentLayerId,
@@ -252,7 +258,16 @@ public sealed record InventoryValuationLayerReportItem(
     decimal UnitCost,
     decimal ExtendedValuation,
     string CurrencyCode,
-    string StatusCode);
+    string StatusCode,
+    string? SourceCurrencyCode = null,
+    decimal? SourceUnitCost = null,
+    decimal? SourceExtendedValuation = null,
+    string? FunctionalCurrencyCode = null,
+    decimal? FunctionalUnitCost = null,
+    decimal? FunctionalExtendedValuation = null,
+    decimal? AppliedExchangeRate = null,
+    DateTimeOffset? ExchangeRateEffectiveAt = null,
+    string? CurrencyConversionStatus = null);
 
 public sealed record InventoryValuationReportSummary(
     DateTimeOffset GeneratedAt,
@@ -264,4 +279,26 @@ public sealed record InventoryValuationReportSummary(
     decimal GeneralLedger1200BalancePkr,
     decimal ReconciliationVariancePkr,
     bool IsReconciled,
-    IReadOnlyList<InventoryValuationLayerReportItem> Layers);
+    IReadOnlyList<InventoryValuationLayerReportItem> Layers,
+    string FunctionalCurrencyCode = "PKR",
+    decimal? FunctionalValuation = null,
+    decimal? GeneralLedger1200FunctionalBalance = null,
+    decimal? ReconciliationVarianceFunctional = null,
+    string ReconciliationStatus = "RECONCILED",
+    bool IsFunctionalValuationResolved = true,
+    bool IsGeneralLedgerCurrencyAligned = true,
+    int MissingExchangeRateLayerCount = 0,
+    string? UnresolvedCurrencyIssue = null,
+    IReadOnlyList<InventoryValuationCurrencyTotal>? SourceValuationByCurrency = null,
+    IReadOnlyList<InventoryValuationCurrencyTotal>? GeneralLedger1200BalancesByCurrency = null,
+    decimal? TotalValuation = null,
+    decimal? GeneralLedger1200Balance = null,
+    decimal? ReconciliationVariance = null,
+    string? PresentationCurrencyCode = null,
+    decimal? PresentationValuation = null,
+    decimal? GeneralLedger1200PresentationBalance = null,
+    decimal? PresentationAppliedExchangeRate = null,
+    DateOnly? PresentationExchangeRateEffectiveDate = null,
+    string? PresentationExchangeRateType = null,
+    string? PresentationStatus = null,
+    string? PresentationIssue = null);

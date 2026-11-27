@@ -272,6 +272,27 @@ public sealed class FinanceServiceTests
 
         public Task<IReadOnlyList<FinancialAuditLogSummary>> ListAuditLogsAsync(Guid tenantId, Guid companyId, int limit, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<FinancialAuditLogSummary>>([]);
+
+        public Task<IReadOnlyList<CurrencySummary>> ListCurrenciesAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CurrencySummary>>([
+                new("PKR", "Pakistani Rupee", 2, true),
+                new("USD", "US Dollar", 2, true)
+            ]);
+
+        public Task<CompanyCurrencyContextInfo> GetCompanyCurrencyContextAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken) =>
+            Task.FromResult(new CompanyCurrencyContextInfo("PKR", "USD", new DateOnly(2026, 11, 1)));
+
+        public Task<IReadOnlyList<ExchangeRateSummary>> ListExchangeRatesAsync(Guid tenantId, Guid companyId, string? fromCurrency, string? toCurrency, string? rateType, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<ExchangeRateSummary>>([]);
+
+        public Task<ExchangeRateSummary> CreateExchangeRateAsync(Guid tenantId, Guid companyId, Guid userId, UpsertExchangeRateRequest request, CancellationToken cancellationToken) =>
+            throw new NotImplementedException();
+
+        public Task<ExchangeRateSummary?> UpdateExchangeRateAsync(Guid tenantId, Guid companyId, Guid userId, Guid exchangeRateId, UpsertExchangeRateRequest request, CancellationToken cancellationToken) =>
+            throw new NotImplementedException();
+
+        public Task<IReadOnlyList<Ias21PostedJournalLineInput>> ListPostedJournalLinesForTranslationAsync(Guid tenantId, Guid companyId, DateOnly asOfDate, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<Ias21PostedJournalLineInput>>([]);
     }
 
     [Fact]

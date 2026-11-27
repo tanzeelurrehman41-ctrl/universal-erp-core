@@ -3,6 +3,7 @@ using Npgsql;
 using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Purchasing;
 using UniversalErp.Domain.Tenancy;
+using UniversalErp.Infrastructure.Finance;
 
 namespace UniversalErp.Infrastructure.Purchasing;
 
@@ -231,6 +232,8 @@ public sealed partial class PostgresPurchasingRepository(
         await using var tx = await conn.BeginTransactionAsync(ct);
         await using var cmd = conn.CreateCommand();
         await SetRls(cmd, Ctx);
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
 
         cmd.CommandText = """
             INSERT INTO erp_purchasing.purchase_order
@@ -246,7 +249,7 @@ public sealed partial class PostgresPurchasingRepository(
         cmd.Parameters.AddWithValue("pono", req.PoNumber.Trim());
         cmd.Parameters.AddWithValue("sup", req.SupplierId);
         cmd.Parameters.AddWithValue("wh", req.WarehouseId);
-        cmd.Parameters.AddWithValue("cur", "PKR");
+        cmd.Parameters.AddWithValue("cur", functionalCurrency);
         cmd.Parameters.AddWithValue("odate", req.OrderDate.ToDateTime(TimeOnly.MinValue));
         cmd.Parameters.AddWithValue("edate", req.ExpectedDate.HasValue
             ? (object)req.ExpectedDate.Value.ToDateTime(TimeOnly.MinValue)

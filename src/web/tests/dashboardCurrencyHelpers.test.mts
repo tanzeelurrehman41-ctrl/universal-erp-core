@@ -154,3 +154,47 @@ test("legacy PKR-suffixed payload fails closed when workspace baseCurrency is US
   assert.equal(state.sourceLedgerBalancesText, "PKR 2,250");
   assert.equal(state.reconciliationLabel, "Unresolved currency mismatch");
 });
+
+test("PKR functional ledger with USD presentation exposes translated closing-rate USD valuation and missing-rate Unavailable state", () => {
+  const translatedPkrToUsd: ValuationReportResponse = {
+    totalPhysicalStock: 50,
+    functionalCurrencyCode: "PKR",
+    functionalValuation: 2250,
+    generalLedger1200FunctionalBalance: 2250,
+    reconciliationVarianceFunctional: 0,
+    isReconciled: true,
+    reconciliationStatus: "RECONCILED",
+    isFunctionalValuationResolved: true,
+    isGeneralLedgerCurrencyAligned: true,
+    presentationCurrencyCode: "USD",
+    presentationValuation: 8.08,
+    generalLedger1200PresentationBalance: 8.08,
+    presentationAppliedExchangeRate: 0.00359066,
+    presentationExchangeRateEffectiveDate: "2026-11-26",
+    presentationExchangeRateType: "closing",
+    presentationStatus: "TRANSLATED_CLOSING_RATE",
+  };
+
+  const translatedState = resolveDashboardCurrencyState("PKR", translatedPkrToUsd, rawTrialBalanceWith2250);
+  assert.equal(translatedState.companyBaseCurrency, "PKR");
+  assert.equal(translatedState.functionalValuation, 2250);
+  assert.equal(translatedState.presentationCurrencyCode, "USD");
+  assert.equal(translatedState.presentationValuation, 8.08);
+  assert.equal(translatedState.presentationGl1200Balance, 8.08);
+  assert.equal(formatMoneyWithCurrency(translatedState.presentationValuation, "USD"), "USD 8.08");
+
+  const missingRateReport: ValuationReportResponse = {
+    ...translatedPkrToUsd,
+    presentationValuation: 2250,
+    generalLedger1200PresentationBalance: 2250,
+    presentationAppliedExchangeRate: null,
+    presentationStatus: "UNAVAILABLE",
+    presentationIssue: "Missing closing exchange rate between PKR and USD.",
+  };
+
+  const unavailableState = resolveDashboardCurrencyState("PKR", missingRateReport, rawTrialBalanceWith2250);
+  assert.equal(unavailableState.functionalValuation, 2250);
+  assert.equal(unavailableState.presentationValuation, null);
+  assert.equal(unavailableState.presentationGl1200Balance, null);
+  assert.equal(formatMoneyWithCurrency(unavailableState.presentationValuation, "USD"), "Unavailable");
+});

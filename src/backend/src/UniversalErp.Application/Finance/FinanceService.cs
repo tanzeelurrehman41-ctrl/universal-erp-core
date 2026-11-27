@@ -174,8 +174,13 @@ public sealed partial class FinanceService(
             return Result<JournalSummary>.Failure("UNBALANCED_JOURNAL");
         }
 
+        var companyCurrency = await repository.GetCompanyCurrencyContextAsync(
+            tenantContext.Current.TenantId,
+            tenantContext.Current.CompanyId,
+            cancellationToken);
+
         var normalizedCurrency = string.IsNullOrWhiteSpace(request.FunctionalCurrency)
-            ? "PKR"
+            ? companyCurrency.FunctionalCurrencyCode
             : request.FunctionalCurrency.Trim().ToUpperInvariant();
 
         var normalized = new PostJournalRequest(

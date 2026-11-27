@@ -556,6 +556,7 @@ public sealed partial class PostgresFinanceRepository
         var journalNo = $"JRN-TRP-{request.PaymentNumber}";
         var idempotencyKey = $"treasury-pay-{paymentId:N}";
         var now = DateTimeOffset.UtcNow;
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(connection, transaction, tenantId, companyId, cancellationToken);
 
         // Determine Contra Account
         Guid contraAccountId;
@@ -601,7 +602,7 @@ public sealed partial class PostgresFinanceRepository
                  idempotency_key, status, created_by, posted_by, posted_at, created_at)
             VALUES
                 (@id, @tenantId, @companyId, @no, @date, @pid,
-                 @desc, 'PKR', 'finance', 'treasury_payment', @sid,
+                 @desc, @funcCurr, 'finance', 'treasury_payment', @sid,
                  @key, 'posted', @by, @by, now(), now());
             """;
 
@@ -614,6 +615,7 @@ public sealed partial class PostgresFinanceRepository
             jCmd.Parameters.AddWithValue("date", request.PaymentDate.ToDateTime(TimeOnly.MinValue));
             jCmd.Parameters.AddWithValue("pid", activePeriodId);
             jCmd.Parameters.AddWithValue("desc", $"Treasury Payment {request.PaymentNumber}: {request.PayeePayerName}");
+            jCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             jCmd.Parameters.AddWithValue("sid", paymentId.ToString());
             jCmd.Parameters.AddWithValue("key", idempotencyKey);
             jCmd.Parameters.AddWithValue("by", userId);
@@ -631,8 +633,8 @@ public sealed partial class PostgresFinanceRepository
                 (tenant_id, company_id, journal_id, line_no, account_id, description,
                  transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
             VALUES
-                (@tenantId, @companyId, @jid, 1, @debitAcc, @desc1, 'PKR', @amt, 1.0, @amt, 0),
-                (@tenantId, @companyId, @jid, 2, @creditAcc, @desc2, 'PKR', @amt, 1.0, 0, @amt);
+                (@tenantId, @companyId, @jid, 1, @debitAcc, @desc1, @funcCurr, @amt, 1.0, @amt, 0),
+                (@tenantId, @companyId, @jid, 2, @creditAcc, @desc2, @funcCurr, @amt, 1.0, 0, @amt);
             """;
 
         await using (var lCmd = new NpgsqlCommand(lineSql, connection, transaction))
@@ -644,6 +646,7 @@ public sealed partial class PostgresFinanceRepository
             lCmd.Parameters.AddWithValue("desc1", $"Debit for {request.PaymentNumber}");
             lCmd.Parameters.AddWithValue("creditAcc", creditAccId);
             lCmd.Parameters.AddWithValue("desc2", $"Credit for {request.PaymentNumber}");
+            lCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             lCmd.Parameters.AddWithValue("amt", request.Amount);
             await lCmd.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -1055,6 +1058,7 @@ public sealed partial class PostgresFinanceRepository
             var journalId = Guid.NewGuid();
             var journalNo = $"JRN-TAX-{filing.FilingNumber}";
             var idempotencyKey = $"tax-settle-{filingId:N}";
+            var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(connection, transaction, tenantId, companyId, cancellationToken);
 
             // Post Settlement Journal: Dr 2100 Tax Output, Cr Bank Account
             const string jourSql = """
@@ -1064,7 +1068,7 @@ public sealed partial class PostgresFinanceRepository
                      idempotency_key, status, created_by, posted_by, posted_at, created_at)
                 VALUES
                     (@id, @tenantId, @companyId, @no, now(), @pid,
-                     @desc, 'PKR', 'finance', 'tax_settlement', @sid,
+                     @desc, @funcCurr, 'finance', 'tax_settlement', @sid,
                      @key, 'posted', @by, @by, now(), now());
                 """;
 
@@ -1076,6 +1080,7 @@ public sealed partial class PostgresFinanceRepository
                 jCmd.Parameters.AddWithValue("no", journalNo);
                 jCmd.Parameters.AddWithValue("pid", activePeriodId);
                 jCmd.Parameters.AddWithValue("desc", $"Tax Settlement for Filing {filing.FilingNumber}");
+                jCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
                 jCmd.Parameters.AddWithValue("sid", filingId.ToString());
                 jCmd.Parameters.AddWithValue("key", idempotencyKey);
                 jCmd.Parameters.AddWithValue("by", userId);
@@ -1087,8 +1092,8 @@ public sealed partial class PostgresFinanceRepository
                     (tenant_id, company_id, journal_id, line_no, account_id, description,
                      transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
                 VALUES
-                    (@tenantId, @companyId, @jid, 1, @taxAcc, 'Tax Liability Settlement', 'PKR', @amt, 1.0, @amt, 0),
-                    (@tenantId, @companyId, @jid, 2, @bankAcc, 'Tax Payment from Bank', 'PKR', @amt, 1.0, 0, @amt);
+                    (@tenantId, @companyId, @jid, 1, @taxAcc, 'Tax Liability Settlement', @funcCurr, @amt, 1.0, @amt, 0),
+                    (@tenantId, @companyId, @jid, 2, @bankAcc, 'Tax Payment from Bank', @funcCurr, @amt, 1.0, 0, @amt);
                 """;
 
             await using (var lCmd = new NpgsqlCommand(lineSql, connection, transaction))
@@ -1096,6 +1101,7 @@ public sealed partial class PostgresFinanceRepository
                 lCmd.Parameters.AddWithValue("tenantId", tenantId);
                 lCmd.Parameters.AddWithValue("companyId", companyId);
                 lCmd.Parameters.AddWithValue("jid", journalId);
+                lCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
                 lCmd.Parameters.AddWithValue("taxAcc", taxPayableAccount);
                 lCmd.Parameters.AddWithValue("bankAcc", bankAccount.GlAccountId);
                 lCmd.Parameters.AddWithValue("amt", filing.NetTaxPayable);
@@ -1274,6 +1280,7 @@ public sealed partial class PostgresFinanceRepository
         var journalNo = $"JRN-REC-{sched.ScheduleName.Replace(" ", "-").ToUpper()}-{sched.PostedPeriodsCount + 1}";
         var idempotencyKey = $"recurring-{scheduleId:N}-{sched.PostedPeriodsCount + 1}";
         var desc = sched.DescriptionTemplate ?? $"{sched.ScheduleName} - Period {sched.PostedPeriodsCount + 1}";
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(connection, transaction, tenantId, companyId, cancellationToken);
 
         // Post Journal Header
         const string jSql = """
@@ -1283,7 +1290,7 @@ public sealed partial class PostgresFinanceRepository
                  idempotency_key, status, created_by, posted_by, posted_at, created_at)
             VALUES
                 (@id, @tenantId, @companyId, @no, now(), @pid,
-                 @desc, 'PKR', 'finance', 'recurring_schedule', @sid,
+                 @desc, @funcCurr, 'finance', 'recurring_schedule', @sid,
                  @key, 'posted', @by, @by, now(), now());
             """;
 
@@ -1295,6 +1302,7 @@ public sealed partial class PostgresFinanceRepository
             jCmd.Parameters.AddWithValue("no", journalNo);
             jCmd.Parameters.AddWithValue("pid", activePeriodId);
             jCmd.Parameters.AddWithValue("desc", desc);
+            jCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             jCmd.Parameters.AddWithValue("sid", scheduleId.ToString());
             jCmd.Parameters.AddWithValue("key", idempotencyKey);
             jCmd.Parameters.AddWithValue("by", userId);
@@ -1307,8 +1315,8 @@ public sealed partial class PostgresFinanceRepository
                 (tenant_id, company_id, journal_id, line_no, account_id, description,
                  transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
             VALUES
-                (@tenantId, @companyId, @jid, 1, @debit, @desc, 'PKR', @amt, 1.0, @amt, 0),
-                (@tenantId, @companyId, @jid, 2, @credit, @desc, 'PKR', @amt, 1.0, 0, @amt);
+                (@tenantId, @companyId, @jid, 1, @debit, @desc, @funcCurr, @amt, 1.0, @amt, 0),
+                (@tenantId, @companyId, @jid, 2, @credit, @desc, @funcCurr, @amt, 1.0, 0, @amt);
             """;
 
         await using (var lCmd = new NpgsqlCommand(lSql, connection, transaction))
@@ -1316,6 +1324,7 @@ public sealed partial class PostgresFinanceRepository
             lCmd.Parameters.AddWithValue("tenantId", tenantId);
             lCmd.Parameters.AddWithValue("companyId", companyId);
             lCmd.Parameters.AddWithValue("jid", journalId);
+            lCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             lCmd.Parameters.AddWithValue("debit", sched.DebitAccountId);
             lCmd.Parameters.AddWithValue("credit", sched.CreditAccountId);
             lCmd.Parameters.AddWithValue("desc", desc);
@@ -1471,6 +1480,7 @@ public sealed partial class PostgresFinanceRepository
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await SetScopeAsync(connection, transaction, tenantId, companyId, cancellationToken);
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(connection, transaction, tenantId, companyId, cancellationToken);
 
         var results = new List<AssetDepreciationRunSummary>();
 
@@ -1505,7 +1515,7 @@ public sealed partial class PostgresFinanceRepository
                      idempotency_key, status, created_by, posted_by, posted_at, created_at)
                 VALUES
                     (@id, @tenantId, @companyId, @no, @date, @pid,
-                     @desc, 'PKR', 'finance', 'depreciation_run', @sid,
+                     @desc, @funcCurr, 'finance', 'depreciation_run', @sid,
                      @key, 'posted', @by, @by, now(), now());
                 """;
 
@@ -1518,6 +1528,7 @@ public sealed partial class PostgresFinanceRepository
                 jCmd.Parameters.AddWithValue("date", request.RunDate.ToDateTime(TimeOnly.MinValue));
                 jCmd.Parameters.AddWithValue("pid", request.FiscalPeriodId);
                 jCmd.Parameters.AddWithValue("desc", $"Monthly Depreciation: {asset.AssetName} ({asset.AssetCode})");
+                jCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
                 jCmd.Parameters.AddWithValue("sid", runId.ToString());
                 jCmd.Parameters.AddWithValue("key", idempotencyKey);
                 jCmd.Parameters.AddWithValue("by", userId);
@@ -1530,8 +1541,8 @@ public sealed partial class PostgresFinanceRepository
                     (tenant_id, company_id, journal_id, line_no, account_id, description,
                      transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
                 VALUES
-                    (@tenantId, @companyId, @jid, 1, @expAcc, @desc, 'PKR', @amt, 1.0, @amt, 0),
-                    (@tenantId, @companyId, @jid, 2, @accumAcc, @desc, 'PKR', @amt, 1.0, 0, @amt);
+                    (@tenantId, @companyId, @jid, 1, @expAcc, @desc, @funcCurr, @amt, 1.0, @amt, 0),
+                    (@tenantId, @companyId, @jid, 2, @accumAcc, @desc, @funcCurr, @amt, 1.0, 0, @amt);
                 """;
 
             await using (var lCmd = new NpgsqlCommand(lSql, connection, transaction))
@@ -1539,6 +1550,7 @@ public sealed partial class PostgresFinanceRepository
                 lCmd.Parameters.AddWithValue("tenantId", tenantId);
                 lCmd.Parameters.AddWithValue("companyId", companyId);
                 lCmd.Parameters.AddWithValue("jid", journalId);
+                lCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
                 lCmd.Parameters.AddWithValue("expAcc", asset.DepreciationExpenseAccountId);
                 lCmd.Parameters.AddWithValue("accumAcc", asset.AccumulatedDeprAccountId);
                 lCmd.Parameters.AddWithValue("desc", $"Depreciation for {asset.AssetCode}");
@@ -1848,6 +1860,7 @@ public sealed partial class PostgresFinanceRepository
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await SetScopeAsync(connection, transaction, tenantId, companyId, cancellationToken);
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(connection, transaction, tenantId, companyId, cancellationToken);
 
         // Fetch open period in this year for the closing entry
         Guid closingPeriodId;
@@ -1874,7 +1887,7 @@ public sealed partial class PostgresFinanceRepository
                  idempotency_key, status, created_by, posted_by, posted_at, created_at)
             VALUES
                 (@id, @tenantId, @companyId, @no, @date, @pid,
-                 @desc, 'PKR', 'finance', 'year_end_close', @sid,
+                 @desc, @funcCurr, 'finance', 'year_end_close', @sid,
                  @key, 'posted', @by, @by, now(), now());
             """;
 
@@ -1887,6 +1900,7 @@ public sealed partial class PostgresFinanceRepository
             jCmd.Parameters.AddWithValue("date", request.ClosingDate.ToDateTime(TimeOnly.MinValue));
             jCmd.Parameters.AddWithValue("pid", closingPeriodId);
             jCmd.Parameters.AddWithValue("desc", $"Year-End Financial Close for Fiscal Year {year.Code}");
+            jCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             jCmd.Parameters.AddWithValue("sid", year.YearId.ToString());
             jCmd.Parameters.AddWithValue("key", idempotencyKey);
             jCmd.Parameters.AddWithValue("by", userId);
@@ -1930,7 +1944,7 @@ public sealed partial class PostgresFinanceRepository
                 (tenant_id, company_id, journal_id, line_no, account_id, description,
                  transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
             VALUES
-                (@tenantId, @companyId, @jid, @lno, @acc, @desc, 'PKR', @amt, 1.0, @debit, @credit);
+                (@tenantId, @companyId, @jid, @lno, @acc, @desc, @funcCurr, @amt, 1.0, @debit, @credit);
             """;
 
         for (var i = 0; i < linesToInsert.Count; i++)
@@ -1940,6 +1954,7 @@ public sealed partial class PostgresFinanceRepository
             lCmd.Parameters.AddWithValue("tenantId", tenantId);
             lCmd.Parameters.AddWithValue("companyId", companyId);
             lCmd.Parameters.AddWithValue("jid", closingJournalId);
+            lCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             lCmd.Parameters.AddWithValue("lno", i + 1);
             lCmd.Parameters.AddWithValue("acc", item.accountId);
             lCmd.Parameters.AddWithValue("desc", item.desc);

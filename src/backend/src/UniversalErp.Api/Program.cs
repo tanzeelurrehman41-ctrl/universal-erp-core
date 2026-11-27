@@ -399,7 +399,8 @@ else
             "finance.period.manage", "finance.period.close", "finance.period.reopen",
             "finance.bank.manage", "finance.bank.reconcile",
             "finance.tax.manage", "finance.asset.manage", "finance.asset.depreciate",
-            "finance.reports.view",
+            "finance.reports.view", "finance.exchange_rate.manage",
+            "admin.currency_settings.view", "admin.currency_settings.manage",
             "mfg.bom.view", "mfg.bom.manage",
             "mfg.work_center.manage", "mfg.routing.manage",
             "mfg.work_order.view", "mfg.work_order.create", "mfg.work_order.approve",
@@ -640,7 +641,7 @@ app.MapBranchEndpoints(effectiveDevMode);
 app.MapConsolidationEndpoints(effectiveDevMode);
 app.MapIntegrationEndpoints(effectiveDevMode);
 app.MapSaaSEndpoints(effectiveDevMode);
-productApi.MapFoundationEndpoints();
+productApi.MapFoundationEndpoints(effectiveDevMode);
 
 app.MapGet("/", () => Results.Ok(new
 {

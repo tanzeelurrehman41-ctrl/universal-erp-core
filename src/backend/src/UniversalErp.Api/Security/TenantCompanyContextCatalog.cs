@@ -10,7 +10,10 @@ public sealed record TenantCompanyContext(
     string CompanyCode,
     string CompanyName,
     string BaseCurrencyCode,
-    string Timezone);
+    string Timezone,
+    string FunctionalCurrencyCode = "PKR",
+    string PresentationCurrencyCode = "PKR",
+    DateOnly? CurrencyEffectiveDate = null);
 
 public sealed class TenantCompanyContextCatalog(NpgsqlDataSource dataSource)
 {
@@ -21,7 +24,11 @@ public sealed class TenantCompanyContextCatalog(NpgsqlDataSource dataSource)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(
-            "SELECT tenant_id, tenant_code, tenant_name, company_id, company_code, company_name, base_currency_code, timezone FROM identity.list_user_company_contexts(@issuer, @subject)",
+            """
+            SELECT tenant_id, tenant_code, tenant_name, company_id, company_code, company_name,
+                   base_currency_code, timezone, functional_currency_code, presentation_currency_code, currency_effective_date
+            FROM identity.list_user_company_contexts(@issuer, @subject)
+            """,
             connection);
         command.Parameters.AddWithValue("issuer", issuer);
         command.Parameters.AddWithValue("subject", subject);
@@ -30,6 +37,11 @@ public sealed class TenantCompanyContextCatalog(NpgsqlDataSource dataSource)
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var baseCurr = reader.GetString(6).Trim();
+            var funcCurr = reader.IsDBNull(8) ? baseCurr : reader.GetString(8).Trim();
+            var presCurr = reader.IsDBNull(9) ? funcCurr : reader.GetString(9).Trim();
+            DateOnly? effectiveDate = reader.IsDBNull(10) ? null : reader.GetFieldValue<DateOnly>(10);
+
             contexts.Add(new TenantCompanyContext(
                 reader.GetGuid(0),
                 reader.GetString(1),
@@ -37,8 +49,11 @@ public sealed class TenantCompanyContextCatalog(NpgsqlDataSource dataSource)
                 reader.GetGuid(3),
                 reader.GetString(4),
                 reader.GetString(5),
-                reader.GetString(6).Trim(),
-                reader.GetString(7)));
+                baseCurr,
+                reader.GetString(7),
+                funcCurr,
+                presCurr,
+                effectiveDate));
         }
 
         return contexts;

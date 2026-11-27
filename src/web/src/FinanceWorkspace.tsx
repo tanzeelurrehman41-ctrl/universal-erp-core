@@ -5,6 +5,7 @@ import {
   calculateReconciliationDiscrepancy,
   computeFinancialStatementSummary,
   formatCurrencyPkr,
+  formatMoney,
   type FinancialStatementSummary,
 } from "./financeHelpers";
 
@@ -267,6 +268,62 @@ export type ControlDashboard = {
   estimatedNetTaxPayable: number;
 };
 
+export type MissingExchangeRateDiagnostic = {
+  requiredFor: string;
+  currencyPair: string;
+  rateType: string;
+  requiredDate: string;
+  reason: string;
+};
+
+export type PresentationStatementLine = {
+  accountCode: string;
+  accountName: string;
+  accountType: string;
+  functionalBalance: number;
+  presentationBalance?: number | null;
+  appliedRate?: number | null;
+  rateEffectiveDate?: string | null;
+  rateTypeUsed: string;
+  translationStatus: string;
+};
+
+export type PresentationStatementsResponse = {
+  asOfDate: string;
+  functionalCurrencyCode: string;
+  presentationCurrencyCode: string;
+  sameCurrency: boolean;
+  translationMethod: string;
+  translationStatus: string;
+  closingRate?: number | null;
+  closingRateDirection?: string | null;
+  closingRateEffectiveDate?: string | null;
+  closingRateSource?: string | null;
+  totalAssetsFunctional?: number | null;
+  totalAssetsPresentation?: number | null;
+  totalLiabilitiesFunctional?: number | null;
+  totalLiabilitiesPresentation?: number | null;
+  equityBeforeOciFunctional?: number | null;
+  equityBeforeOciPresentation?: number | null;
+  totalRevenueFunctional?: number | null;
+  totalRevenuePresentation?: number | null;
+  totalCostOfSalesFunctional?: number | null;
+  totalCostOfSalesPresentation?: number | null;
+  totalOperatingExpensesFunctional?: number | null;
+  totalOperatingExpensesPresentation?: number | null;
+  totalExpensesFunctional?: number | null;
+  totalExpensesPresentation?: number | null;
+  netIncomeFunctional?: number | null;
+  netIncomePresentation?: number | null;
+  translationDifferenceOciPresentation?: number | null;
+  totalLiabilitiesAndEquityIncludingOciPresentation?: number | null;
+  isBalanceSheetBalancedPresentation?: boolean | null;
+  balanceSheetDiscrepancyPresentation?: number | null;
+  balanceSheetLines: PresentationStatementLine[];
+  incomeStatementLines: PresentationStatementLine[];
+  missingRates: MissingExchangeRateDiagnostic[];
+};
+
 type Tab =
   | "gl"
   | "post-journal"
@@ -285,6 +342,8 @@ type NewJournalLine = {
   description: string;
   debit: string;
   credit: string;
+  transactionCurrency?: string;
+  exchangeRate?: string;
 };
 
 type Props = {
@@ -303,6 +362,10 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
   const [periods, setPeriods] = useState<FiscalPeriod[]>([]);
   const [journals, setJournals] = useState<Journal[]>([]);
   const [trialBalance, setTrialBalance] = useState<TrialBalanceRow[]>([]);
+  const [presentationAsOfDate, setPresentationAsOfDate] = useState(new Date().toISOString().slice(0, 10));
+  const [presentationIncomeRateMethod, setPresentationIncomeRateMethod] = useState<"transaction" | "average">("transaction");
+  const [presentationStatements, setPresentationStatements] = useState<PresentationStatementsResponse | null>(null);
+  const [presentationError, setPresentationError] = useState("");
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
   const [statements, setStatements] = useState<BankStatement[]>([]);
   const [payments, setPayments] = useState<TreasuryPayment[]>([]);
@@ -477,9 +540,48 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
     }
   };
 
+  const functionalCurrency = (
+    workspace?.functionalCurrencyCode ||
+    workspace?.baseCurrencyCode ||
+    journals[0]?.functionalCurrency ||
+    "PKR"
+  ).trim().toUpperCase();
+  const fmt = (amount: number | null | undefined, currency: string = functionalCurrency): string =>
+    formatMoney(amount, currency);
+
+  const loadPresentationStatements = async (
+    asOfDate: string = presentationAsOfDate,
+    incomeRateMethod: "transaction" | "average" = presentationIncomeRateMethod
+  ) => {
+    if (!enabled || !workspace) return;
+    setPresentationError("");
+    try {
+      const res = await apiFetch(
+        `/api/v1/finance/financial-statements/presentation?asOfDate=${encodeURIComponent(asOfDate)}&incomeRateMethod=${encodeURIComponent(incomeRateMethod)}`,
+        {},
+        workspace
+      );
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        setPresentationStatements(null);
+        setPresentationError(errJson.detail || errJson.error || `Presentation statements unavailable (HTTP ${res.status})`);
+        return;
+      }
+      setPresentationStatements((await res.json()) as PresentationStatementsResponse);
+    } catch (err) {
+      setPresentationStatements(null);
+      setPresentationError(err instanceof Error ? err.message : "Failed to load IAS 21 presentation statements.");
+    }
+  };
+
   useEffect(() => {
     void loadAll();
   }, [enabled, workspace]);
+
+  useEffect(() => {
+    if (!enabled || !workspace) return;
+    void loadPresentationStatements(presentationAsOfDate, presentationIncomeRateMethod);
+  }, [enabled, workspace, presentationAsOfDate, presentationIncomeRateMethod]);
 
   // Load checklist whenever selectedPeriodId changes
   useEffect(() => {
@@ -510,7 +612,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
           accountName: newName.trim(),
           accountType: newType,
           normalBalance: newBalance,
-          currencyCode: "PKR",
+          currencyCode: functionalCurrency,
           isControlAccount: false,
           allowManualPosting: true,
         }),
@@ -544,12 +646,16 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
       const lines = journalLines.map((l) => {
         const d = parseFloat(l.debit) || 0;
         const c = parseFloat(l.credit) || 0;
+        const fxRate = Math.max(0.000001, parseFloat(l.exchangeRate || "1") || 1);
+        const lineCurr = (l.transactionCurrency || functionalCurrency).trim().toUpperCase();
+        const funcAmt = d > 0 ? d : c;
+        const txAmt = lineCurr === functionalCurrency ? funcAmt : Math.round((funcAmt / fxRate) * 100) / 100;
         return {
           accountId: l.accountId,
           description: l.description.trim() || journalDescription.trim(),
-          transactionCurrency: "PKR",
-          transactionAmount: d > 0 ? d : c,
-          exchangeRate: 1,
+          transactionCurrency: lineCurr,
+          transactionAmount: txAmt,
+          exchangeRate: lineCurr === functionalCurrency ? 1 : fxRate,
           debitFunctional: d,
           creditFunctional: c,
         };
@@ -566,7 +672,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
           journalDate,
           fiscalPeriodId: selectedPeriodId,
           description: journalDescription.trim(),
-          functionalCurrency: "PKR",
+          functionalCurrency,
           sourceModule: "manual",
           sourceType: "general",
           sourceId: idempotencyKey,
@@ -578,10 +684,11 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
         const errJson = await res.json().catch(() => ({}));
         throw new Error(errJson.detail || errJson.title || `Journal posting failed (HTTP ${res.status})`);
       }
-      setMessage(`Journal ${journalNo} posted successfully!`);
+      setMessage(`Journal ${journalNo} posted in ${functionalCurrency} successfully!`);
       setJournalNo(`JRN-${Date.now().toString().slice(-6)}`);
       setJournalDescription("");
       void loadAll();
+      void loadPresentationStatements();
       setActiveTab("gl");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error posting journal.");
@@ -618,7 +725,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
           accountNumber: newBankNum.trim(),
           accountName: newBankAccName.trim(),
           bankName: newBankName.trim(),
-          currencyCode: "PKR",
+          currencyCode: functionalCurrency,
           accountType: newBankType,
           glAccountId: newBankGlId,
         }),
@@ -677,7 +784,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
       }, workspace);
       if (!res.ok) throw new Error("Reconciliation failed");
       const result = await res.json();
-      setMessage(`Reconciliation complete! Matched lines: ${result.matchedLinesCount}/${result.totalLinesCount}. Discrepancy: PKR ${result.discrepancy}`);
+      setMessage(`Reconciliation complete! Matched lines: ${result.matchedLinesCount}/${result.totalLinesCount}. Discrepancy: ${functionalCurrency} ${result.discrepancy}`);
       void loadAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Reconciliation failed");
@@ -696,7 +803,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
           paymentDate: pmtDate,
           bankAccountId: pmtBankId,
           amount: parseFloat(pmtAmount) || 0,
-          currencyCode: "PKR",
+          currencyCode: functionalCurrency,
           paymentMethod: pmtMethod,
           payeePayerName: pmtPayee,
           referenceNumber: pmtRef || undefined,
@@ -1033,8 +1140,8 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                   <td style={{ padding: "0.5rem" }}>{j.journalDate}</td>
                   <td style={{ padding: "0.5rem" }}>{j.description}</td>
                   <td style={{ padding: "0.5rem" }}>{j.sourceModule} ({j.sourceType})</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{formatCurrencyPkr(j.totalDebit)}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{formatCurrencyPkr(j.totalCredit)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{fmt(j.totalDebit, j.functionalCurrency || functionalCurrency)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{fmt(j.totalCredit, j.functionalCurrency || functionalCurrency)}</td>
                   <td style={{ padding: "0.5rem" }}>
                     <span style={{
                       padding: "0.2rem 0.5rem",
@@ -1094,9 +1201,9 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
           </div>
 
           <div style={{ marginBottom: "1rem" }}>
-            <h5>Journal Lines (Minimum 2 Balanced Lines Required)</h5>
+            <h5>Journal Lines (Minimum 2 Balanced Lines Required — Functional Currency: {functionalCurrency})</h5>
             {journalLines.map((line, idx) => (
-              <div key={idx} style={{ display: "grid", gridTemplateColumns: "2fr 2fr 1fr 1fr auto", gap: "0.5rem", marginBottom: "0.5rem" }}>
+              <div key={idx} style={{ display: "grid", gridTemplateColumns: "2fr 2fr 0.7fr 0.8fr 1fr 1fr auto", gap: "0.5rem", marginBottom: "0.5rem" }}>
                 <select
                   value={line.accountId}
                   onChange={(e) => {
@@ -1123,9 +1230,33 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                   }}
                 />
                 <input
+                  placeholder={functionalCurrency}
+                  maxLength={3}
+                  value={line.transactionCurrency ?? functionalCurrency}
+                  onChange={(e) => {
+                    const next = [...journalLines];
+                    next[idx].transactionCurrency = e.target.value.toUpperCase();
+                    setJournalLines(next);
+                  }}
+                  title="Transaction currency (defaults to functional currency)"
+                />
+                <input
+                  type="number"
+                  step="0.000001"
+                  min="0.000001"
+                  placeholder="FX 1.0"
+                  value={line.exchangeRate ?? "1"}
+                  onChange={(e) => {
+                    const next = [...journalLines];
+                    next[idx].exchangeRate = e.target.value;
+                    setJournalLines(next);
+                  }}
+                  title="Exchange rate to functional currency"
+                />
+                <input
                   type="number"
                   step="0.01"
-                  placeholder="Debit"
+                  placeholder={`Debit (${functionalCurrency})`}
                   value={line.debit}
                   onChange={(e) => {
                     const next = [...journalLines];
@@ -1137,7 +1268,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                 <input
                   type="number"
                   step="0.01"
-                  placeholder="Credit"
+                  placeholder={`Credit (${functionalCurrency})`}
                   value={line.credit}
                   onChange={(e) => {
                     const next = [...journalLines];
@@ -1156,7 +1287,12 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
             <button
               type="button"
               style={{ fontSize: "0.8rem", padding: "0.3rem 0.6rem", marginTop: "0.5rem" }}
-              onClick={() => setJournalLines([...journalLines, { accountId: "", description: "", debit: "0", credit: "0" }])}
+              onClick={() =>
+                setJournalLines([
+                  ...journalLines,
+                  { accountId: "", description: "", debit: "0", credit: "0", transactionCurrency: functionalCurrency, exchangeRate: "1" },
+                ])
+              }
             >
               + Add Line
             </button>
@@ -1164,10 +1300,10 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "2px solid #e2e8f0", paddingTop: "0.75rem" }}>
             <div>
-              <strong>Debits:</strong> {formatCurrencyPkr(journalLines.reduce((s, l) => s + (parseFloat(l.debit) || 0), 0))} |{" "}
-              <strong>Credits:</strong> {formatCurrencyPkr(journalLines.reduce((s, l) => s + (parseFloat(l.credit) || 0), 0))}
+              <strong>Debits:</strong> {fmt(journalLines.reduce((s, l) => s + (parseFloat(l.debit) || 0), 0))} |{" "}
+              <strong>Credits:</strong> {fmt(journalLines.reduce((s, l) => s + (parseFloat(l.credit) || 0), 0))}
             </div>
-            <button type="submit">Post to General Ledger</button>
+            <button type="submit">Post to General Ledger ({functionalCurrency})</button>
           </div>
         </form>
       )}
@@ -1236,7 +1372,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                   <td style={{ padding: "0.5rem" }}>{b.accountNumber}</td>
                   <td style={{ padding: "0.5rem" }}>{b.glAccountCode} - {b.glAccountName}</td>
                   <td style={{ padding: "0.5rem" }}>{b.accountType}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600 }}>{formatCurrencyPkr(b.currentBalance)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600 }}>{fmt(b.currentBalance, b.currencyCode || functionalCurrency)}</td>
                   <td style={{ padding: "0.5rem" }}>
                     <span style={{ padding: "0.2rem 0.5rem", borderRadius: "4px", fontSize: "0.75rem", background: b.isActive ? "#dcfce7" : "#fee2e2" }}>
                       {b.isActive ? "active" : "inactive"}
@@ -1319,8 +1455,8 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                   <td style={{ padding: "0.5rem", fontWeight: 600 }}>{s.statementNumber}</td>
                   <td style={{ padding: "0.5rem" }}>{s.bankAccountName}</td>
                   <td style={{ padding: "0.5rem" }}>{s.statementDate}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{formatCurrencyPkr(s.openingBalance)}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{formatCurrencyPkr(s.closingBalance)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{fmt(s.openingBalance)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{fmt(s.closingBalance)}</td>
                   <td style={{ padding: "0.5rem" }}>{s.lines.length} lines</td>
                   <td style={{ padding: "0.5rem" }}>
                     <span style={{
@@ -1385,7 +1521,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                 </select>
               </label>
               <label>
-                Amount (PKR)
+                Amount ({functionalCurrency})
                 <input type="number" step="0.01" required value={pmtAmount} onChange={(e) => setPmtAmount(e.target.value)} />
               </label>
               <label>
@@ -1445,7 +1581,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                   <td style={{ padding: "0.5rem" }}>{p.paymentDate}</td>
                   <td style={{ padding: "0.5rem" }}>{p.bankAccountName}</td>
                   <td style={{ padding: "0.5rem" }}>{p.payeePayerName}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600 }}>{formatCurrencyPkr(p.amount)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600 }}>{fmt(p.amount, p.currencyCode || functionalCurrency)}</td>
                   <td style={{ padding: "0.5rem" }}>{p.paymentMethod}</td>
                   <td style={{ padding: "0.5rem" }}>
                     <span style={{ padding: "0.2rem 0.5rem", borderRadius: "4px", fontSize: "0.75rem", background: "#dcfce7", color: "#166534" }}>
@@ -1466,20 +1602,20 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "1rem", marginBottom: "1.5rem" }}>
               <div style={{ padding: "1rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
                 <span style={{ fontSize: "0.75rem", color: "#64748b" }}>Taxable Sales</span>
-                <h4>{formatCurrencyPkr(taxLiability.totalSalesAmount)}</h4>
+                <h4>{fmt(taxLiability.totalSalesAmount)}</h4>
               </div>
               <div style={{ padding: "1rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
                 <span style={{ fontSize: "0.75rem", color: "#64748b" }}>Output Tax (Collected)</span>
-                <h4 style={{ color: "#0284c7" }}>{formatCurrencyPkr(taxLiability.totalOutputTax)}</h4>
+                <h4 style={{ color: "#0284c7" }}>{fmt(taxLiability.totalOutputTax)}</h4>
               </div>
               <div style={{ padding: "1rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
                 <span style={{ fontSize: "0.75rem", color: "#64748b" }}>Input Tax (Paid)</span>
-                <h4 style={{ color: "#16a34a" }}>{formatCurrencyPkr(taxLiability.totalInputTax)}</h4>
+                <h4 style={{ color: "#16a34a" }}>{fmt(taxLiability.totalInputTax)}</h4>
               </div>
               <div style={{ padding: "1rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
                 <span style={{ fontSize: "0.75rem", color: "#64748b" }}>Net Tax Payable / (Credit)</span>
                 <h4 style={{ color: taxLiability.netTaxPayable > 0 ? "#dc2626" : "#16a34a" }}>
-                  {formatCurrencyPkr(taxLiability.netTaxPayable)}
+                  {fmt(taxLiability.netTaxPayable)}
                 </h4>
               </div>
             </div>
@@ -1556,9 +1692,9 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                   <td style={{ padding: "0.5rem", fontWeight: 600 }}>{f.filingNumber}</td>
                   <td style={{ padding: "0.5rem" }}>{f.periodStart} to {f.periodEnd}</td>
                   <td style={{ padding: "0.5rem" }}>{f.taxType}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{formatCurrencyPkr(f.outputTaxAmount)}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{formatCurrencyPkr(f.inputTaxAmount)}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600 }}>{formatCurrencyPkr(f.netTaxPayable)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{fmt(f.outputTaxAmount)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{fmt(f.inputTaxAmount)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600 }}>{fmt(f.netTaxPayable)}</td>
                   <td style={{ padding: "0.5rem" }}>
                     <span style={{
                       padding: "0.2rem 0.5rem",
@@ -1674,7 +1810,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                   <td style={{ padding: "0.5rem", fontWeight: 600 }}>{s.scheduleName}</td>
                   <td style={{ padding: "0.5rem" }}>{s.scheduleType}</td>
                   <td style={{ padding: "0.5rem" }}>{s.frequency}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600 }}>{formatCurrencyPkr(s.periodAmount)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600 }}>{fmt(s.periodAmount)}</td>
                   <td style={{ padding: "0.5rem" }}>{s.postedPeriodsCount} / {s.periodsCount}</td>
                   <td style={{ padding: "0.5rem" }}>{s.nextRunDate}</td>
                   <td style={{ padding: "0.5rem" }}>{s.debitAccountCode}</td>
@@ -1732,7 +1868,7 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                 </select>
               </label>
               <label>
-                Cost (PKR)
+                Cost ({functionalCurrency})
                 <input type="number" step="0.01" required value={assetCost} onChange={(e) => setAssetCost(e.target.value)} />
               </label>
               <label>
@@ -1798,10 +1934,10 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
                   <td style={{ padding: "0.5rem", fontWeight: 600 }}>{a.assetCode}</td>
                   <td style={{ padding: "0.5rem" }}>{a.assetName}</td>
                   <td style={{ padding: "0.5rem" }}>{a.assetCategory}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{formatCurrencyPkr(a.acquisitionCost)}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{formatCurrencyPkr(a.accumulatedDepreciation)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{fmt(a.acquisitionCost)}</td>
+                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{fmt(a.accumulatedDepreciation)}</td>
                   <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600, color: "#0284c7" }}>
-                    {formatCurrencyPkr(a.currentBookValue)}
+                    {fmt(a.currentBookValue)}
                   </td>
                   <td style={{ padding: "0.5rem" }}>{a.depreciationMethod}</td>
                   <td style={{ padding: "0.5rem" }}>
@@ -1909,94 +2045,271 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
 
       {/* ── 10. Financial Statements & Reports ─────────────────────────────── */}
       {activeTab === "reports" && (
-        <div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem", marginBottom: "1.5rem" }}>
-            {/* Balance Sheet Card */}
-            <div style={{ padding: "1.5rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <h4>Balance Sheet</h4>
-                <span style={{
-                  padding: "0.25rem 0.5rem",
-                  borderRadius: "4px",
-                  fontSize: "0.75rem",
-                  fontWeight: 600,
-                  background: financialSummary.isBalanced ? "#dcfce7" : "#fee2e2",
-                  color: financialSummary.isBalanced ? "#166534" : "#991b1b",
-                }}>
-                  {financialSummary.isBalanced ? "✓ Equation Balanced" : "⚠ Variance Detected"}
-                </span>
+        <div style={{ display: "grid", gap: "1.5rem" }}>
+          <div>
+            <h4 style={{ marginBottom: "0.75rem" }}>
+              Functional / Accounting Currency Financial Statements ({functionalCurrency})
+            </h4>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem" }}>
+              {/* Balance Sheet Card */}
+              <div style={{ padding: "1.5rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <h4>Balance Sheet ({functionalCurrency})</h4>
+                  <span style={{
+                    padding: "0.25rem 0.5rem",
+                    borderRadius: "4px",
+                    fontSize: "0.75rem",
+                    fontWeight: 600,
+                    background: financialSummary.isBalanced ? "#dcfce7" : "#fee2e2",
+                    color: financialSummary.isBalanced ? "#166534" : "#991b1b",
+                  }}>
+                    {financialSummary.isBalanced ? "✓ Equation Balanced" : "⚠ Variance Detected"}
+                  </span>
+                </div>
+                <div style={{ marginTop: "1rem", fontSize: "0.9rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0" }}>
+                    <span>Total Assets</span>
+                    <strong>{fmt(financialSummary.totalAssets)}</strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0" }}>
+                    <span>Total Liabilities</span>
+                    <strong>{fmt(financialSummary.totalLiabilities)}</strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0" }}>
+                    <span>Owner's Equity</span>
+                    <strong>{fmt(financialSummary.totalEquity)}</strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0", color: "#0284c7" }}>
+                    <span>Current Period Net Income</span>
+                    <strong>{fmt(financialSummary.netIncome)}</strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "0.5rem 0", borderTop: "2px solid #cbd5e1", marginTop: "0.5rem" }}>
+                    <span>Total Liabilities & Equity</span>
+                    <strong>{fmt(financialSummary.totalLiabilities + financialSummary.totalEquity + financialSummary.netIncome)}</strong>
+                  </div>
+                </div>
               </div>
-              <div style={{ marginTop: "1rem", fontSize: "0.9rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0" }}>
-                  <span>Total Assets</span>
-                  <strong>{formatCurrencyPkr(financialSummary.totalAssets)}</strong>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0" }}>
-                  <span>Total Liabilities</span>
-                  <strong>{formatCurrencyPkr(financialSummary.totalLiabilities)}</strong>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0" }}>
-                  <span>Owner's Equity</span>
-                  <strong>{formatCurrencyPkr(financialSummary.totalEquity)}</strong>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0", color: "#0284c7" }}>
-                  <span>Current Period Net Income</span>
-                  <strong>{formatCurrencyPkr(financialSummary.netIncome)}</strong>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", padding: "0.5rem 0", borderTop: "2px solid #cbd5e1", marginTop: "0.5rem" }}>
-                  <span>Total Liabilities & Equity</span>
-                  <strong>{formatCurrencyPkr(financialSummary.totalLiabilities + financialSummary.totalEquity + financialSummary.netIncome)}</strong>
-                </div>
-              </div>
-            </div>
 
-            {/* Income Statement Card */}
-            <div style={{ padding: "1.5rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-              <h4>Income Statement (P&L)</h4>
-              <div style={{ marginTop: "1rem", fontSize: "0.9rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0", color: "#16a34a" }}>
-                  <span>Operating Revenue</span>
-                  <strong>{formatCurrencyPkr(financialSummary.totalRevenue)}</strong>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0", color: "#dc2626" }}>
-                  <span>Total Expenses & COGS</span>
-                  <strong>{formatCurrencyPkr(financialSummary.totalExpenses)}</strong>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", padding: "0.5rem 0", borderTop: "2px solid #cbd5e1", marginTop: "1.5rem" }}>
-                  <span style={{ fontWeight: 600 }}>Net Profit / (Loss)</span>
-                  <strong style={{ fontSize: "1.1rem", color: financialSummary.netIncome >= 0 ? "#16a34a" : "#dc2626" }}>
-                    {formatCurrencyPkr(financialSummary.netIncome)}
-                  </strong>
+              {/* Income Statement Card */}
+              <div style={{ padding: "1.5rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
+                <h4>Income Statement (P&L · {functionalCurrency})</h4>
+                <div style={{ marginTop: "1rem", fontSize: "0.9rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0", color: "#16a34a" }}>
+                    <span>Operating Revenue</span>
+                    <strong>{fmt(financialSummary.totalRevenue)}</strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "0.3rem 0", color: "#dc2626" }}>
+                    <span>Total Expenses & COGS</span>
+                    <strong>{fmt(financialSummary.totalExpenses)}</strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "0.5rem 0", borderTop: "2px solid #cbd5e1", marginTop: "1.5rem" }}>
+                    <span style={{ fontWeight: 600 }}>Net Profit / (Loss)</span>
+                    <strong style={{ fontSize: "1.1rem", color: financialSummary.netIncome >= 0 ? "#16a34a" : "#dc2626" }}>
+                      {fmt(financialSummary.netIncome)}
+                    </strong>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
 
-          <h4>Trial Balance Detail</h4>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.875rem" }}>
-            <thead>
-              <tr style={{ borderBottom: "2px solid #e2e8f0", textAlign: "left" }}>
-                <th style={{ padding: "0.5rem" }}>Account</th>
-                <th style={{ padding: "0.5rem" }}>Name</th>
-                <th style={{ padding: "0.5rem" }}>Type</th>
-                <th style={{ padding: "0.5rem", textAlign: "right" }}>Debits</th>
-                <th style={{ padding: "0.5rem", textAlign: "right" }}>Credits</th>
-                <th style={{ padding: "0.5rem", textAlign: "right" }}>Net Balance</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trialBalance.map((r) => (
-                <tr key={r.accountId} style={{ borderBottom: "1px solid #e2e8f0" }}>
-                  <td style={{ padding: "0.5rem", fontWeight: 600 }}>{r.accountCode}</td>
-                  <td style={{ padding: "0.5rem" }}>{r.accountName}</td>
-                  <td style={{ padding: "0.5rem" }}>{r.accountType}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{formatCurrencyPkr(r.totalDebit)}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right" }}>{formatCurrencyPkr(r.totalCredit)}</td>
-                  <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600 }}>{formatCurrencyPkr(r.netBalance)}</td>
+          {/* Presentation Currency Financial Statements (IAS 21) */}
+          <div style={{ padding: "1.5rem", background: "#ffffff", borderRadius: "8px", border: "1px solid #cbd5e1" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.75rem", marginBottom: "1rem" }}>
+              <div>
+                <h4 style={{ margin: 0 }}>
+                  Presentation Currency Reports ({presentationStatements?.presentationCurrencyCode || workspace?.presentationCurrencyCode || workspace?.functionalCurrencyCode || workspace?.baseCurrencyCode || "PKR"}) · IAS 21 Translation
+                </h4>
+                <p style={{ margin: "4px 0 0 0", fontSize: "0.8rem", color: "#475569" }}>
+                  Assets & Liabilities use Closing Rate; Income & Expenses use Transaction-date (or explicit Average) Rate; Equity uses Historical Transaction Rate; translation differences post to OCI.
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                <input
+                  type="date"
+                  value={presentationAsOfDate}
+                  onChange={(e) => setPresentationAsOfDate(e.target.value)}
+                  style={{ padding: "0.35rem 0.5rem", borderRadius: "4px", border: "1px solid #cbd5e1" }}
+                />
+                <select
+                  value={presentationIncomeRateMethod}
+                  onChange={(e) => setPresentationIncomeRateMethod(e.target.value as "transaction" | "average")}
+                  style={{ padding: "0.35rem 0.5rem", borderRadius: "4px", border: "1px solid #cbd5e1" }}
+                >
+                  <option value="transaction">Transaction-date P&L Rate</option>
+                  <option value="average">Average Period P&L Rate</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => void loadPresentationStatements(presentationAsOfDate, presentationIncomeRateMethod)}
+                  style={{ padding: "0.35rem 0.75rem" }}
+                >
+                  Refresh Translation
+                </button>
+              </div>
+            </div>
+
+            {presentationError && (
+              <p style={{ color: "#991b1b", background: "#fef2f2", padding: "0.75rem", borderRadius: "6px" }}>
+                {presentationError}
+              </p>
+            )}
+
+            {presentationStatements && (
+              <>
+                <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem", fontSize: "0.8rem" }}>
+                  <span style={{ padding: "0.25rem 0.6rem", borderRadius: "4px", background: "#f1f5f9" }}>
+                    <strong>Status:</strong> {presentationStatements.translationStatus}
+                  </span>
+                  <span style={{ padding: "0.25rem 0.6rem", borderRadius: "4px", background: "#f1f5f9" }}>
+                    <strong>Closing Rate:</strong>{" "}
+                    {presentationStatements.closingRate
+                      ? `${presentationStatements.closingRate} (${presentationStatements.closingRateDirection} · ${presentationStatements.closingRateEffectiveDate} · ${presentationStatements.closingRateSource})`
+                      : "Unavailable"}
+                  </span>
+                </div>
+
+                {presentationStatements.missingRates.length > 0 && (
+                  <div style={{ background: "#fffbeb", border: "1px solid #f59e0b", borderRadius: "6px", padding: "0.75rem 1rem", marginBottom: "1rem", fontSize: "0.85rem", color: "#92400e" }}>
+                    <strong>Presentation Translation Unavailable for Missing Rates (No 1.0 Fallback Applied):</strong>
+                    <ul style={{ margin: "0.4rem 0 0 1.2rem" }}>
+                      {presentationStatements.missingRates.map((m, i) => (
+                        <li key={i}>
+                          [{m.rateType}] {m.currencyPair} on {m.requiredDate} ({m.requiredFor}): {m.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem", marginBottom: "1rem" }}>
+                  <div style={{ padding: "1rem", background: "#f8fafc", borderRadius: "6px", border: "1px solid #e2e8f0", fontSize: "0.875rem" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                      <strong>Translated Balance Sheet ({presentationStatements.presentationCurrencyCode})</strong>
+                      <span style={{
+                        padding: "0.15rem 0.45rem",
+                        borderRadius: "4px",
+                        fontSize: "0.72rem",
+                        background: presentationStatements.isBalanceSheetBalancedPresentation ? "#dcfce7" : "#fef3c7",
+                        color: presentationStatements.isBalanceSheetBalancedPresentation ? "#166534" : "#92400e",
+                      }}>
+                        {presentationStatements.translationStatus.startsWith("UNAVAILABLE")
+                          ? "Unavailable (Missing Rate)"
+                          : presentationStatements.isBalanceSheetBalancedPresentation
+                          ? "✓ Balanced with OCI"
+                          : "Check OCI / Variance"}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.25rem 0" }}>
+                      <span>Total Assets</span>
+                      <strong>{fmt(presentationStatements.totalAssetsPresentation, presentationStatements.presentationCurrencyCode)}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.25rem 0" }}>
+                      <span>Total Liabilities</span>
+                      <strong>{fmt(presentationStatements.totalLiabilitiesPresentation, presentationStatements.presentationCurrencyCode)}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.25rem 0" }}>
+                      <span>Equity (Historical Rate, pre-OCI)</span>
+                      <strong>{fmt(presentationStatements.equityBeforeOciPresentation, presentationStatements.presentationCurrencyCode)}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.25rem 0" }}>
+                      <span>Translated Net Income</span>
+                      <strong>{fmt(presentationStatements.netIncomePresentation, presentationStatements.presentationCurrencyCode)}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.25rem 0", color: "#0369a1" }}>
+                      <span>OCI — Foreign Currency Translation Difference</span>
+                      <strong>{fmt(presentationStatements.translationDifferenceOciPresentation, presentationStatements.presentationCurrencyCode)}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.4rem 0", borderTop: "1px solid #cbd5e1", marginTop: "0.4rem" }}>
+                      <span>Total Liabilities, Equity & OCI</span>
+                      <strong>{fmt(presentationStatements.totalLiabilitiesAndEquityIncludingOciPresentation, presentationStatements.presentationCurrencyCode)}</strong>
+                    </div>
+                  </div>
+
+                  <div style={{ padding: "1rem", background: "#f8fafc", borderRadius: "6px", border: "1px solid #e2e8f0", fontSize: "0.875rem" }}>
+                    <strong style={{ display: "block", marginBottom: "0.5rem" }}>
+                      Translated Income Statement ({presentationStatements.presentationCurrencyCode})
+                    </strong>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.25rem 0" }}>
+                      <span>Revenue ({fmt(presentationStatements.totalRevenueFunctional)})</span>
+                      <strong>{fmt(presentationStatements.totalRevenuePresentation, presentationStatements.presentationCurrencyCode)}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.25rem 0" }}>
+                      <span>Cost of Sales ({fmt(presentationStatements.totalCostOfSalesFunctional)})</span>
+                      <strong>{fmt(presentationStatements.totalCostOfSalesPresentation, presentationStatements.presentationCurrencyCode)}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.25rem 0" }}>
+                      <span>Operating Expenses ({fmt(presentationStatements.totalOperatingExpensesFunctional)})</span>
+                      <strong>{fmt(presentationStatements.totalOperatingExpensesPresentation, presentationStatements.presentationCurrencyCode)}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.4rem 0", borderTop: "1px solid #cbd5e1", marginTop: "0.4rem" }}>
+                      <span>Translated Net Income</span>
+                      <strong>{fmt(presentationStatements.netIncomePresentation, presentationStatements.presentationCurrencyCode)}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                {(presentationStatements.balanceSheetLines.length > 0 || presentationStatements.incomeStatementLines.length > 0) && (
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
+                    <thead>
+                      <tr style={{ background: "#f1f5f9", textAlign: "left" }}>
+                        <th style={{ padding: "0.4rem" }}>Account</th>
+                        <th style={{ padding: "0.4rem" }}>Type</th>
+                        <th style={{ padding: "0.4rem", textAlign: "right" }}>Functional ({presentationStatements.functionalCurrencyCode})</th>
+                        <th style={{ padding: "0.4rem" }}>IAS 21 Rule</th>
+                        <th style={{ padding: "0.4rem", textAlign: "right" }}>Applied Rate</th>
+                        <th style={{ padding: "0.4rem", textAlign: "right" }}>Presentation ({presentationStatements.presentationCurrencyCode})</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...presentationStatements.balanceSheetLines, ...presentationStatements.incomeStatementLines].map((line, i) => (
+                        <tr key={`${line.accountCode}-${i}`} style={{ borderBottom: "1px solid #e2e8f0" }}>
+                          <td style={{ padding: "0.4rem" }}>{line.accountCode} — {line.accountName}</td>
+                          <td style={{ padding: "0.4rem" }}>{line.accountType}</td>
+                          <td style={{ padding: "0.4rem", textAlign: "right" }}>{fmt(line.functionalBalance, presentationStatements.functionalCurrencyCode)}</td>
+                          <td style={{ padding: "0.4rem" }}>{line.rateTypeUsed}</td>
+                          <td style={{ padding: "0.4rem", textAlign: "right" }}>{line.appliedRate ?? "Unavailable"}</td>
+                          <td style={{ padding: "0.4rem", textAlign: "right", fontWeight: 600 }}>
+                            {line.presentationBalance !== null && line.presentationBalance !== undefined
+                              ? fmt(line.presentationBalance, presentationStatements.presentationCurrencyCode)
+                              : "Unavailable"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </>
+            )}
+          </div>
+
+          <div>
+            <h4>Trial Balance Detail ({functionalCurrency})</h4>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.875rem" }}>
+              <thead>
+                <tr style={{ borderBottom: "2px solid #e2e8f0", textAlign: "left" }}>
+                  <th style={{ padding: "0.5rem" }}>Account</th>
+                  <th style={{ padding: "0.5rem" }}>Name</th>
+                  <th style={{ padding: "0.5rem" }}>Type</th>
+                  <th style={{ padding: "0.5rem", textAlign: "right" }}>Debits</th>
+                  <th style={{ padding: "0.5rem", textAlign: "right" }}>Credits</th>
+                  <th style={{ padding: "0.5rem", textAlign: "right" }}>Net Balance</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {trialBalance.map((r) => (
+                  <tr key={r.accountId} style={{ borderBottom: "1px solid #e2e8f0" }}>
+                    <td style={{ padding: "0.5rem", fontWeight: 600 }}>{r.accountCode}</td>
+                    <td style={{ padding: "0.5rem" }}>{r.accountName}</td>
+                    <td style={{ padding: "0.5rem" }}>{r.accountType}</td>
+                    <td style={{ padding: "0.5rem", textAlign: "right" }}>{fmt(r.totalDebit)}</td>
+                    <td style={{ padding: "0.5rem", textAlign: "right" }}>{fmt(r.totalCredit)}</td>
+                    <td style={{ padding: "0.5rem", textAlign: "right", fontWeight: 600 }}>{fmt(r.netBalance)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
@@ -2013,11 +2326,11 @@ export default function FinanceWorkspace({ enabled, workspace }: Props) {
               </div>
               <div style={{ padding: "1rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
                 <span style={{ fontSize: "0.75rem", color: "#64748b" }}>Total Cash & Bank</span>
-                <h4>{formatCurrencyPkr(dashboard.totalCashAndBankBalances)}</h4>
+                <h4>{fmt(dashboard.totalCashAndBankBalances)}</h4>
               </div>
               <div style={{ padding: "1rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
                 <span style={{ fontSize: "0.75rem", color: "#64748b" }}>Fixed Asset Book Value</span>
-                <h4>{formatCurrencyPkr(dashboard.totalFixedAssetBookValue)}</h4>
+                <h4>{fmt(dashboard.totalFixedAssetBookValue)}</h4>
               </div>
               <div style={{ padding: "1rem", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
                 <span style={{ fontSize: "0.75rem", color: "#64748b" }}>Open Fiscal Periods</span>

@@ -98,6 +98,17 @@ export function computeFinancialStatementSummary(rows: TrialBalanceItem[]): Fina
   };
 }
 
+export function formatMoney(amount: number | null | undefined, currencyCode: string = "PKR"): string {
+  if (amount === null || amount === undefined || Number.isNaN(Number(amount))) {
+    return "Unavailable";
+  }
+  const normalized = (currencyCode || "PKR").trim().toUpperCase();
+  return `${normalized} ${Number(amount).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 export function formatCurrencyPkr(amount: number): string {
   return "PKR " + Number(amount || 0).toLocaleString("en-PK", {
     minimumFractionDigits: 2,

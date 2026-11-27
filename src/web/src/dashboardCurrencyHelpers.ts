@@ -25,6 +25,14 @@ export interface ValuationReportResponse {
   totalValuationPkr?: number | null;
   generalLedger1200BalancePkr?: number | null;
   reconciliationVariancePkr?: number | null;
+  presentationCurrencyCode?: string | null;
+  presentationValuation?: number | null;
+  generalLedger1200PresentationBalance?: number | null;
+  presentationAppliedExchangeRate?: number | null;
+  presentationExchangeRateEffectiveDate?: string | null;
+  presentationExchangeRateType?: string | null;
+  presentationStatus?: string | null;
+  presentationIssue?: string | null;
 }
 
 export interface TrialBalanceRowSummary {
@@ -55,6 +63,14 @@ export interface ResolvedDashboardCurrencyState {
   sourceValuationBalancesText: string | null;
   unresolvedCurrencyIssue: string | null;
   trialBalanceBalanced: boolean | null;
+  presentationCurrencyCode?: string | null;
+  presentationValuation?: number | null;
+  presentationGl1200Balance?: number | null;
+  presentationAppliedExchangeRate?: number | null;
+  presentationExchangeRateEffectiveDate?: string | null;
+  presentationExchangeRateType?: string | null;
+  presentationStatus?: string | null;
+  presentationIssue?: string | null;
 }
 
 export function formatMoneyWithCurrency(
@@ -199,6 +215,18 @@ export function resolveDashboardCurrencyState(
 
     const isBalanced = !isCurrencyUnresolved && functionalVariance !== null && functionalVariance === 0;
     const hasDiscrepancy = !isCurrencyUnresolved && functionalVariance !== null && functionalVariance > 0;
+    const presentationCurrencyCode = valData.presentationCurrencyCode?.trim().toUpperCase() || null;
+    const presentationStatus = valData.presentationStatus?.trim().toUpperCase() || null;
+    const presentationAppliedExchangeRate = toFiniteNumberOrNull(valData.presentationAppliedExchangeRate);
+    const isTranslated =
+      presentationStatus === "SAME_CURRENCY" ||
+      Boolean(presentationStatus && presentationStatus.startsWith("TRANSLATED"));
+    const presentationValuation = isTranslated
+      ? toFiniteNumberOrNull(valData.presentationValuation)
+      : null;
+    const presentationGl1200Balance = isTranslated
+      ? toFiniteNumberOrNull(valData.generalLedger1200PresentationBalance)
+      : null;
 
     return {
       companyBaseCurrency: effectiveBaseCurrency,
@@ -217,6 +245,14 @@ export function resolveDashboardCurrencyState(
       sourceValuationBalancesText,
       unresolvedCurrencyIssue: valData.unresolvedCurrencyIssue ?? null,
       trialBalanceBalanced,
+      presentationCurrencyCode,
+      presentationValuation,
+      presentationGl1200Balance,
+      presentationAppliedExchangeRate,
+      presentationExchangeRateEffectiveDate: valData.presentationExchangeRateEffectiveDate ?? null,
+      presentationExchangeRateType: valData.presentationExchangeRateType ?? null,
+      presentationStatus,
+      presentationIssue: valData.presentationIssue ?? null,
     };
   }
 

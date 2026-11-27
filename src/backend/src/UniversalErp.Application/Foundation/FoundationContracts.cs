@@ -37,13 +37,53 @@ public sealed record CompanySettingsResponse(
     string Timezone,
     int FiscalYearStartMonth,
     string Status,
-    DateTimeOffset? UpdatedAt);
+    DateTimeOffset? UpdatedAt,
+    string? BaseCurrencyCode = null,
+    string? FunctionalCurrencyCode = null,
+    string? PresentationCurrencyCode = null,
+    DateOnly? CurrencyEffectiveDate = null,
+    bool HasPostedTransactions = false);
 
 public sealed record UpdateCompanySettingsCommand(
     string? Name,
     string? LegalName,
     string? RegistrationNumber,
     string? Timezone);
+
+public sealed record CompanyCurrencySettingsResponse(
+    Guid CompanyId,
+    Guid TenantId,
+    string CompanyCode,
+    string CompanyName,
+    string FunctionalCurrencyCode,
+    string PresentationCurrencyCode,
+    DateOnly CurrencyEffectiveDate,
+    bool HasPostedTransactions,
+    DateTimeOffset? UpdatedAt,
+    string FunctionalCurrencyGuidance,
+    string PresentationCurrencyGuidance);
+
+public sealed record UpdateCompanyCurrencySettingsCommand(
+    string FunctionalCurrencyCode,
+    string PresentationCurrencyCode,
+    DateOnly EffectiveDate,
+    bool ConfirmFutureTransactions,
+    string? ChangeReason = null);
+
+public sealed record CompanyCurrencyHistoryItem(
+    Guid HistoryId,
+    string PreviousFunctionalCurrency,
+    string NewFunctionalCurrency,
+    string PreviousPresentationCurrency,
+    string NewPresentationCurrency,
+    DateOnly PreviousEffectiveDate,
+    DateOnly NewEffectiveDate,
+    bool ConfirmedFutureTransactions,
+    string? ChangeReason,
+    Guid ChangedByUserId,
+    string? ChangedByEmail,
+    string? ChangedByName,
+    DateTimeOffset ChangedAt);
 
 public sealed record CompanyUserSummary(
     Guid UserId,
@@ -85,6 +125,8 @@ public interface IFoundationRepository
     Task<UserProfileResponse?> GetUserProfileAsync(Guid tenantId, Guid companyId, Guid userId, CancellationToken ct = default);
     Task<CompanySettingsResponse?> GetCompanySettingsAsync(Guid tenantId, Guid companyId, CancellationToken ct = default);
     Task<CompanySettingsResponse?> UpdateCompanySettingsAsync(Guid tenantId, Guid companyId, UpdateCompanySettingsCommand command, CancellationToken ct = default);
+    Task<CompanyCurrencySettingsResponse?> UpdateCompanyCurrencySettingsAsync(Guid tenantId, Guid companyId, Guid actorUserId, UpdateCompanyCurrencySettingsCommand command, CancellationToken ct = default);
+    Task<IReadOnlyList<CompanyCurrencyHistoryItem>> ListCompanyCurrencyHistoryAsync(Guid tenantId, Guid companyId, int limit = 50, CancellationToken ct = default);
     Task<IReadOnlyList<CompanyUserSummary>> ListCompanyUsersAsync(Guid tenantId, Guid companyId, CancellationToken ct = default);
     Task<CompanyUserSummary?> InviteCompanyUserAsync(Guid tenantId, Guid companyId, InviteCompanyUserCommand command, CancellationToken ct = default);
     Task<IReadOnlyList<RoleDetail>> ListRolesAndPermissionsAsync(Guid tenantId, CancellationToken ct = default);

@@ -1,6 +1,7 @@
 using Npgsql;
 using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Sales;
+using UniversalErp.Infrastructure.Finance;
 
 namespace UniversalErp.Infrastructure.Sales;
 
@@ -152,6 +153,8 @@ public sealed partial class PostgresSalesRepository
         }
 
         var total = subtotal - discount + tax;
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var quotationId = Guid.NewGuid();
         var qDate = request.QuotationDate?.ToDateTime(TimeOnly.MinValue) ?? DateTime.UtcNow.Date;
         var validUntil = request.ValidUntil?.ToDateTime(TimeOnly.MinValue) ?? qDate.AddDays(15);
@@ -163,7 +166,7 @@ public sealed partial class PostgresSalesRepository
                  discount_amount, total_amount, note, created_by)
             VALUES
                 (@tid, @cid, @qid, @qno, @cust, @wh,
-                 @qdate, @vdate, 'draft', 'PKR', @sub, @tax,
+                 @qdate, @vdate, 'draft', @cur, @sub, @tax,
                  @disc, @tot, @note, @by);
             """;
         cmd.Parameters.AddWithValue("tid", Ctx.TenantId);
@@ -174,6 +177,7 @@ public sealed partial class PostgresSalesRepository
         cmd.Parameters.AddWithValue("wh", request.WarehouseId);
         cmd.Parameters.AddWithValue("qdate", qDate);
         cmd.Parameters.AddWithValue("vdate", validUntil);
+        cmd.Parameters.AddWithValue("cur", functionalCurrency);
         cmd.Parameters.AddWithValue("sub", subtotal);
         cmd.Parameters.AddWithValue("tax", tax);
         cmd.Parameters.AddWithValue("disc", discount);
@@ -262,6 +266,9 @@ public sealed partial class PostgresSalesRepository
 
         var orderId = Guid.NewGuid();
         var orderDate = request.OrderDate?.ToDateTime(TimeOnly.MinValue) ?? DateTime.UtcNow.Date;
+        var functionalCurrency = !string.IsNullOrWhiteSpace(quotation.CurrencyCode)
+            ? quotation.CurrencyCode
+            : await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
 
         cmd.CommandText = """
             INSERT INTO erp_sales.sales_order
@@ -270,7 +277,7 @@ public sealed partial class PostgresSalesRepository
                  discount_amount, total_amount, note, quotation_id, created_by)
             VALUES
                 (@tid, @cid, @oid, @ono, @cust, @wh,
-                 @type, 'draft', 'PKR', @odate, @sub, @tax,
+                 @type, 'draft', @cur, @odate, @sub, @tax,
                  @disc, @tot, @note, @qid, @by);
             """;
         cmd.Parameters.AddWithValue("tid", Ctx.TenantId);
@@ -280,6 +287,7 @@ public sealed partial class PostgresSalesRepository
         cmd.Parameters.AddWithValue("cust", quotation.CustomerId);
         cmd.Parameters.AddWithValue("wh", quotation.WarehouseId);
         cmd.Parameters.AddWithValue("type", request.OrderType);
+        cmd.Parameters.AddWithValue("cur", functionalCurrency);
         cmd.Parameters.AddWithValue("odate", orderDate);
         cmd.Parameters.AddWithValue("sub", quotation.SubtotalAmount);
         cmd.Parameters.AddWithValue("tax", quotation.TaxAmount);
@@ -631,6 +639,8 @@ public sealed partial class PostgresSalesRepository
         await SetRls(cmd, Ctx);
 
         // 1. Stock sufficiency verification & FIFO Cost Layer Allocation
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var movementId = Guid.NewGuid();
         var clientTxId = Guid.NewGuid();
         var totalCost = 0m;
@@ -738,7 +748,7 @@ public sealed partial class PostgresSalesRepository
                     VALUES
                         (@tid, @cid, @allocId, @layerId, @movId,
                          'sales_dispatch', @did, @ln,
-                         @var, @qty, @cost, @extCost, 'PKR');
+                         @var, @qty, @cost, @extCost, @cur);
                     """;
                 insAlloc.Parameters.AddWithValue("tid", Ctx.TenantId);
                 insAlloc.Parameters.AddWithValue("cid", Ctx.CompanyId);
@@ -751,6 +761,7 @@ public sealed partial class PostgresSalesRepository
                 insAlloc.Parameters.AddWithValue("qty", alloc.ConsumedQty);
                 insAlloc.Parameters.AddWithValue("cost", alloc.UnitCost);
                 insAlloc.Parameters.AddWithValue("extCost", alloc.ExtendedCost);
+                insAlloc.Parameters.AddWithValue("cur", functionalCurrency);
                 await insAlloc.ExecuteNonQueryAsync(ct);
             }
 
@@ -763,7 +774,7 @@ public sealed partial class PostgresSalesRepository
                      entry_type, quantity, unit_cost, extended_cost, currency_code, posted_at)
                 VALUES
                     (@tid, @cid, @valId, @movId, @var,
-                     'issue_cost', @qty, @unitCost, @extCost, 'PKR', now());
+                     'issue_cost', @qty, @unitCost, @extCost, @cur, now());
                 """;
             valCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
             valCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
@@ -773,6 +784,7 @@ public sealed partial class PostgresSalesRepository
             valCmd.Parameters.AddWithValue("qty", -l.DispatchedQty);
             valCmd.Parameters.AddWithValue("unitCost", lineUnitCost);
             valCmd.Parameters.AddWithValue("extCost", -allocationResult.TotalCost);
+            valCmd.Parameters.AddWithValue("cur", functionalCurrency);
             await valCmd.ExecuteNonQueryAsync(ct);
 
             // Movement leg & decrement stock_balance
@@ -899,7 +911,7 @@ public sealed partial class PostgresSalesRepository
                          idempotency_key, status, created_by, posted_by, posted_at)
                     VALUES
                         (@id, @tid, @cid, @no, @date, @pid,
-                         @desc, 'PKR', 'sales', 'sales_dispatch', @sid,
+                         @desc, @funcCurr, 'sales', 'sales_dispatch', @sid,
                          @key, 'posted', @by, @by, now())
                     ON CONFLICT (tenant_id, company_id, idempotency_key) DO NOTHING;
                     """;
@@ -910,6 +922,7 @@ public sealed partial class PostgresSalesRepository
                 jourCmd.Parameters.AddWithValue("date", dispatch.DispatchDate.ToDateTime(TimeOnly.MinValue));
                 jourCmd.Parameters.AddWithValue("pid", activePeriodId);
                 jourCmd.Parameters.AddWithValue("desc", $"COGS for Dispatch {dispatch.DispatchNumber}");
+                jourCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
                 jourCmd.Parameters.AddWithValue("sid", dispatchId.ToString());
                 jourCmd.Parameters.AddWithValue("key", idempotencyKey);
                 jourCmd.Parameters.AddWithValue("by", dispatchedBy == Guid.Empty ? Ctx.UserId : dispatchedBy);
@@ -920,8 +933,8 @@ public sealed partial class PostgresSalesRepository
             await using (var l1 = conn.CreateCommand())
             {
                 l1.Transaction = tx;
-                l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, 'Cost of Goods Sold', 'PKR', @amt, 1.0, @amt, 0);";
-                l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", cogsAccount); l1.Parameters.AddWithValue("amt", totalCost);
+                l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, 'Cost of Goods Sold', @cur, @amt, 1.0, @amt, 0);";
+                l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", cogsAccount); l1.Parameters.AddWithValue("cur", functionalCurrency); l1.Parameters.AddWithValue("amt", totalCost);
                 await l1.ExecuteNonQueryAsync(ct);
             }
 
@@ -929,8 +942,8 @@ public sealed partial class PostgresSalesRepository
             await using (var l2 = conn.CreateCommand())
             {
                 l2.Transaction = tx;
-                l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, 'Inventory Asset Relief', 'PKR', @amt, 1.0, 0, @amt);";
-                l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", journalId); l2.Parameters.AddWithValue("aid", invAccount); l2.Parameters.AddWithValue("amt", totalCost);
+                l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, 'Inventory Asset Relief', @cur, @amt, 1.0, 0, @amt);";
+                l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", journalId); l2.Parameters.AddWithValue("aid", invAccount); l2.Parameters.AddWithValue("cur", functionalCurrency); l2.Parameters.AddWithValue("amt", totalCost);
                 await l2.ExecuteNonQueryAsync(ct);
             }
 
@@ -1145,6 +1158,8 @@ public sealed partial class PostgresSalesRepository
             activePeriodId = pid;
         }
 
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var journalId = Guid.NewGuid();
         var journalNo = $"JRN-INV-{req.InvoiceNumber}";
         var idempotencyKey = $"sales-inv-rev-{invoiceId:N}";
@@ -1159,7 +1174,7 @@ public sealed partial class PostgresSalesRepository
                      idempotency_key, status, created_by, posted_by, posted_at)
                 VALUES
                     (@id, @tid, @cid, @no, @date, @pid,
-                     @desc, 'PKR', 'sales', 'sales_invoice', @sid,
+                     @desc, @funcCurr, 'sales', 'sales_invoice', @sid,
                      @key, 'posted', @by, @by, now())
                 ON CONFLICT (tenant_id, company_id, idempotency_key) DO NOTHING;
                 """;
@@ -1170,6 +1185,7 @@ public sealed partial class PostgresSalesRepository
             jourCmd.Parameters.AddWithValue("date", invDate);
             jourCmd.Parameters.AddWithValue("pid", activePeriodId);
             jourCmd.Parameters.AddWithValue("desc", $"Sales Revenue for Invoice {req.InvoiceNumber}");
+            jourCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             jourCmd.Parameters.AddWithValue("sid", invoiceId.ToString());
             jourCmd.Parameters.AddWithValue("key", idempotencyKey);
             jourCmd.Parameters.AddWithValue("by", createdBy == Guid.Empty ? Ctx.UserId : createdBy);
@@ -1180,8 +1196,8 @@ public sealed partial class PostgresSalesRepository
         await using (var l1 = conn.CreateCommand())
         {
             l1.Transaction = tx;
-            l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, 'Accounts Receivable / Cash', 'PKR', @amt, 1.0, @amt, 0);";
-            l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", debitAccountId); l1.Parameters.AddWithValue("amt", total);
+            l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, 'Accounts Receivable / Cash', @cur, @amt, 1.0, @amt, 0);";
+            l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", debitAccountId); l1.Parameters.AddWithValue("cur", functionalCurrency); l1.Parameters.AddWithValue("amt", total);
             await l1.ExecuteNonQueryAsync(ct);
         }
 
@@ -1190,8 +1206,8 @@ public sealed partial class PostgresSalesRepository
         await using (var l2 = conn.CreateCommand())
         {
             l2.Transaction = tx;
-            l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, 'Sales Revenue', 'PKR', @amt, 1.0, 0, @amt);";
-            l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", journalId); l2.Parameters.AddWithValue("aid", salesRevenueAccount); l2.Parameters.AddWithValue("amt", netRevenue);
+            l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, 'Sales Revenue', @cur, @amt, 1.0, 0, @amt);";
+            l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", journalId); l2.Parameters.AddWithValue("aid", salesRevenueAccount); l2.Parameters.AddWithValue("cur", functionalCurrency); l2.Parameters.AddWithValue("amt", netRevenue);
             await l2.ExecuteNonQueryAsync(ct);
         }
 
@@ -1200,8 +1216,8 @@ public sealed partial class PostgresSalesRepository
         {
             await using var l3 = conn.CreateCommand();
             l3.Transaction = tx;
-            l3.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 3, @aid, 'Sales Tax Output', 'PKR', @amt, 1.0, 0, @amt);";
-            l3.Parameters.AddWithValue("tid", Ctx.TenantId); l3.Parameters.AddWithValue("cid", Ctx.CompanyId); l3.Parameters.AddWithValue("jid", journalId); l3.Parameters.AddWithValue("aid", salesTaxAccount); l3.Parameters.AddWithValue("amt", tax);
+            l3.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 3, @aid, 'Sales Tax Output', @cur, @amt, 1.0, 0, @amt);";
+            l3.Parameters.AddWithValue("tid", Ctx.TenantId); l3.Parameters.AddWithValue("cid", Ctx.CompanyId); l3.Parameters.AddWithValue("jid", journalId); l3.Parameters.AddWithValue("aid", salesTaxAccount); l3.Parameters.AddWithValue("cur", functionalCurrency); l3.Parameters.AddWithValue("amt", tax);
             await l3.ExecuteNonQueryAsync(ct);
         }
 
@@ -1442,6 +1458,8 @@ public sealed partial class PostgresSalesRepository
             activePeriodId = pid;
         }
 
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var journalId = Guid.NewGuid();
         var journalNo = $"JRN-RCPT-{request.ReceiptNumber}";
         var idempotencyKey = $"customer-receipt-{receiptId:N}";
@@ -1456,7 +1474,7 @@ public sealed partial class PostgresSalesRepository
                      idempotency_key, status, created_by, posted_by, posted_at)
                 VALUES
                     (@id, @tid, @cid, @no, @date, @pid,
-                     @desc, 'PKR', 'sales', 'customer_receipt', @sid,
+                     @desc, @funcCurr, 'sales', 'customer_receipt', @sid,
                      @key, 'posted', @by, @by, now())
                 ON CONFLICT (tenant_id, company_id, idempotency_key) DO NOTHING;
                 """;
@@ -1467,6 +1485,7 @@ public sealed partial class PostgresSalesRepository
             jourCmd.Parameters.AddWithValue("date", rDate);
             jourCmd.Parameters.AddWithValue("pid", activePeriodId);
             jourCmd.Parameters.AddWithValue("desc", $"Customer Payment Receipt {request.ReceiptNumber}");
+            jourCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             jourCmd.Parameters.AddWithValue("sid", receiptId.ToString());
             jourCmd.Parameters.AddWithValue("key", idempotencyKey);
             jourCmd.Parameters.AddWithValue("by", receivedBy == Guid.Empty ? Ctx.UserId : receivedBy);
@@ -1477,8 +1496,8 @@ public sealed partial class PostgresSalesRepository
         await using (var l1 = conn.CreateCommand())
         {
             l1.Transaction = tx;
-            l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, 'Cash / Bank Receipt', 'PKR', @amt, 1.0, @amt, 0);";
-            l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", debitAccountId); l1.Parameters.AddWithValue("amt", request.Amount);
+            l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, 'Cash / Bank Receipt', @cur, @amt, 1.0, @amt, 0);";
+            l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", debitAccountId); l1.Parameters.AddWithValue("cur", functionalCurrency); l1.Parameters.AddWithValue("amt", request.Amount);
             await l1.ExecuteNonQueryAsync(ct);
         }
 
@@ -1486,8 +1505,8 @@ public sealed partial class PostgresSalesRepository
         await using (var l2 = conn.CreateCommand())
         {
             l2.Transaction = tx;
-            l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, 'Customer Account Receivable Credit', 'PKR', @amt, 1.0, 0, @amt);";
-            l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", journalId); l2.Parameters.AddWithValue("aid", arAccount); l2.Parameters.AddWithValue("amt", request.Amount);
+            l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, 'Customer Account Receivable Credit', @cur, @amt, 1.0, 0, @amt);";
+            l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", journalId); l2.Parameters.AddWithValue("aid", arAccount); l2.Parameters.AddWithValue("cur", functionalCurrency); l2.Parameters.AddWithValue("amt", request.Amount);
             await l2.ExecuteNonQueryAsync(ct);
         }
 
@@ -1704,6 +1723,8 @@ public sealed partial class PostgresSalesRepository
         cmd.Transaction = tx;
         await SetRls(cmd, Ctx);
 
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var totalCost = 0m;
         var movementId = Guid.NewGuid();
 
@@ -1766,7 +1787,7 @@ public sealed partial class PostgresSalesRepository
                 VALUES
                     (@tid, @cid, gen_random_uuid(), @var, @wh, @bin, 'available',
                      'sales_return', @rid, @ln, @mid,
-                     now(), @qty, @qty, @cost, 'PKR');
+                     now(), @qty, @qty, @cost, @cur);
                 """;
             layerCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
             layerCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
@@ -1778,6 +1799,7 @@ public sealed partial class PostgresSalesRepository
             layerCmd.Parameters.AddWithValue("mid", movementId);
             layerCmd.Parameters.AddWithValue("qty", l.ReturnedQty);
             layerCmd.Parameters.AddWithValue("cost", effectiveCost);
+            layerCmd.Parameters.AddWithValue("cur", functionalCurrency);
             await layerCmd.ExecuteNonQueryAsync(ct);
         }
 
@@ -1830,7 +1852,7 @@ public sealed partial class PostgresSalesRepository
                          idempotency_key, status, created_by, posted_by, posted_at)
                     VALUES
                         (@id, @tid, @cid, @no, @date, @pid,
-                         @desc, 'PKR', 'sales', 'sales_return', @sid,
+                         @desc, @funcCurr, 'sales', 'sales_return', @sid,
                          @key, 'posted', @by, @by, now())
                     ON CONFLICT (tenant_id, company_id, idempotency_key) DO NOTHING;
                     """;
@@ -1841,6 +1863,7 @@ public sealed partial class PostgresSalesRepository
                 jourCmd.Parameters.AddWithValue("date", ret.ReturnDate.ToDateTime(TimeOnly.MinValue));
                 jourCmd.Parameters.AddWithValue("pid", activePeriodId);
                 jourCmd.Parameters.AddWithValue("desc", $"COGS Reversal for Return {ret.ReturnNumber}");
+                jourCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
                 jourCmd.Parameters.AddWithValue("sid", returnId.ToString());
                 jourCmd.Parameters.AddWithValue("key", idempotencyKey);
                 jourCmd.Parameters.AddWithValue("by", authorizedBy == Guid.Empty ? Ctx.UserId : authorizedBy);
@@ -1851,8 +1874,8 @@ public sealed partial class PostgresSalesRepository
             await using (var l1 = conn.CreateCommand())
             {
                 l1.Transaction = tx;
-                l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, 'Inventory Asset Restock', 'PKR', @amt, 1.0, @amt, 0);";
-                l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", invAccount); l1.Parameters.AddWithValue("amt", totalCost);
+                l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, 'Inventory Asset Restock', @cur, @amt, 1.0, @amt, 0);";
+                l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", invAccount); l1.Parameters.AddWithValue("cur", functionalCurrency); l1.Parameters.AddWithValue("amt", totalCost);
                 await l1.ExecuteNonQueryAsync(ct);
             }
 
@@ -1860,8 +1883,8 @@ public sealed partial class PostgresSalesRepository
             await using (var l2 = conn.CreateCommand())
             {
                 l2.Transaction = tx;
-                l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, 'Cost of Goods Sold Reversal', 'PKR', @amt, 1.0, 0, @amt);";
-                l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", journalId); l2.Parameters.AddWithValue("aid", cogsAccount); l2.Parameters.AddWithValue("amt", totalCost);
+                l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, 'Cost of Goods Sold Reversal', @cur, @amt, 1.0, 0, @amt);";
+                l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", journalId); l2.Parameters.AddWithValue("aid", cogsAccount); l2.Parameters.AddWithValue("cur", functionalCurrency); l2.Parameters.AddWithValue("amt", totalCost);
                 await l2.ExecuteNonQueryAsync(ct);
             }
 
@@ -1956,6 +1979,8 @@ public sealed partial class PostgresSalesRepository
         cmd.Transaction = tx;
         await SetRls(cmd, Ctx);
 
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var creditNoteId = Guid.NewGuid();
         var cnDate = request.CreditNoteDate?.ToDateTime(TimeOnly.MinValue) ?? DateTime.UtcNow.Date;
         var totalAmount = request.SubtotalAmount + request.TaxAmount;
@@ -1967,7 +1992,7 @@ public sealed partial class PostgresSalesRepository
                  status, reason)
             VALUES
                 (@tid, @cid, @cnid, @cnno, @cust, @rid,
-                 @iid, @cndate, 'PKR', @sub, @tax, @tot,
+                 @iid, @cndate, @cur, @sub, @tax, @tot,
                  'draft', @reason);
             """;
         cmd.Parameters.AddWithValue("tid", Ctx.TenantId);
@@ -1978,6 +2003,7 @@ public sealed partial class PostgresSalesRepository
         cmd.Parameters.AddWithValue("rid", (object?)request.ReturnId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("iid", (object?)request.InvoiceId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("cndate", cnDate);
+        cmd.Parameters.AddWithValue("cur", functionalCurrency);
         cmd.Parameters.AddWithValue("sub", request.SubtotalAmount);
         cmd.Parameters.AddWithValue("tax", request.TaxAmount);
         cmd.Parameters.AddWithValue("tot", totalAmount);
@@ -2035,6 +2061,8 @@ public sealed partial class PostgresSalesRepository
             activePeriodId = pid;
         }
 
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var journalId = Guid.NewGuid();
         var journalNo = $"JRN-CN-{cn.CreditNoteNumber}";
         var idempotencyKey = $"sales-credit-note-{creditNoteId:N}";
@@ -2049,7 +2077,7 @@ public sealed partial class PostgresSalesRepository
                      idempotency_key, status, created_by, posted_by, posted_at)
                 VALUES
                     (@id, @tid, @cid, @no, @date, @pid,
-                     @desc, 'PKR', 'sales', 'sales_credit_note', @sid,
+                     @desc, @funcCurr, 'sales', 'sales_credit_note', @sid,
                      @key, 'posted', @by, @by, now())
                 ON CONFLICT (tenant_id, company_id, idempotency_key) DO NOTHING;
                 """;
@@ -2060,6 +2088,7 @@ public sealed partial class PostgresSalesRepository
             jourCmd.Parameters.AddWithValue("date", cn.CreditNoteDate.ToDateTime(TimeOnly.MinValue));
             jourCmd.Parameters.AddWithValue("pid", activePeriodId);
             jourCmd.Parameters.AddWithValue("desc", $"Credit Note {cn.CreditNoteNumber}");
+            jourCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             jourCmd.Parameters.AddWithValue("sid", creditNoteId.ToString());
             jourCmd.Parameters.AddWithValue("key", idempotencyKey);
             jourCmd.Parameters.AddWithValue("by", authorizedBy == Guid.Empty ? Ctx.UserId : authorizedBy);
@@ -2070,8 +2099,8 @@ public sealed partial class PostgresSalesRepository
         await using (var l1 = conn.CreateCommand())
         {
             l1.Transaction = tx;
-            l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, 'Sales Revenue Reversal', 'PKR', @amt, 1.0, @amt, 0);";
-            l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", salesRevenueAccount); l1.Parameters.AddWithValue("amt", cn.SubtotalAmount);
+            l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, 'Sales Revenue Reversal', @cur, @amt, 1.0, @amt, 0);";
+            l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", salesRevenueAccount); l1.Parameters.AddWithValue("cur", functionalCurrency); l1.Parameters.AddWithValue("amt", cn.SubtotalAmount);
             await l1.ExecuteNonQueryAsync(ct);
         }
 
@@ -2081,8 +2110,8 @@ public sealed partial class PostgresSalesRepository
         {
             await using var lTax = conn.CreateCommand();
             lTax.Transaction = tx;
-            lTax.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, @ln, @aid, 'Sales Tax Reversal', 'PKR', @amt, 1.0, @amt, 0);";
-            lTax.Parameters.AddWithValue("tid", Ctx.TenantId); lTax.Parameters.AddWithValue("cid", Ctx.CompanyId); lTax.Parameters.AddWithValue("jid", journalId); lTax.Parameters.AddWithValue("ln", lineIndex++); lTax.Parameters.AddWithValue("aid", salesTaxAccount); lTax.Parameters.AddWithValue("amt", cn.TaxAmount);
+            lTax.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, @ln, @aid, 'Sales Tax Reversal', @cur, @amt, 1.0, @amt, 0);";
+            lTax.Parameters.AddWithValue("tid", Ctx.TenantId); lTax.Parameters.AddWithValue("cid", Ctx.CompanyId); lTax.Parameters.AddWithValue("jid", journalId); lTax.Parameters.AddWithValue("ln", lineIndex++); lTax.Parameters.AddWithValue("aid", salesTaxAccount); lTax.Parameters.AddWithValue("cur", functionalCurrency); lTax.Parameters.AddWithValue("amt", cn.TaxAmount);
             await lTax.ExecuteNonQueryAsync(ct);
         }
 
@@ -2090,8 +2119,8 @@ public sealed partial class PostgresSalesRepository
         await using (var lAr = conn.CreateCommand())
         {
             lAr.Transaction = tx;
-            lAr.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, @ln, @aid, 'Accounts Receivable Credit Recovery', 'PKR', @amt, 1.0, 0, @amt);";
-            lAr.Parameters.AddWithValue("tid", Ctx.TenantId); lAr.Parameters.AddWithValue("cid", Ctx.CompanyId); lAr.Parameters.AddWithValue("jid", journalId); lAr.Parameters.AddWithValue("ln", lineIndex); lAr.Parameters.AddWithValue("aid", arAccount); lAr.Parameters.AddWithValue("amt", cn.TotalAmount);
+            lAr.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, @ln, @aid, 'Accounts Receivable Credit Recovery', @cur, @amt, 1.0, 0, @amt);";
+            lAr.Parameters.AddWithValue("tid", Ctx.TenantId); lAr.Parameters.AddWithValue("cid", Ctx.CompanyId); lAr.Parameters.AddWithValue("jid", journalId); lAr.Parameters.AddWithValue("ln", lineIndex); lAr.Parameters.AddWithValue("aid", arAccount); lAr.Parameters.AddWithValue("cur", functionalCurrency); lAr.Parameters.AddWithValue("amt", cn.TotalAmount);
             await lAr.ExecuteNonQueryAsync(ct);
         }
 

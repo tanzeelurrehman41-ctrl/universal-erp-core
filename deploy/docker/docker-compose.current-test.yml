@@ -1,0 +1,46 @@
+name: universal-erp-current-test
+
+services:
+  postgres-current-test:
+    # Pinned to exact immutable postgres:17.11-bookworm multi-arch manifest digest
+    image: postgres:17.11-bookworm@sha256:665dc7b37ac52a17e298511414c21d23ffa4e6a6ef6225b3e5d59c7afb35e994
+    container_name: universal-erp-postgres-current-test
+    expose:
+      # Internal-only container network port 5432; zero published host ports
+      - "5432"
+    environment:
+      POSTGRES_DB: universal_erp_current_disposable_test
+      POSTGRES_USER: test_bootstrap_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/test_bootstrap_admin_pwd
+    secrets:
+      - test_bootstrap_admin_pwd
+      - test_admin_pwd
+      - test_app_pwd
+    volumes:
+      - erp_postgres_current_test_data:/var/lib/postgresql/data
+      - ./test_init/01_init_roles.sql:/docker-entrypoint-initdb.d/01_init_roles.sql:ro
+    networks:
+      - universal-erp-current-test-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_bootstrap_admin -d universal_erp_current_disposable_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+networks:
+  universal-erp-current-test-net:
+    name: universal-erp-current-test-net
+    driver: bridge
+    internal: true
+
+volumes:
+  erp_postgres_current_test_data:
+    name: erp_postgres_current_test_data
+
+secrets:
+  test_bootstrap_admin_pwd:
+    file: ./test_secrets/bootstrap_admin_pwd.txt
+  test_admin_pwd:
+    file: ./test_secrets/test_admin_pwd.txt
+  test_app_pwd:
+    file: ./test_secrets/test_app_pwd.txt

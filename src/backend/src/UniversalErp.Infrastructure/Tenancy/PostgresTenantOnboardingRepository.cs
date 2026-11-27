@@ -263,9 +263,9 @@ public sealed class PostgresTenantOnboardingRepository(NpgsqlDataSource dataSour
         await using (var insertCompany = new NpgsqlCommand(
             """
             INSERT INTO organization.companies
-                (id, tenant_id, company_code, name, legal_name, registration_number, country_code, base_currency_code, timezone, status)
+                (id, tenant_id, company_code, name, legal_name, registration_number, country_code, base_currency_code, functional_currency_code, presentation_currency_code, currency_effective_date, timezone, status)
             VALUES
-                (@id, @tenantId, @code, @name, @legalName, @regNo, @country, @currency, @tz, 'active')
+                (@id, @tenantId, @code, @name, @legalName, @regNo, @country, @currency, @currency, @currency, CURRENT_DATE, @tz, 'active')
             """,
             connection,
             transaction))
@@ -381,7 +381,14 @@ public sealed class PostgresTenantOnboardingRepository(NpgsqlDataSource dataSour
             INSERT INTO "authorization".membership_role_assignments
                 (tenant_id, membership_id, role_id, assigned_by_user_id)
             VALUES
-                (@tenantId, @membershipId, @roleId, @userId)
+                (@tenantId, @membershipId, @roleId, @userId);
+
+            INSERT INTO "authorization".role_permissions
+                (tenant_id, role_id, permission_code, scope_type)
+            SELECT @tenantId, @roleId, p.permission_code, 'company'
+            FROM "authorization".permissions p
+            WHERE p.permission_code IN ('admin.currency_settings.view', 'admin.currency_settings.manage', 'finance.exchange_rate.manage')
+            ON CONFLICT (tenant_id, role_id, permission_code, scope_type) DO NOTHING;
             """,
             connection,
             transaction))

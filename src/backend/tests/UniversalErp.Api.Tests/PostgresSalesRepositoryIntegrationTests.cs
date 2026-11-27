@@ -30,15 +30,53 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
         _adminDataSource = NpgsqlDataSource.Create(AdminConnectionString);
     }
 
+    private static string ResolveTargetDatabase()
+    {
+        var db = Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_DB");
+        return string.IsNullOrWhiteSpace(db) ? "universal_erp_disposable_test" : db.Trim();
+    }
+
+    private static bool IsApprovedDisposableDatabase(string? database) =>
+        database is "universal_erp_disposable_test"
+            or "universal_erp_current_disposable_test"
+            or "universal_erp_current_disposable_verify"
+            or "universal_erp_current_disposable_verify_047"
+            or "universal_erp_current_disposable_verify_047b"
+            or "universal_erp_current_disposable_verify_048";
+
+    private static bool IsVerifiedInternalRunnerActive() =>
+        OperatingSystem.IsLinux() &&
+        (string.Equals(Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER"), "true", StringComparison.OrdinalIgnoreCase)
+         || File.Exists("/.dockerenv")) &&
+        string.Equals(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_INTERNAL_CONTAINER_RUNNER"), "true", StringComparison.Ordinal) &&
+        string.Equals(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_HOST"), "postgres-current-test", StringComparison.Ordinal) &&
+        string.Equals(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), "5432", StringComparison.Ordinal) &&
+        Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_DB") is "universal_erp_current_disposable_test" or "universal_erp_current_disposable_verify" or "universal_erp_current_disposable_verify_047" or "universal_erp_current_disposable_verify_047b" or "universal_erp_current_disposable_verify_048";
+
     private static void ValidateApprovedEndpoint(string connectionString, string expectedUser)
     {
         var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        string expectedDatabase = ResolveTargetDatabase();
+        if (IsVerifiedInternalRunnerActive())
+        {
+            if (!string.Equals(builder.Host, "postgres-current-test", StringComparison.OrdinalIgnoreCase) ||
+                builder.Port != 5432 ||
+                !IsApprovedDisposableDatabase(expectedDatabase) ||
+                builder.Database != expectedDatabase ||
+                builder.Username != expectedUser)
+            {
+                throw new InvalidOperationException(
+                    $"[FAIL-CLOSED] Internal runner connection targets unapproved endpoint! Expected Host=postgres-current-test, Port=5432, Database={expectedDatabase}, Username={expectedUser}. Got Host={builder.Host}, Port={builder.Port}, Database={builder.Database}, Username={builder.Username}.");
+            }
+            return;
+        }
+
         bool isLoopback = builder.Host == "127.0.0.1" || builder.Host == "localhost";
         int expectedPort = int.TryParse(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), out var p) ? p : 5434;
-        if (!isLoopback || builder.Port != expectedPort || builder.Database != "universal_erp_disposable_test" || builder.Username != expectedUser)
+        if (!isLoopback || expectedPort <= 0 || expectedPort is 5432 or 5433 || builder.Port != expectedPort || !IsApprovedDisposableDatabase(expectedDatabase) || builder.Database != expectedDatabase || builder.Username != expectedUser)
         {
             throw new InvalidOperationException(
-                $"[FAIL-CLOSED] Connection string targets unapproved endpoint! Expected Host=127.0.0.1, Port={expectedPort}, Database=universal_erp_disposable_test, Username={expectedUser}. Got Host={builder.Host}, Port={builder.Port}, Database={builder.Database}, Username={builder.Username}. Accidental connections to production, staging, or development instances are strictly prevented.");
+                $"[FAIL-CLOSED] Connection string targets unapproved endpoint! Expected Host=127.0.0.1, Port={expectedPort}, Database={expectedDatabase}, Username={expectedUser}. Got Host={builder.Host}, Port={builder.Port}, Database={builder.Database}, Username={builder.Username}. Accidental connections to production, staging, or development instances are strictly prevented.");
         }
     }
 
@@ -52,11 +90,13 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
             return env;
         }
 
+        var targetHost = IsVerifiedInternalRunnerActive() ? "postgres-current-test" : "127.0.0.1";
         int targetPort = int.TryParse(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), out var p) ? p : 5434;
+        string targetDb = ResolveTargetDatabase();
         var pass = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_APP");
         if (!string.IsNullOrWhiteSpace(pass))
         {
-            var cs = $"Host=127.0.0.1;Port={targetPort};Database=universal_erp_disposable_test;Username=erp_app;Password={pass};Include Error Detail=true";
+            var cs = $"Host={targetHost};Port={targetPort};Database={targetDb};Username=erp_app;Password={pass};Include Error Detail=true";
             ValidateApprovedEndpoint(cs, expectedUser: "erp_app");
             return cs;
         }
@@ -73,11 +113,13 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
             return env;
         }
 
+        var targetHost = IsVerifiedInternalRunnerActive() ? "postgres-current-test" : "127.0.0.1";
         int targetPort = int.TryParse(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), out var p) ? p : 5434;
+        string targetDb = ResolveTargetDatabase();
         var pass = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_DEV");
         if (!string.IsNullOrWhiteSpace(pass))
         {
-            var cs = $"Host=127.0.0.1;Port={targetPort};Database=universal_erp_disposable_test;Username=erp_dev;Password={pass};Include Error Detail=true";
+            var cs = $"Host={targetHost};Port={targetPort};Database={targetDb};Username=erp_dev;Password={pass};Include Error Detail=true";
             ValidateApprovedEndpoint(cs, expectedUser: "erp_dev");
             return cs;
         }
@@ -760,7 +802,7 @@ public sealed class PostgresSalesRepositoryIntegrationTests : IAsyncDisposable
         bool seedFinanceAccounts)
     {
         await using (var cmd = new NpgsqlCommand(
-            "INSERT INTO platform.tenants (id, tenant_code, display_name, status) VALUES (@id, @code, 'Sales Test Tenant', 'active')", conn))
+            "INSERT INTO platform.tenants (id, tenant_code, display_name, status, default_country_code, default_currency_code, default_timezone) VALUES (@id, @code, 'Sales Test Tenant', 'active', 'PK', 'PKR', 'Asia/Karachi')", conn))
         {
             cmd.Parameters.AddWithValue("id", tenantId);
             cmd.Parameters.AddWithValue("code", $"st-{tenantId:N}"[..20]);

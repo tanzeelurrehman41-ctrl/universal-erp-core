@@ -94,7 +94,7 @@ export default function DashboardWorkspace({
   });
 
   const [currencyState, setCurrencyState] = useState<ResolvedDashboardCurrencyState>(() =>
-    resolveDashboardCurrencyState(workspace?.baseCurrencyCode, null, null)
+    resolveDashboardCurrencyState(workspace?.functionalCurrencyCode || workspace?.baseCurrencyCode, null, null)
   );
 
   const [binDistributions, setBinDistributions] = useState<BinDistribution[]>([]);
@@ -102,7 +102,15 @@ export default function DashboardWorkspace({
   const [auditEvents, setAuditEvents] = useState<AuditEventItem[]>([]);
 
   // Format financial values strictly using verified functional currency
-  const baseCurrency = currencyState.companyBaseCurrency || workspace?.baseCurrencyCode?.trim().toUpperCase() || null;
+  const baseCurrency =
+    currencyState.companyBaseCurrency ||
+    workspace?.functionalCurrencyCode?.trim().toUpperCase() ||
+    workspace?.baseCurrencyCode?.trim().toUpperCase() ||
+    null;
+  const presentationCurrency =
+    currencyState.presentationCurrencyCode ||
+    workspace?.presentationCurrencyCode?.trim().toUpperCase() ||
+    null;
 
   const formatMoney = (val: number | null | undefined): string =>
     formatMoneyWithCurrency(val, baseCurrency, 2);
@@ -220,7 +228,7 @@ export default function DashboardWorkspace({
         }
 
         const resolvedCurrencyState = resolveDashboardCurrencyState(
-          workspace.baseCurrencyCode,
+          workspace.functionalCurrencyCode || workspace.baseCurrencyCode,
           valData,
           tbData
         );
@@ -334,9 +342,9 @@ export default function DashboardWorkspace({
         title="Executive Overview"
         subtitle={
           workspace
-            ? `Real-time consolidated KPIs for ${workspace.companyName} (${workspace.tenantId}) · Base Currency: ${
+            ? `Real-time consolidated KPIs for ${workspace.companyName} (${workspace.tenantId}) · Functional: ${
                 baseCurrency || "Unspecified"
-              }`
+              }${presentationCurrency && presentationCurrency !== baseCurrency ? ` · Presentation: ${presentationCurrency}` : ""}`
             : "Enterprise Multi-Workspace Management Dashboard"
         }
         actions={
@@ -428,8 +436,20 @@ export default function DashboardWorkspace({
                     : "GL 1200: Unavailable"}
                 </span>
                 <span>
-                  Company base currency: {currencyState.companyBaseCurrency || "Unspecified"}
+                  Functional currency: {currencyState.companyBaseCurrency || "Unspecified"}
                 </span>
+                {presentationCurrency && presentationCurrency !== baseCurrency && (
+                  <span>
+                    Presentation ({presentationCurrency}):{" "}
+                    {currencyState.presentationValuation !== null && currencyState.presentationValuation !== undefined
+                      ? `${formatMoneyWithCurrency(currencyState.presentationValuation, presentationCurrency, 2)}${
+                          currencyState.presentationAppliedExchangeRate
+                            ? ` @ ${currencyState.presentationAppliedExchangeRate} (${currencyState.presentationExchangeRateType || "closing"} · ${currencyState.presentationExchangeRateEffectiveDate || ""})`
+                            : ""
+                        }`
+                      : "Unavailable"}
+                  </span>
+                )}
               </>
             )
           }
@@ -463,7 +483,7 @@ export default function DashboardWorkspace({
                   {currencyState.sourceLedgerBalancesText || "Unavailable"}
                 </span>
                 <span>
-                  Company base currency: {currencyState.companyBaseCurrency || "Unspecified"}
+                  Functional currency: {currencyState.companyBaseCurrency || "Unspecified"}
                 </span>
                 <span>
                   Functional GL balance:{" "}
@@ -471,6 +491,14 @@ export default function DashboardWorkspace({
                     ? formatMoney(financeStats.gl1200Debit)
                     : "Unavailable"}
                 </span>
+                {presentationCurrency && presentationCurrency !== baseCurrency && (
+                  <span>
+                    Presentation ({presentationCurrency}):{" "}
+                    {currencyState.presentationGl1200Balance !== null && currencyState.presentationGl1200Balance !== undefined
+                      ? formatMoneyWithCurrency(currencyState.presentationGl1200Balance, presentationCurrency, 2)
+                      : "Unavailable"}
+                  </span>
+                )}
                 <span>Reconciliation: {currencyState.reconciliationLabel}</span>
               </>
             )

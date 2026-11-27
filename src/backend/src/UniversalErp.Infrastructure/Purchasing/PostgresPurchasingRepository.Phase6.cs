@@ -1,6 +1,7 @@
 using System.Data.Common;
 using Npgsql;
 using UniversalErp.Application.Purchasing;
+using UniversalErp.Infrastructure.Finance;
 
 namespace UniversalErp.Infrastructure.Purchasing;
 
@@ -655,6 +656,9 @@ public sealed partial class PostgresPurchasingRepository
 
         var subtotal = req.Lines.Sum(l => l.InvoicedQty * l.UnitPrice);
         var total = subtotal + req.TaxAmount;
+        var invoiceCurrency = string.IsNullOrWhiteSpace(req.CurrencyCode)
+            ? await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(conn, tx, Ctx.TenantId, Ctx.CompanyId, ct)
+            : req.CurrencyCode.Trim().ToUpperInvariant();
 
         var invoiceId = Guid.NewGuid();
         await using var insCmd = conn.CreateCommand();
@@ -679,7 +683,7 @@ public sealed partial class PostgresPurchasingRepository
         insCmd.Parameters.AddWithValue("grn", req.GrnId.HasValue ? (object)req.GrnId.Value : DBNull.Value);
         insCmd.Parameters.AddWithValue("idate", req.InvoiceDate.ToDateTime(TimeOnly.MinValue));
         insCmd.Parameters.AddWithValue("ddate", req.DueDate.ToDateTime(TimeOnly.MinValue));
-        insCmd.Parameters.AddWithValue("cur", string.IsNullOrWhiteSpace(req.CurrencyCode) ? "PKR" : req.CurrencyCode.ToUpperInvariant());
+        insCmd.Parameters.AddWithValue("cur", invoiceCurrency);
         insCmd.Parameters.AddWithValue("sub", subtotal);
         insCmd.Parameters.AddWithValue("tax", req.TaxAmount);
         insCmd.Parameters.AddWithValue("tot", total);
@@ -886,6 +890,8 @@ public sealed partial class PostgresPurchasingRepository
 
             if (apAccountId != Guid.Empty && cogsAccountId != Guid.Empty)
             {
+                var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+                    conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
                 varianceJournalId = Guid.NewGuid();
                 var jrnNo = $"JRN-INV-VAR-{invoice.InvoiceNumber}";
                 var idempotencyKey = $"inv-var-{invoice.InvoiceId}";
@@ -899,7 +905,7 @@ public sealed partial class PostgresPurchasingRepository
                              status, created_by, posted_by, posted_at)
                         VALUES
                             (@id, @tid, @cid, @no, @date, @pid, @desc,
-                             'PKR', 'purchasing', 'supplier_invoice', @sid, @key,
+                             @funcCurr, 'purchasing', 'supplier_invoice', @sid, @key,
                              'posted', @by, @by, now())
                         ON CONFLICT (tenant_id, company_id, idempotency_key) DO NOTHING;
                         """;
@@ -910,6 +916,7 @@ public sealed partial class PostgresPurchasingRepository
                     jCmd.Parameters.AddWithValue("date", invoice.InvoiceDate.ToDateTime(TimeOnly.MinValue));
                     jCmd.Parameters.AddWithValue("pid", activePeriodId);
                     jCmd.Parameters.AddWithValue("desc", $"Invoice Price Variance for {invoice.InvoiceNumber}");
+                    jCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
                     jCmd.Parameters.AddWithValue("sid", invoice.InvoiceId.ToString());
                     jCmd.Parameters.AddWithValue("key", idempotencyKey);
                     jCmd.Parameters.AddWithValue("by", approvedBy == Guid.Empty ? Ctx.UserId : approvedBy);
@@ -921,26 +928,26 @@ public sealed partial class PostgresPurchasingRepository
                 {
                     // Invoice price was higher than GRN: increase AP (Cr 2010), charge expense (Dr 5010)
                     await using var l1 = conn.CreateCommand();
-                    l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, @desc, 'PKR', @amt, 1.0, @amt, 0);";
-                    l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", varianceJournalId); l1.Parameters.AddWithValue("aid", cogsAccountId); l1.Parameters.AddWithValue("desc", "Purchase Price Variance"); l1.Parameters.AddWithValue("amt", absVar);
+                    l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, @desc, @cur, @amt, 1.0, @amt, 0);";
+                    l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", varianceJournalId); l1.Parameters.AddWithValue("aid", cogsAccountId); l1.Parameters.AddWithValue("desc", "Purchase Price Variance"); l1.Parameters.AddWithValue("cur", functionalCurrency); l1.Parameters.AddWithValue("amt", absVar);
                     await l1.ExecuteNonQueryAsync(ct);
 
                     await using var l2 = conn.CreateCommand();
-                    l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, @desc, 'PKR', @amt, 1.0, 0, @amt);";
-                    l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", varianceJournalId); l2.Parameters.AddWithValue("aid", apAccountId); l2.Parameters.AddWithValue("desc", "Accounts Payable - Price Adjustment"); l2.Parameters.AddWithValue("amt", absVar);
+                    l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, @desc, @cur, @amt, 1.0, 0, @amt);";
+                    l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", varianceJournalId); l2.Parameters.AddWithValue("aid", apAccountId); l2.Parameters.AddWithValue("desc", "Accounts Payable - Price Adjustment"); l2.Parameters.AddWithValue("cur", functionalCurrency); l2.Parameters.AddWithValue("amt", absVar);
                     await l2.ExecuteNonQueryAsync(ct);
                 }
                 else
                 {
                     // Invoice price was lower than GRN: decrease AP (Dr 2010), credit expense (Cr 5010)
                     await using var l1 = conn.CreateCommand();
-                    l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, @desc, 'PKR', @amt, 1.0, @amt, 0);";
-                    l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", varianceJournalId); l1.Parameters.AddWithValue("aid", apAccountId); l1.Parameters.AddWithValue("desc", "Accounts Payable - Credit Adjustment"); l1.Parameters.AddWithValue("amt", absVar);
+                    l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, @desc, @cur, @amt, 1.0, @amt, 0);";
+                    l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", varianceJournalId); l1.Parameters.AddWithValue("aid", apAccountId); l1.Parameters.AddWithValue("desc", "Accounts Payable - Credit Adjustment"); l1.Parameters.AddWithValue("cur", functionalCurrency); l1.Parameters.AddWithValue("amt", absVar);
                     await l1.ExecuteNonQueryAsync(ct);
 
                     await using var l2 = conn.CreateCommand();
-                    l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, @desc, 'PKR', @amt, 1.0, 0, @amt);";
-                    l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", varianceJournalId); l2.Parameters.AddWithValue("aid", cogsAccountId); l2.Parameters.AddWithValue("desc", "Purchase Price Variance Recovery"); l2.Parameters.AddWithValue("amt", absVar);
+                    l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, @desc, @cur, @amt, 1.0, 0, @amt);";
+                    l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", varianceJournalId); l2.Parameters.AddWithValue("aid", cogsAccountId); l2.Parameters.AddWithValue("desc", "Purchase Price Variance Recovery"); l2.Parameters.AddWithValue("cur", functionalCurrency); l2.Parameters.AddWithValue("amt", absVar);
                     await l2.ExecuteNonQueryAsync(ct);
                 }
             }
@@ -1347,6 +1354,8 @@ public sealed partial class PostgresPurchasingRepository
         await using var cmd = conn.CreateCommand();
         await SetRls(cmd, Ctx);
 
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var dnId = Guid.NewGuid();
         cmd.CommandText = """
             INSERT INTO erp_purchasing.supplier_debit_note
@@ -1355,7 +1364,7 @@ public sealed partial class PostgresPurchasingRepository
                  amount, status, notes, created_by)
             VALUES
                 (@tid, @cid, @id, @no, @sup,
-                 @pr, @inv, @date, 'PKR',
+                 @pr, @inv, @date, @cur,
                  @amt, 'draft', @notes, @by);
             """;
         cmd.Parameters.AddWithValue("tid", Ctx.TenantId);
@@ -1366,6 +1375,7 @@ public sealed partial class PostgresPurchasingRepository
         cmd.Parameters.AddWithValue("pr", req.PurchaseReturnId.HasValue ? (object)req.PurchaseReturnId.Value : DBNull.Value);
         cmd.Parameters.AddWithValue("inv", req.SupplierInvoiceId.HasValue ? (object)req.SupplierInvoiceId.Value : DBNull.Value);
         cmd.Parameters.AddWithValue("date", req.DebitNoteDate.ToDateTime(TimeOnly.MinValue));
+        cmd.Parameters.AddWithValue("cur", functionalCurrency);
         cmd.Parameters.AddWithValue("amt", req.Amount);
         cmd.Parameters.AddWithValue("notes", (object?)req.Notes ?? DBNull.Value);
         cmd.Parameters.AddWithValue("by", createdBy == Guid.Empty ? Ctx.UserId : createdBy);
@@ -1429,6 +1439,8 @@ public sealed partial class PostgresPurchasingRepository
             }
         }
 
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var journalId = Guid.NewGuid();
         var jrnNo = $"JRN-DN-{dnNo}";
         var idempotencyKey = $"dn-gl-{debitNoteId}";
@@ -1442,7 +1454,7 @@ public sealed partial class PostgresPurchasingRepository
                      status, created_by, posted_by, posted_at)
                 VALUES
                     (@id, @tid, @cid, @no, @date, @pid, @desc,
-                     'PKR', 'purchasing', 'supplier_debit_note', @sid, @key,
+                     @funcCurr, 'purchasing', 'supplier_debit_note', @sid, @key,
                      'posted', @by, @by, now())
                 ON CONFLICT (tenant_id, company_id, idempotency_key) DO NOTHING;
                 """;
@@ -1453,6 +1465,7 @@ public sealed partial class PostgresPurchasingRepository
             jCmd.Parameters.AddWithValue("date", dnDate.ToDateTime(TimeOnly.MinValue));
             jCmd.Parameters.AddWithValue("pid", activePeriodId);
             jCmd.Parameters.AddWithValue("desc", $"Supplier Debit Note {dnNo}");
+            jCmd.Parameters.AddWithValue("funcCurr", functionalCurrency);
             jCmd.Parameters.AddWithValue("sid", debitNoteId.ToString());
             jCmd.Parameters.AddWithValue("key", idempotencyKey);
             jCmd.Parameters.AddWithValue("by", authorizedBy == Guid.Empty ? Ctx.UserId : authorizedBy);
@@ -1462,16 +1475,16 @@ public sealed partial class PostgresPurchasingRepository
         // Line 1: Debit 2010 (Accounts Payable)
         await using (var l1 = conn.CreateCommand())
         {
-            l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, @desc, 'PKR', @amt, 1.0, @amt, 0);";
-            l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", apAccountId); l1.Parameters.AddWithValue("desc", $"Debit Note AP Recovery - {dnNo}"); l1.Parameters.AddWithValue("amt", amount);
+            l1.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 1, @aid, @desc, @cur, @amt, 1.0, @amt, 0);";
+            l1.Parameters.AddWithValue("tid", Ctx.TenantId); l1.Parameters.AddWithValue("cid", Ctx.CompanyId); l1.Parameters.AddWithValue("jid", journalId); l1.Parameters.AddWithValue("aid", apAccountId); l1.Parameters.AddWithValue("desc", $"Debit Note AP Recovery - {dnNo}"); l1.Parameters.AddWithValue("cur", functionalCurrency); l1.Parameters.AddWithValue("amt", amount);
             await l1.ExecuteNonQueryAsync(ct);
         }
 
         // Line 2: Credit 1200 (Merchandise Inventory Asset)
         await using (var l2 = conn.CreateCommand())
         {
-            l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, @desc, 'PKR', @amt, 1.0, 0, @amt);";
-            l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", journalId); l2.Parameters.AddWithValue("aid", invAccountId); l2.Parameters.AddWithValue("desc", $"Inventory Asset Reversal - {dnNo}"); l2.Parameters.AddWithValue("amt", amount);
+            l2.CommandText = "INSERT INTO finance.journal_lines (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional) VALUES (@tid, @cid, @jid, 2, @aid, @desc, @cur, @amt, 1.0, 0, @amt);";
+            l2.Parameters.AddWithValue("tid", Ctx.TenantId); l2.Parameters.AddWithValue("cid", Ctx.CompanyId); l2.Parameters.AddWithValue("jid", journalId); l2.Parameters.AddWithValue("aid", invAccountId); l2.Parameters.AddWithValue("desc", $"Inventory Asset Reversal - {dnNo}"); l2.Parameters.AddWithValue("cur", functionalCurrency); l2.Parameters.AddWithValue("amt", amount);
             await l2.ExecuteNonQueryAsync(ct);
         }
 

@@ -20,6 +20,9 @@ export type TenantCompanyContext = {
   companyName: string;
   baseCurrencyCode: string;
   timezone: string;
+  functionalCurrencyCode?: string;
+  presentationCurrencyCode?: string;
+  currencyEffectiveDate?: string;
 };
 
 export type ErpAuthUser = {

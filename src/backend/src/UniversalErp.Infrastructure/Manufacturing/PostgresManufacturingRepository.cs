@@ -3,6 +3,7 @@ using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Manufacturing;
 using UniversalErp.Domain.Tenancy;
+using UniversalErp.Infrastructure.Finance;
 
 namespace UniversalErp.Infrastructure.Manufacturing;
 
@@ -137,10 +138,12 @@ public sealed class PostgresManufacturingRepository(
         }
 
         // If not found, create it on demand
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            connection, transaction, tenantId, companyId, cancellationToken);
         var newId = Guid.NewGuid();
         const string insertSql = """
             INSERT INTO finance.accounts (tenant_id, company_id, id, account_code, account_name, account_type, normal_balance, currency_code, is_control_account, allow_manual_posting, is_active)
-            VALUES (@tenantId, @companyId, @newId, @code, @name, @type, @normal, 'PKR', true, false, true)
+            VALUES (@tenantId, @companyId, @newId, @code, @name, @type, @normal, @currency, true, false, true)
             ON CONFLICT (tenant_id, company_id, account_code) DO UPDATE SET is_active = true
             RETURNING id;
             """;
@@ -153,6 +156,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("name", $"Manufacturing Account {accountCode}");
             cmd.Parameters.AddWithValue("type", fallbackType);
             cmd.Parameters.AddWithValue("normal", fallbackNormal);
+            cmd.Parameters.AddWithValue("currency", functionalCurrency);
             var res = await cmd.ExecuteScalarAsync(cancellationToken);
             if (res is Guid createdId) return createdId;
         }
@@ -1447,6 +1451,8 @@ public sealed class PostgresManufacturingRepository(
         }
 
         // 4. Update layers and insert cost allocations
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         foreach (var alloc in fifoResult.Allocations)
         {
             const string updateLayerSql = """
@@ -1467,7 +1473,7 @@ public sealed class PostgresManufacturingRepository(
                 INSERT INTO erp_inventory.inventory_cost_allocation
                     (tenant_id, company_id, allocation_id, layer_id, movement_id, source_document_type, source_document_id, source_line_number, variant_id, consumed_qty, unit_cost, extended_cost, currency_code, allocated_at)
                 VALUES
-                    (@tid, @cid, gen_random_uuid(), @lid, @movid, 'work_order', @woid, @line, @vid, @qty, @unitCost, @extCost, 'PKR', now());
+                    (@tid, @cid, gen_random_uuid(), @lid, @movid, 'work_order', @woid, @line, @vid, @qty, @unitCost, @extCost, @cur, now());
                 """;
             await using (var cmd = new NpgsqlCommand(insertAllocSql, conn, tx))
             {
@@ -1481,6 +1487,7 @@ public sealed class PostgresManufacturingRepository(
                 cmd.Parameters.AddWithValue("qty", alloc.ConsumedQty);
                 cmd.Parameters.AddWithValue("unitCost", alloc.UnitCost);
                 cmd.Parameters.AddWithValue("extCost", alloc.ExtendedCost);
+                cmd.Parameters.AddWithValue("cur", functionalCurrency);
                 await cmd.ExecuteNonQueryAsync(ct);
             }
         }
@@ -1557,7 +1564,7 @@ public sealed class PostgresManufacturingRepository(
             INSERT INTO finance.journals
                 (id, tenant_id, company_id, journal_no, journal_date, fiscal_period_id, description, functional_currency, source_module, source_type, source_id, idempotency_key, status, created_by, posted_by, posted_at)
             VALUES
-                (@id, @tid, @cid, @no, @date, @per, @desc, 'PKR', 'manufacturing', 'material_issue', @srcId, @key, 'posted', @userId, @userId, now());
+                (@id, @tid, @cid, @no, @date, @per, @desc, @cur, 'manufacturing', 'material_issue', @srcId, @key, 'posted', @userId, @userId, now());
             """;
 
         await using (var cmd = new NpgsqlCommand(jourSql, conn, tx))
@@ -1569,6 +1576,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("date", today);
             cmd.Parameters.AddWithValue("per", periodId);
             cmd.Parameters.AddWithValue("desc", $"Material issue to WIP for WO {wo.WorkOrderNumber} Line {request.LineNumber}");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("srcId", workOrderId.ToString());
             cmd.Parameters.AddWithValue("key", idemKey);
             cmd.Parameters.AddWithValue("userId", Ctx.UserId);
@@ -1579,7 +1587,7 @@ public sealed class PostgresManufacturingRepository(
             INSERT INTO finance.journal_lines
                 (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
             VALUES
-                (@tid, @cid, @jid, @line, @acc, @desc, 'PKR', @amt, 1.0, @dr, @cr);
+                (@tid, @cid, @jid, @line, @acc, @desc, @cur, @amt, 1.0, @dr, @cr);
             """;
 
         // Dr WIP 1250
@@ -1591,6 +1599,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("line", 1);
             cmd.Parameters.AddWithValue("acc", wipAccId);
             cmd.Parameters.AddWithValue("desc", $"Debit WIP Inventory for consumed materials (Line {request.LineNumber})");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("amt", fifoResult.TotalCost);
             cmd.Parameters.AddWithValue("dr", fifoResult.TotalCost);
             cmd.Parameters.AddWithValue("cr", 0m);
@@ -1606,6 +1615,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("line", 2);
             cmd.Parameters.AddWithValue("acc", rawAccId);
             cmd.Parameters.AddWithValue("desc", $"Credit Raw Materials Inventory (Line {request.LineNumber})");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("amt", fifoResult.TotalCost);
             cmd.Parameters.AddWithValue("dr", 0m);
             cmd.Parameters.AddWithValue("cr", fifoResult.TotalCost);
@@ -1698,12 +1708,14 @@ public sealed class PostgresManufacturingRepository(
         }
 
         // Create new FIFO layer for returned stock
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var newLayerId = Guid.NewGuid();
         const string layerSql = """
             INSERT INTO erp_inventory.inventory_cost_layer
                 (tenant_id, company_id, layer_id, variant_id, warehouse_id, bin_id, status_code, source_document_type, source_document_id, source_movement_id, received_at, original_qty, remaining_qty, unit_cost, currency_code)
             VALUES
-                (@tid, @cid, @lid, @vid, @whid, @binid, 'available', 'work_order', @woid, @movid, now(), @qty, @qty, @unitCost, 'PKR');
+                (@tid, @cid, @lid, @vid, @whid, @binid, 'available', 'work_order', @woid, @movid, now(), @qty, @qty, @unitCost, @cur);
             """;
 
         await using (var cmd = new NpgsqlCommand(layerSql, conn, tx))
@@ -1718,6 +1730,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("movid", movementId);
             cmd.Parameters.AddWithValue("qty", request.Quantity);
             cmd.Parameters.AddWithValue("unitCost", unitCost);
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
@@ -1771,7 +1784,7 @@ public sealed class PostgresManufacturingRepository(
             INSERT INTO finance.journals
                 (id, tenant_id, company_id, journal_no, journal_date, fiscal_period_id, description, functional_currency, source_module, source_type, source_id, idempotency_key, status, created_by, posted_by, posted_at)
             VALUES
-                (@id, @tid, @cid, @no, @date, @per, @desc, 'PKR', 'manufacturing', 'material_return', @srcId, @key, 'posted', @userId, @userId, now());
+                (@id, @tid, @cid, @no, @date, @per, @desc, @cur, 'manufacturing', 'material_return', @srcId, @key, 'posted', @userId, @userId, now());
             """;
 
         await using (var cmd = new NpgsqlCommand(jourSql, conn, tx))
@@ -1783,6 +1796,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("date", today);
             cmd.Parameters.AddWithValue("per", periodId);
             cmd.Parameters.AddWithValue("desc", $"Material return from WIP for WO {wo.WorkOrderNumber} Line {request.LineNumber}");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("srcId", workOrderId.ToString());
             cmd.Parameters.AddWithValue("key", idemKey);
             cmd.Parameters.AddWithValue("userId", Ctx.UserId);
@@ -1793,7 +1807,7 @@ public sealed class PostgresManufacturingRepository(
             INSERT INTO finance.journal_lines
                 (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
             VALUES
-                (@tid, @cid, @jid, @line, @acc, @desc, 'PKR', @amt, 1.0, @dr, @cr);
+                (@tid, @cid, @jid, @line, @acc, @desc, @cur, @amt, 1.0, @dr, @cr);
             """;
 
         // Dr Raw Material 1200
@@ -1805,6 +1819,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("line", 1);
             cmd.Parameters.AddWithValue("acc", rawAccId);
             cmd.Parameters.AddWithValue("desc", "Credit to Raw Material Inventory from WIP return");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("amt", returnCost);
             cmd.Parameters.AddWithValue("dr", returnCost);
             cmd.Parameters.AddWithValue("cr", 0m);
@@ -1820,6 +1835,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("line", 2);
             cmd.Parameters.AddWithValue("acc", wipAccId);
             cmd.Parameters.AddWithValue("desc", "Debit reduction from WIP Inventory");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("amt", returnCost);
             cmd.Parameters.AddWithValue("dr", 0m);
             cmd.Parameters.AddWithValue("cr", returnCost);
@@ -1915,6 +1931,8 @@ public sealed class PostgresManufacturingRepository(
         Guid? journalId = null;
         if (costCalc.TotalOperationCost > 0m)
         {
+            var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+                conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
             var today = DateOnly.FromDateTime(DateTime.UtcNow);
             var periodId = await GetOrCreateOpenPeriodAsync(conn, tx, Ctx.TenantId, Ctx.CompanyId, today, ct);
             var wipAccId = await GetAccountIdAsync(conn, tx, Ctx.TenantId, Ctx.CompanyId, "1250", "asset", "debit", ct);
@@ -1929,7 +1947,7 @@ public sealed class PostgresManufacturingRepository(
                 INSERT INTO finance.journals
                     (id, tenant_id, company_id, journal_no, journal_date, fiscal_period_id, description, functional_currency, source_module, source_type, source_id, idempotency_key, status, created_by, posted_by, posted_at)
                 VALUES
-                    (@id, @tid, @cid, @no, @date, @per, @desc, 'PKR', 'manufacturing', 'operation_labor_overhead', @srcId, @key, 'posted', @userId, @userId, now());
+                    (@id, @tid, @cid, @no, @date, @per, @desc, @cur, 'manufacturing', 'operation_labor_overhead', @srcId, @key, 'posted', @userId, @userId, now());
                 """;
 
             await using (var cmd = new NpgsqlCommand(jourSql, conn, tx))
@@ -1941,6 +1959,7 @@ public sealed class PostgresManufacturingRepository(
                 cmd.Parameters.AddWithValue("date", today);
                 cmd.Parameters.AddWithValue("per", periodId);
                 cmd.Parameters.AddWithValue("desc", $"Direct labor and applied overhead for WO {wo.WorkOrderNumber} Op {request.OperationSequence}");
+                cmd.Parameters.AddWithValue("cur", functionalCurrency);
                 cmd.Parameters.AddWithValue("srcId", workOrderId.ToString());
                 cmd.Parameters.AddWithValue("key", idemKey);
                 cmd.Parameters.AddWithValue("userId", Ctx.UserId);
@@ -1951,7 +1970,7 @@ public sealed class PostgresManufacturingRepository(
                 INSERT INTO finance.journal_lines
                     (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
                 VALUES
-                    (@tid, @cid, @jid, @line, @acc, @desc, 'PKR', @amt, 1.0, @dr, @cr);
+                    (@tid, @cid, @jid, @line, @acc, @desc, @cur, @amt, 1.0, @dr, @cr);
                 """;
 
             var lineNo = 1;
@@ -1964,6 +1983,7 @@ public sealed class PostgresManufacturingRepository(
                 cmd.Parameters.AddWithValue("line", lineNo++);
                 cmd.Parameters.AddWithValue("acc", wipAccId);
                 cmd.Parameters.AddWithValue("desc", $"Debit WIP for Labor and Overhead (Op {request.OperationSequence})");
+                cmd.Parameters.AddWithValue("cur", functionalCurrency);
                 cmd.Parameters.AddWithValue("amt", costCalc.TotalOperationCost);
                 cmd.Parameters.AddWithValue("dr", costCalc.TotalOperationCost);
                 cmd.Parameters.AddWithValue("cr", 0m);
@@ -1979,6 +1999,7 @@ public sealed class PostgresManufacturingRepository(
                 cmd.Parameters.AddWithValue("line", lineNo++);
                 cmd.Parameters.AddWithValue("acc", laborAccId);
                 cmd.Parameters.AddWithValue("desc", $"Credit Direct Labor Clearing (Op {request.OperationSequence})");
+                cmd.Parameters.AddWithValue("cur", functionalCurrency);
                 cmd.Parameters.AddWithValue("amt", costCalc.LaborCost);
                 cmd.Parameters.AddWithValue("dr", 0m);
                 cmd.Parameters.AddWithValue("cr", costCalc.LaborCost);
@@ -1994,6 +2015,7 @@ public sealed class PostgresManufacturingRepository(
                 cmd.Parameters.AddWithValue("line", lineNo++);
                 cmd.Parameters.AddWithValue("acc", overheadAccId);
                 cmd.Parameters.AddWithValue("desc", $"Credit Applied Overhead (Op {request.OperationSequence})");
+                cmd.Parameters.AddWithValue("cur", functionalCurrency);
                 cmd.Parameters.AddWithValue("amt", costCalc.OverheadCost);
                 cmd.Parameters.AddWithValue("dr", 0m);
                 cmd.Parameters.AddWithValue("cr", costCalc.OverheadCost);
@@ -2156,12 +2178,14 @@ public sealed class PostgresManufacturingRepository(
         }
 
         // 3. Create Finished Goods FIFO layer
+        var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var fgLayerId = Guid.NewGuid();
         const string fgLayerSql = """
             INSERT INTO erp_inventory.inventory_cost_layer
                 (tenant_id, company_id, layer_id, variant_id, warehouse_id, bin_id, status_code, source_document_type, source_document_id, source_movement_id, received_at, original_qty, remaining_qty, unit_cost, currency_code)
             VALUES
-                (@tid, @cid, @lid, @vid, @whid, @binid, 'available', 'work_order', @woid, @movid, now(), @qty, @qty, @unitCost, 'PKR');
+                (@tid, @cid, @lid, @vid, @whid, @binid, 'available', 'work_order', @woid, @movid, now(), @qty, @qty, @unitCost, @cur);
             """;
 
         await using (var cmd = new NpgsqlCommand(fgLayerSql, conn, tx))
@@ -2176,6 +2200,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("movid", movementId);
             cmd.Parameters.AddWithValue("qty", acceptedQty);
             cmd.Parameters.AddWithValue("unitCost", costSummary.UnitCostFinal > 0m ? costSummary.UnitCostFinal : 1.0m);
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
@@ -2199,7 +2224,7 @@ public sealed class PostgresManufacturingRepository(
             INSERT INTO finance.journals
                 (id, tenant_id, company_id, journal_no, journal_date, fiscal_period_id, description, functional_currency, source_module, source_type, source_id, idempotency_key, status, created_by, posted_by, posted_at)
             VALUES
-                (@id, @tid, @cid, @no, @date, @per, @desc, 'PKR', 'manufacturing', 'work_order_completion', @srcId, @key, 'posted', @userId, @userId, now());
+                (@id, @tid, @cid, @no, @date, @per, @desc, @cur, 'manufacturing', 'work_order_completion', @srcId, @key, 'posted', @userId, @userId, now());
             """;
 
         await using (var cmd = new NpgsqlCommand(jourSql, conn, tx))
@@ -2211,6 +2236,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("date", today);
             cmd.Parameters.AddWithValue("per", periodId);
             cmd.Parameters.AddWithValue("desc", $"Finished goods capitalization for WO {wo.WorkOrderNumber}");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("srcId", workOrderId.ToString());
             cmd.Parameters.AddWithValue("key", idemKey);
             cmd.Parameters.AddWithValue("userId", Ctx.UserId);
@@ -2221,12 +2247,12 @@ public sealed class PostgresManufacturingRepository(
             INSERT INTO finance.journal_lines
                 (tenant_id, company_id, journal_id, line_no, account_id, description, transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
             VALUES
-                (@tid, @cid, @jid, @line, @acc, @desc, 'PKR', @amt, 1.0, @dr, @cr);
+                (@tid, @cid, @jid, @line, @acc, @desc, @cur, @amt, 1.0, @dr, @cr);
             """;
 
         var lineNo = 1;
 
-        // If total cost is zero (e.g. no costs logged), keep nominal 1 PKR or balanced lines
+        // If total cost is zero (e.g. no costs logged), keep nominal 1 unit in functional currency or balanced lines
         var creditWipAmount = wo.TotalProductionCost > 0m ? wo.TotalProductionCost : 1.00m;
         var debitFgAmount = costSummary.FinishedGoodsValuation > 0m ? costSummary.FinishedGoodsValuation : creditWipAmount;
 
@@ -2239,6 +2265,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("line", lineNo++);
             cmd.Parameters.AddWithValue("acc", fgAccId);
             cmd.Parameters.AddWithValue("desc", $"Capitalize Finished Goods Inventory ({acceptedQty} units)");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("amt", debitFgAmount);
             cmd.Parameters.AddWithValue("dr", debitFgAmount);
             cmd.Parameters.AddWithValue("cr", 0m);
@@ -2255,6 +2282,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("line", lineNo++);
             cmd.Parameters.AddWithValue("acc", scrapAccId);
             cmd.Parameters.AddWithValue("desc", $"Production scrap loss ({scrappedQty} units)");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("amt", costSummary.ScrapExpense);
             cmd.Parameters.AddWithValue("dr", costSummary.ScrapExpense);
             cmd.Parameters.AddWithValue("cr", 0m);
@@ -2275,6 +2303,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("line", lineNo++);
             cmd.Parameters.AddWithValue("acc", varianceAccId);
             cmd.Parameters.AddWithValue("desc", "Manufacturing rounding/cost variance debit");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("amt", variance);
             cmd.Parameters.AddWithValue("dr", variance);
             cmd.Parameters.AddWithValue("cr", 0m);
@@ -2291,6 +2320,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("line", lineNo++);
             cmd.Parameters.AddWithValue("acc", varianceAccId);
             cmd.Parameters.AddWithValue("desc", "Manufacturing rounding/cost variance credit");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("amt", absVar);
             cmd.Parameters.AddWithValue("dr", 0m);
             cmd.Parameters.AddWithValue("cr", absVar);
@@ -2306,6 +2336,7 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("line", lineNo++);
             cmd.Parameters.AddWithValue("acc", wipAccId);
             cmd.Parameters.AddWithValue("desc", $"Credit WIP Inventory completion for WO {wo.WorkOrderNumber}");
+            cmd.Parameters.AddWithValue("cur", functionalCurrency);
             cmd.Parameters.AddWithValue("amt", creditWipAmount);
             cmd.Parameters.AddWithValue("dr", 0m);
             cmd.Parameters.AddWithValue("cr", creditWipAmount);
