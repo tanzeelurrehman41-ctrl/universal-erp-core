@@ -1,6 +1,7 @@
 name = "universal-erp-demo"
 compatibility_date = "2026-11-01"
 main = "worker.ts"
+previews = {}
 
 [assets]
 directory = "./dist"
