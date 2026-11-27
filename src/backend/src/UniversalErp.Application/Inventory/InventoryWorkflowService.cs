@@ -913,6 +913,11 @@ public sealed class InventoryWorkflowService(
     public Task<InventoryValuationReportSummary> GetInventoryValuationReportAsync(CancellationToken ct)
     {
         var context = tenantContextAccessor.Current;
+        if (context.TenantId == Guid.Empty || context.CompanyId == Guid.Empty)
+        {
+            throw new InvalidOperationException("A valid tenant and company context is required to generate an inventory valuation report.");
+        }
+
         return repository.GetInventoryValuationReportAsync(context.TenantId, context.CompanyId, ct);
     }
 
