@@ -741,20 +741,17 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "16px" }}>
               <div style={{ padding: "12px", backgroundColor: "#F3F4F6", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#4B5563" }}>Total Work Orders</div>
-                <div style={{ fontSize: "18px", fontWeight: "bold" }}>{dashboard?.manufacturing.totalWorkOrders || 12}</div>
+                <div style={{ fontSize: "18px", fontWeight: "bold" }}>{dashboard ? dashboard.manufacturing.totalWorkOrders : "—"}</div>
               </div>
               <div style={{ padding: "12px", backgroundColor: "#EFF6FF", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#1E40AF" }}>Completion Rate</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#1E3A8A" }}>
-                  {dashboard?.manufacturing.workOrderCompletionRatePercentage || 88.5}%
+                  {dashboard ? `${dashboard.manufacturing.workOrderCompletionRatePercentage}%` : "—"}
                 </div>
               </div>
             </div>
             <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• Work In Progress (WIP) Valuation: <strong>PKR 75,000</strong></div>
-              <div>• Material Cost Component: <strong>65%</strong></div>
-              <div>• Direct Labor Component: <strong>25%</strong></div>
-              <div>• Overhead Allocation: <strong>10%</strong></div>
+              <div>• Work In Progress (WIP) Valuation: <strong>{dashboard ? `PKR ${dashboard.manufacturing.workInProgressValuationPkr.toLocaleString()}` : "—"}</strong></div>
             </div>
           </div>
 
@@ -764,20 +761,19 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
               <div style={{ padding: "12px", backgroundColor: "#FEF2F2", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#991B1B" }}>Total Scrap Cost</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#7F1D1D" }}>
-                  PKR {(dashboard?.manufacturing.totalScrapCostPkr || 4200).toLocaleString()}
+                  {dashboard ? `PKR ${dashboard.manufacturing.totalScrapCostPkr.toLocaleString()}` : "—"}
                 </div>
               </div>
               <div style={{ padding: "12px", backgroundColor: "#F0FDF4", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#166534" }}>Scrap Rate %</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#14532D" }}>
-                  {dashboard?.manufacturing.scrapRatePercentage || 1.8}% (Target &lt; 2.5%)
+                  {dashboard ? `${dashboard.manufacturing.scrapRatePercentage}%` : "—"}
                 </div>
               </div>
             </div>
             <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• Quality Inspections Conducted: <strong>48 runs</strong></div>
-              <div>• First-Pass Yield (FPY): <strong>96.4%</strong></div>
-              <div>• Scrap GL Account: <strong>5020 (Cost of Goods Sold - Scrap)</strong></div>
+              <div>• Work orders completed: <strong>{dashboard ? dashboard.manufacturing.completedWorkOrders : "—"}</strong></div>
+              <div>• Total work orders: <strong>{dashboard ? dashboard.manufacturing.totalWorkOrders : "—"}</strong></div>
             </div>
           </div>
         </div>
