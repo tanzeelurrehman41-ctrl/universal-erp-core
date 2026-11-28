@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { apiFetch, type ApiWorkspaceScope } from "./auth";
 import {
+  acknowledgeOfflineDeviceCursors,
   enqueueReceiptOperation,
   loadInventoryChangeCursors,
   loadInventorySnapshot,
@@ -382,10 +383,29 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
       setData(snapshot);
       setIsUsingCachedData(false);
       let snapshotSaved = true;
+      let serverCursorAcknowledged = true;
       try {
         await saveInventorySnapshotAndCursors(storageScope, snapshot, cursors);
       } catch {
         snapshotSaved = false;
+      }
+
+      if (snapshotSaved && feedCaughtUp) {
+        try {
+          const operations = await loadReceiptOperations(storageScope);
+          const lastAcknowledgedSequence = Math.max(
+            0,
+            ...operations.filter(operation => operation.status === "accepted").map(operation => operation.deviceSequence),
+          );
+          await acknowledgeOfflineDeviceCursors(
+            storageScope,
+            workspace,
+            cursors,
+            lastAcknowledgedSequence,
+          );
+        } catch {
+          serverCursorAcknowledged = false;
+        }
       }
       if (!mounted) return;
 
@@ -408,7 +428,9 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
         ? "Inventory loaded, but this browser could not save the encrypted snapshot and change cursors."
         : !feedCaughtUp
           ? "Inventory loaded. The change feed could not be checked; it will retry without advancing its saved cursor."
-          : "");
+          : !serverCursorAcknowledged
+            ? "Inventory snapshot is saved locally; the server device-cursor acknowledgement will retry."
+            : "");
     })().catch((error: unknown) => {
       if (!mounted) return;
       void loadInventorySnapshot<Data>(storageScope).then((snapshot) => {
