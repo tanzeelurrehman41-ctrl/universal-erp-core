@@ -8,6 +8,7 @@ using UniversalErp.Application.Inventory;
 using UniversalErp.Domain.Common;
 using UniversalErp.Domain.Tenancy;
 using UniversalErp.Infrastructure.Finance;
+using UniversalErp.Infrastructure.Sync;
 
 namespace UniversalErp.Infrastructure.Inventory;
 
@@ -856,6 +857,7 @@ public sealed partial class PostgresInventoryWorkflowRepository
         decimal totalDispatchedQty = 0;
         decimal totalFifoCost = 0;
         var allAllocations = new List<FifoLayerAllocation>();
+        var feedLegs = new List<object>();
         int legNumber = 1;
 
         foreach (var line in linesToDispatch)
@@ -874,6 +876,16 @@ public sealed partial class PostgresInventoryWorkflowRepository
                 var uomRes = await getUom.ExecuteScalarAsync(cancellationToken);
                 baseUomId = (Guid)uomRes!;
             }
+
+            feedLegs.Add(new
+            {
+                variantId = line.VariantId,
+                warehouseId,
+                binId = line.BinId,
+                stockStatus = "available",
+                quantityDelta = -line.PickedQty,
+                unitOfMeasureId = baseUomId,
+            });
 
             // Record movement leg (negative)
             await using (var insLeg = new NpgsqlCommand(
@@ -1052,6 +1064,26 @@ public sealed partial class PostgresInventoryWorkflowRepository
             updList.Parameters.AddWithValue("id", pickListId);
             await updList.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        var dispatchFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "issue",
+            legs = feedLegs,
+            occurredAt = dispatchedAt,
+            postedAt = dispatchedAt,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            db.Connection,
+            db.Transaction,
+            context.TenantId,
+            context.CompanyId,
+            "inventory_movement",
+            movementId,
+            1,
+            "upsert",
+            dispatchFeedPayload,
+            cancellationToken);
 
         await db.Transaction.CommitAsync(cancellationToken);
         return Result<DispatchPickListResult>.Success(new DispatchPickListResult(
@@ -1465,6 +1497,7 @@ public sealed partial class PostgresInventoryWorkflowRepository
         decimal totalNetVarianceQty = 0;
         decimal totalNetVarianceCost = 0;
         var approvedAt = DateTimeOffset.UtcNow;
+        var feedLegs = new List<object>();
 
         if (linesWithVariance.Count > 0)
         {
@@ -1508,6 +1541,16 @@ public sealed partial class PostgresInventoryWorkflowRepository
                     getUom.Parameters.AddWithValue("varId", line.VariantId);
                     baseUomId = (Guid)(await getUom.ExecuteScalarAsync(cancellationToken))!;
                 }
+
+                feedLegs.Add(new
+                {
+                    variantId = line.VariantId,
+                    warehouseId,
+                    binId = line.BinId,
+                    stockStatus = "available",
+                    quantityDelta = line.VarianceQty,
+                    unitOfMeasureId = baseUomId,
+                });
 
                 // Leg
                 await using (var insLeg = new NpgsqlCommand(
@@ -1740,6 +1783,29 @@ public sealed partial class PostgresInventoryWorkflowRepository
             updSession.Parameters.AddWithValue("now", approvedAt);
             updSession.Parameters.AddWithValue("id", sessionId);
             await updSession.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        if (adjustmentMovementId is Guid countMovementId)
+        {
+            var countFeedPayload = JsonSerializer.Serialize(new
+            {
+                movementId = countMovementId,
+                movementType = "adjustment",
+                legs = feedLegs,
+                occurredAt = approvedAt,
+                postedAt = approvedAt,
+            });
+            await CompanyChangeLogWriter.AppendAsync(
+                db.Connection,
+                db.Transaction,
+                context.TenantId,
+                context.CompanyId,
+                "inventory_movement",
+                countMovementId,
+                1,
+                "upsert",
+                countFeedPayload,
+                cancellationToken);
         }
 
         await db.Transaction.CommitAsync(cancellationToken);
@@ -2111,6 +2177,7 @@ public sealed partial class PostgresInventoryWorkflowRepository
 
         decimal totalReturnedQty = 0;
         decimal totalValuationImpact = 0;
+        var feedLegs = new List<object>();
         int legNo = 1;
 
         foreach (var line in lines)
@@ -2131,6 +2198,15 @@ public sealed partial class PostgresInventoryWorkflowRepository
             }
 
             var delta = returnType == "customer_return" ? line.Quantity : -line.Quantity;
+            feedLegs.Add(new
+            {
+                variantId = line.VariantId,
+                warehouseId,
+                binId = line.BinId,
+                stockStatus = "available",
+                quantityDelta = delta,
+                unitOfMeasureId = baseUomId,
+            });
 
             // Leg
             await using (var insLeg = new NpgsqlCommand(
@@ -2349,6 +2425,26 @@ public sealed partial class PostgresInventoryWorkflowRepository
             updRet.Parameters.AddWithValue("id", returnId);
             await updRet.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        var returnFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType,
+            legs = feedLegs,
+            occurredAt = processedAt,
+            postedAt = processedAt,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            db.Connection,
+            db.Transaction,
+            context.TenantId,
+            context.CompanyId,
+            "inventory_movement",
+            movementId,
+            1,
+            "upsert",
+            returnFeedPayload,
+            cancellationToken);
 
         await db.Transaction.CommitAsync(cancellationToken);
         return Result<PostStockReturnResult>.Success(new PostStockReturnResult(
