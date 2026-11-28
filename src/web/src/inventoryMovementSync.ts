@@ -59,10 +59,22 @@ function applyDelta(
   );
 
   if (existing) {
-    existing.onHandQuantity += delta;
+    const nextQuantity = existing.onHandQuantity + delta;
+    if (nextQuantity < 0) {
+      throw new Error(
+        `Inventory movement would make ${stockStatus} stock negative for variant ${variantId} in bin ${binId}.`,
+      );
+    }
+    existing.onHandQuantity = nextQuantity;
     // Movement events lack cost-layer detail, so the previous valuation is stale.
     existing.valuedQuantity = undefined;
     return;
+  }
+
+  if (delta < 0) {
+    throw new Error(
+      `Inventory movement removes ${-delta} units from a bin/status absent in the current baseline (${stockStatus}, ${binId}).`,
+    );
   }
 
   balances.push({
