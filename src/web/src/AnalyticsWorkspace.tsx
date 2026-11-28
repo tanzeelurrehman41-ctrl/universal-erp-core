@@ -572,10 +572,7 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                 </tr>
               </thead>
               <tbody>
-                {(sales?.topCustomers || [
-                  { customerCode: "CUST-001", customerName: "Indus Engineering Ltd", totalRevenuePkr: 750000, ordersCount: 8, contributionPercentage: 60.0 },
-                  { customerCode: "CUST-002", customerName: "Apex Motors Corp", totalRevenuePkr: 500000, ordersCount: 5, contributionPercentage: 40.0 }
-                ]).map(c => (
+                {(sales?.topCustomers ?? []).map(c => (
                   <tr key={c.customerCode} style={{ borderBottom: "1px solid #F3F4F6" }}>
                     <td style={{ padding: "8px" }}>
                       <div style={{ fontWeight: "600" }}>{c.customerName}</div>
@@ -586,6 +583,9 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                     <td style={{ padding: "8px", color: "#2563EB", fontWeight: "600" }}>{c.contributionPercentage}%</td>
                   </tr>
                 ))}
+                {(!sales || sales.topCustomers.length === 0) && (
+                  <tr><td colSpan={4} style={{ padding: "16px", color: "#6B7280" }}>No sales results are available for this period.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -599,21 +599,22 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
               <div style={{ padding: "12px", backgroundColor: "#EFF6FF", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#1E40AF" }}>Total Outstanding AR</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#1E3A8A" }}>
-                  PKR {(sales?.arAging.totalOutstandingPkr || 350000).toLocaleString()}
+                  {sales ? `PKR ${sales.arAging.totalOutstandingPkr.toLocaleString()}` : "—"}
                 </div>
               </div>
               <div style={{ padding: "12px", backgroundColor: "#F0FDF4", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#166534" }}>Days Sales Outstanding (DSO)</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#14532D" }}>
-                  {sales?.arAging.daysSalesOutstanding || 38.5} days
+                  {sales ? `${sales.arAging.daysSalesOutstanding} days` : "—"}
                 </div>
               </div>
             </div>
             <div style={{ fontSize: "12px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• Current (0-30 Days): <strong>PKR {(sales?.arAging.currentPkr || 220000).toLocaleString()}</strong> (62.8%)</div>
-              <div>• 31-60 Days: <strong>PKR {(sales?.arAging.days1To30Pkr || 80000).toLocaleString()}</strong> (22.9%)</div>
-              <div>• 61-90 Days: <strong>PKR {(sales?.arAging.days31To60Pkr || 35000).toLocaleString()}</strong> (10.0%)</div>
-              <div>• Over 90 Days: <strong>PKR {(sales?.arAging.over90DaysPkr || 15000).toLocaleString()}</strong> (4.3%)</div>
+              <div>• Current: <strong>{sales ? `PKR ${sales.arAging.currentPkr.toLocaleString()}` : "—"}</strong></div>
+              <div>• 1–30 days: <strong>{sales ? `PKR ${sales.arAging.days1To30Pkr.toLocaleString()}` : "—"}</strong></div>
+              <div>• 31–60 days: <strong>{sales ? `PKR ${sales.arAging.days31To60Pkr.toLocaleString()}` : "—"}</strong></div>
+              <div>• 61–90 days: <strong>{sales ? `PKR ${sales.arAging.days61To90Pkr.toLocaleString()}` : "—"}</strong></div>
+              <div>• Over 90 days: <strong>{sales ? `PKR ${sales.arAging.over90DaysPkr.toLocaleString()}` : "—"}</strong></div>
             </div>
           </div>
         </div>
@@ -634,10 +635,7 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                 </tr>
               </thead>
               <tbody>
-                {(purchasing?.topSuppliers || [
-                  { supplierCode: "SUPP-001", supplierName: "Pakistan Steel Mills", totalSpendPkr: 450000, poCount: 6, fulfillmentPercentage: 96.0 },
-                  { supplierCode: "SUPP-002", supplierName: "National Fasteners Co", totalSpendPkr: 180000, poCount: 4, fulfillmentPercentage: 92.5 }
-                ]).map(s => (
+                {(purchasing?.topSuppliers ?? []).map(s => (
                   <tr key={s.supplierCode} style={{ borderBottom: "1px solid #F3F4F6" }}>
                     <td style={{ padding: "8px" }}>
                       <div style={{ fontWeight: "600" }}>{s.supplierName}</div>
@@ -648,6 +646,9 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                     <td style={{ padding: "8px", color: "#059669", fontWeight: "600" }}>{s.fulfillmentPercentage}%</td>
                   </tr>
                 ))}
+                {(!purchasing || purchasing.topSuppliers.length === 0) && (
+                  <tr><td colSpan={4} style={{ padding: "16px", color: "#6B7280" }}>No purchasing results are available for this period.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -660,20 +661,20 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
               <div style={{ padding: "12px", backgroundColor: "#FEF3C7", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#92400E" }}>Total Accounts Payable</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#78350F" }}>
-                  PKR {(purchasing?.apAging.totalPayablePkr || 280000).toLocaleString()}
+                  {purchasing ? `PKR ${purchasing.apAging.totalPayablePkr.toLocaleString()}` : "—"}
                 </div>
               </div>
               <div style={{ padding: "12px", backgroundColor: "#F0FDF4", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#166534" }}>Days Payable Outstanding (DPO)</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#14532D" }}>
-                  {purchasing?.apAging.daysPayableOutstanding || 42.0} days
+                  {purchasing ? `${purchasing.apAging.daysPayableOutstanding} days` : "—"}
                 </div>
               </div>
             </div>
             <div style={{ fontSize: "12px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• On-Time Delivery Rate: <strong>91.5%</strong></div>
-              <div>• Purchase Price Variance (PPV): <strong>PKR 12,500</strong> (Favorable)</div>
-              <div>• PO Fulfillment Rate: <strong>94.2%</strong></div>
+              <div>• On-Time Delivery Rate: <strong>{purchasing ? `${purchasing.onTimeDeliveryPercentage}%` : "—"}</strong></div>
+              <div>• Purchase Price Variance: <strong>{purchasing ? `PKR ${purchasing.purchasePriceVariancePkr.toLocaleString()}` : "—"}</strong></div>
+              <div>• PO Fulfillment Rate: <strong>{purchasing ? `${purchasing.poFulfillmentRatePercentage}%` : "—"}</strong></div>
             </div>
           </div>
         </div>
