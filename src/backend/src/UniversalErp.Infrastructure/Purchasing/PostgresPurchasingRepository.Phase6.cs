@@ -329,11 +329,33 @@ public sealed partial class PostgresPurchasingRepository
                 var binIdObj = await binCmd.ExecuteScalarAsync(ct);
                 if (binIdObj is Guid binId)
                 {
-                    // Decrement available balance
+                    // Lock and verify the source balance before reclassifying stock.
+                    await using (var sourceCheck = conn.CreateCommand())
+                    {
+                        sourceCheck.CommandText = """
+                            SELECT COALESCE(SUM(on_hand_qty), 0)
+                            FROM erp_inventory.stock_balance
+                            WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
+                              AND warehouse_id = @wh AND bin_id = @bin AND status_code = 'available'
+                            FOR UPDATE;
+                            """;
+                        sourceCheck.Parameters.AddWithValue("tid", Ctx.TenantId);
+                        sourceCheck.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                        sourceCheck.Parameters.AddWithValue("var", l.VariantId);
+                        sourceCheck.Parameters.AddWithValue("wh", warehouseId);
+                        sourceCheck.Parameters.AddWithValue("bin", binId);
+                        var available = Convert.ToDecimal(await sourceCheck.ExecuteScalarAsync(ct) ?? 0m);
+                        if (available < l.QuarantinedQty)
+                        {
+                            throw new InvalidOperationException(
+                                $"INSUFFICIENT_AVAILABLE_STOCK_FOR_QUARANTINE: Available {available}, requested {l.QuarantinedQty}.");
+                        }
+                    }
+
                     await using var decCmd = conn.CreateCommand();
                     decCmd.CommandText = """
                         UPDATE erp_inventory.stock_balance
-                        SET on_hand_qty = GREATEST(0, on_hand_qty - @qty), updated_at = now()
+                        SET on_hand_qty = on_hand_qty - @qty, updated_at = now()
                         WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
                           AND warehouse_id = @wh AND bin_id = @bin AND status_code = 'available';
                         """;
