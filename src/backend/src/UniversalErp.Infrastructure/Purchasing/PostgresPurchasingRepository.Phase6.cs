@@ -333,7 +333,7 @@ public sealed partial class PostgresPurchasingRepository
                     await using (var sourceCheck = conn.CreateCommand())
                     {
                         sourceCheck.CommandText = """
-                            SELECT COALESCE(SUM(on_hand_qty), 0)
+                            SELECT on_hand_qty
                             FROM erp_inventory.stock_balance
                             WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
                               AND warehouse_id = @wh AND bin_id = @bin AND status_code = 'available'
@@ -344,7 +344,15 @@ public sealed partial class PostgresPurchasingRepository
                         sourceCheck.Parameters.AddWithValue("var", l.VariantId);
                         sourceCheck.Parameters.AddWithValue("wh", warehouseId);
                         sourceCheck.Parameters.AddWithValue("bin", binId);
-                        var available = Convert.ToDecimal(await sourceCheck.ExecuteScalarAsync(ct) ?? 0m);
+                        decimal available = 0m;
+                        await using (var sourceRows = await sourceCheck.ExecuteReaderAsync(ct))
+                        {
+                            while (await sourceRows.ReadAsync(ct))
+                            {
+                                available += sourceRows.GetDecimal(0);
+                            }
+                            await sourceRows.CloseAsync();
+                        }
                         if (available < l.QuarantinedQty)
                         {
                             throw new InvalidOperationException(
