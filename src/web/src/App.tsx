@@ -38,6 +38,13 @@ import {
   type ProductSummary,
   type SyncAuthorization,
 } from "./offlineProductQueue";
+import {
+  acknowledgeOfflineDeviceCursors,
+  loadInventoryChangeCursors,
+  loadInventorySnapshot,
+  loadReceiptOperations,
+  saveInventorySnapshotAndCursors,
+} from "./offlineReceiptQueue";
 
 type ApiStatus = "checking" | "online" | "offline";
 type ModuleSummary = {
@@ -49,6 +56,45 @@ type ModuleSummary = {
 
 function workspaceKey(workspace: TenantCompanyContext): string {
   return `${workspace.tenantId}:${workspace.companyId}`;
+}
+
+type ProductFeedPage = {
+  nextCursor: string;
+  hasMore: boolean;
+  changes: Array<{
+    cursor: string;
+    entityType: string;
+    entityId: string;
+    entityVersion: number;
+    changeType: string;
+    payload: Record<string, unknown>;
+    occurredAt: string;
+  }>;
+};
+
+function productFromChange(payload: Record<string, unknown>): ProductSummary | null {
+  if (
+    typeof payload.tenantId !== "string" ||
+    typeof payload.productId !== "string" ||
+    typeof payload.productCode !== "string" ||
+    typeof payload.name !== "string" ||
+    typeof payload.productType !== "string" ||
+    typeof payload.isActive !== "boolean" ||
+    typeof payload.createdAt !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    tenantId: payload.tenantId,
+    productId: payload.productId,
+    productCode: payload.productCode,
+    name: payload.name,
+    description: typeof payload.description === "string" ? payload.description : null,
+    productType: payload.productType,
+    isActive: payload.isActive,
+    createdAt: payload.createdAt,
+  };
 }
 
 function ownerKeyForUser(user: ErpAuthUser | null): string | undefined {
@@ -100,7 +146,7 @@ const modulePreview: ModuleSummary[] = [
   { id: "warehouse", name: "Warehouse & Logistics", status: "Active", description: "Zones, aisles, racks, shelf bins, GS1 barcode scanning, directed putaway, wave picking, cartonization packing, replenishment, transfers, and quarantine." },
   { id: "hr_payroll", name: "HR, Attendance & Payroll", status: "Active", description: "Employee directory, hierarchy, shifts, attendance, leaves, statutory tax slabs, EOBI, PF, loans, payslips, and GL integration." },
   { id: "security", name: "Security and access", status: "Active", description: "OIDC bearer token validation, network clock synchronization, transparent token refresh, and live membership & RLS permission checks." },
-  { id: "offline", name: "Offline sync", status: "In progress", description: "Encrypted local journals, authenticated device grants, a durable receipt operation inbox, atomic snapshot cursors, and a paged change feed; event-level merge and product inbox processing remain." },
+  { id: "offline", name: "Offline sync", status: "In progress", description: "Encrypted journals, shared permission-scoped device grants and sequence, durable receipts, and incremental product/inventory feeds with server-acknowledged cursors; concurrent-edit merge and replacement-device recovery remain." },
   { id: "reporting", name: "Reporting", status: "Architecture only", description: "Approved datasets, dashboards, exports, and scheduled reports." },
   { id: "saas", name: "SaaS Platform & Tenant Management", status: "Active", description: "Automated tenant provisioning, subscription lifecycle, entitlement enforcement, usage metering, and billing engine." },
   { id: "branches", name: "Multi-Branch Operations", status: "Active", description: "Hierarchical branch master, operating locations, POS terminal binding, and branch switcher." },
@@ -140,6 +186,7 @@ export default function App() {
   });
   const activeWorkspace = workspaces.find((workspace) => workspaceKey(workspace) === activeWorkspaceKey) ?? null;
   const queueOwnerKey = ownerKeyForUser(authUser);
+  const inventoryStorageScope = `${queueOwnerKey ?? "development"}:${activeWorkspace ? workspaceKey(activeWorkspace) : "local"}`;
   const [activeNavTab, setActiveNavTab] = useState<
     | "overview"
     | "inventory"
@@ -260,25 +307,94 @@ export default function App() {
 
     let isMounted = true;
     let isRefreshing = false;
-    const loadProducts = async () => {
-      try {
-        const response = await apiFetch("/api/v1/products", {}, activeWorkspace);
+    const storageScope = activeWorkspace
+      ? workspaceKey(activeWorkspace) + ":" + (queueOwnerKey ?? "shared") + ":product-catalog"
+      : "development:product-catalog";
+
+    const loadOrRecoverProductSnapshot = async (): Promise<ProductSummary[]> => {
+      const cached = await loadInventorySnapshot<{ products: ProductSummary[] }>(storageScope);
+      if (cached && Array.isArray(cached.products)) return cached.products;
+
+      // If a snapshot was evicted but the cursor survived, keep the cursor and replay newer events.
+      const response = await apiFetch("/api/v1/products", {}, activeWorkspace);
+      if (!response.ok) {
+        throw new Error(response.status === 404 ? "development-only" : "load-failed");
+      }
+      const productData = await response.json() as ProductSummary[];
+      const cursors = await loadInventoryChangeCursors(storageScope);
+      await saveInventorySnapshotAndCursors(storageScope, { products: productData }, cursors);
+      return productData;
+    };
+
+    const synchronizeProductChanges = async (): Promise<void> => {
+      const cursors = await loadInventoryChangeCursors(storageScope);
+      let products = await loadOrRecoverProductSnapshot();
+      let cursor = cursors.products;
+
+      while (true) {
+        const query = new URLSearchParams({ after: cursor, limit: "200" });
+        const response = await apiFetch("/api/v1/sync/changes/products?" + query.toString(), {}, activeWorkspace);
         if (!response.ok) {
-          throw new Error(response.status === 404 ? "development-only" : "load-failed");
+          throw new Error(response.status === 403 ? "product-feed-forbidden" : "product-feed-" + response.status);
         }
-        const productData = (await response.json()) as ProductSummary[];
-        if (isMounted) {
-          setProducts(productData);
-          setCatalogMessage((current) => current === "Could not load products. Check the API connection and try again." ? "" : current);
+
+        const page = await response.json() as ProductFeedPage;
+        if (!Array.isArray(page.changes) || typeof page.nextCursor !== "string") {
+          throw new Error("The product change feed returned an invalid page.");
         }
-      } catch (error) {
-        if (isMounted) {
-          setCatalogMessage(
-            error instanceof Error && error.message === "development-only"
-              ? "The local catalog is available when the API runs in Development mode."
-              : "Could not load products. Check the API connection and try again.",
+
+        const byId = new Map(products.map((product) => [product.productId, product]));
+        for (const change of page.changes) {
+          if (change.entityType !== "product") continue;
+          if (change.changeType === "upsert") {
+            const product = productFromChange(change.payload);
+            if (product) byId.set(product.productId, product);
+          } else if (change.changeType === "delete") {
+            byId.delete(change.entityId);
+          }
+        }
+
+        products = [...byId.values()];
+        const previousCursor = cursor;
+        cursor = page.nextCursor;
+        await saveInventorySnapshotAndCursors(storageScope, { products }, {
+          products: cursor,
+          inventory: cursors.inventory,
+        });
+
+        // The server checkpoint advances only after the encrypted local snapshot and cursor commit.
+        try {
+          const [productOperations, receiptOperations] = await Promise.all([
+            loadProductOperations(),
+            loadReceiptOperations(storageScope),
+          ]);
+          const lastAcknowledgedSequence = Math.max(
+            0,
+            ...productOperations.filter(operation => operation.status === "accepted").map(operation => operation.deviceSequence),
+            ...receiptOperations.filter(operation => operation.status === "accepted").map(operation => operation.deviceSequence),
           );
+          await acknowledgeOfflineDeviceCursors(
+            storageScope,
+            activeWorkspace,
+            { products: cursor, inventory: cursors.inventory },
+            lastAcknowledgedSequence,
+          );
+        } catch {
+          if (isMounted) {
+            setCatalogMessage("Product snapshot is saved locally; the server device-cursor acknowledgement will retry.");
+          }
         }
+
+        if (isMounted) setProducts(products);
+
+        if (!page.hasMore) break;
+        if (cursor === previousCursor && page.changes.length === 0) {
+          throw new Error("The product change feed did not advance its cursor.");
+        }
+      }
+
+      if (isMounted) {
+        setCatalogMessage((current) => current === "Could not load products. Check the API connection and try again." ? "" : current);
       }
     };
 
@@ -296,8 +412,10 @@ export default function App() {
             companyId: activeWorkspace.companyId,
             companyName: activeWorkspace.companyName,
             ownerKey: queueOwnerKey,
+            storageScope: inventoryStorageScope,
           };
         }
+
         const operations = await syncPendingProductOperations(authorization);
         if (!isMounted) return;
         setOfflineOperations(operations);
@@ -311,15 +429,24 @@ export default function App() {
             )),
           )
           .map((operation) => operation.serverProduct!);
-        setProducts((current) => {
-          const byId = new Map(current.map((product) => [product.productId, product]));
+
+        if (locallyConfirmed.length > 0) {
+          const cached = await loadInventorySnapshot<{ products: ProductSummary[] }>(storageScope);
+          const byId = new Map((cached?.products ?? []).map((product) => [product.productId, product]));
           for (const product of locallyConfirmed) byId.set(product.productId, product);
-          return [...byId.values()];
-        });
-        await loadProducts();
-      } catch {
+          const cursors = await loadInventoryChangeCursors(storageScope);
+          await saveInventorySnapshotAndCursors(storageScope, { products: [...byId.values()] }, cursors);
+          if (isMounted) setProducts([...byId.values()]);
+        }
+
+        await synchronizeProductChanges();
+      } catch (error) {
         if (isMounted) {
-          setCatalogMessage("Sync could not finish. Saved actions remain in this browser's queue.");
+          setCatalogMessage(error instanceof Error && error.message === "development-only"
+            ? "The local catalog is available when the API runs in Development mode."
+            : error instanceof Error && error.message === "product-feed-forbidden"
+              ? "Your role cannot view the shared product catalog."
+              : "Sync could not finish. Saved actions remain in the local queue.");
         }
       } finally {
         isRefreshing = false;
@@ -404,6 +531,7 @@ export default function App() {
             companyId: activeWorkspace.companyId,
             companyName: activeWorkspace.companyName,
             ownerKey: queueOwnerKey,
+            storageScope: inventoryStorageScope,
           };
         }
       }
@@ -570,7 +698,7 @@ export default function App() {
     }
   }
   const inventoryEnabled = apiStatus === "online" && (!oidcConfigured || Boolean(authUser && !authUser.expired && activeWorkspace));
-  const inventoryStorageScope = `${queueOwnerKey ?? "development"}:${activeWorkspace ? workspaceKey(activeWorkspace) : "local"}`;
+
 
   const navItems: NavItem[] = [
     { id: "overview", label: "Executive Overview", icon: "📊", group: "overview" },

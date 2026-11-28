@@ -1,4 +1,5 @@
 using System.Text.Json;
+using UniversalErp.Application.Inventory;
 using UniversalErp.Domain.Tenancy;
 
 namespace UniversalErp.Application.Sync;
@@ -17,6 +18,10 @@ public sealed record SyncChangePage(
     bool HasMore,
     IReadOnlyList<SyncChange> Changes);
 
+public sealed record InventoryBalanceSnapshot(
+    string Cursor,
+    IReadOnlyList<InventoryAvailabilitySummary> Balances);
+
 public interface ISyncChangeFeed
 {
     Task<SyncChangePage> ReadPageAsync(
@@ -24,5 +29,9 @@ public interface ISyncChangeFeed
         string entityType,
         long afterSequence,
         int pageSize,
+        CancellationToken cancellationToken);
+
+    Task<InventoryBalanceSnapshot> ReadInventorySnapshotAsync(
+        TenantContext context,
         CancellationToken cancellationToken);
 }

@@ -55,6 +55,8 @@ public sealed class OfflineSyncServiceTests
         public bool CompanyActive = true;
         public bool CompanyScopeActive = true;
         private readonly Dictionary<Guid, (DateTimeOffset ExpiresAt, bool Revoked)> _grantMetadata = [];
+        private readonly Dictionary<Guid, HashSet<string>> _grantOperations = [];
+        private readonly Dictionary<Guid, OfflineDeviceCursorState> _deviceCursors = [];
 
         private record InboxEntry(
             Guid DeviceId,
@@ -64,10 +66,15 @@ public sealed class OfflineSyncServiceTests
             string Outcome,
             OfflineReceiptOperationResult? StoredResult = null);
 
-        public void SeedGrant(Guid grantId, string rawToken, Guid? companyId = null)
+        public void SeedGrant(
+            Guid grantId,
+            string rawToken,
+            Guid? companyId = null,
+            IReadOnlyList<string>? allowedOperations = null)
         {
             _grants[(companyId ?? TestCtx.CompanyId, grantId, Hash(rawToken))] = true;
             _grantMetadata[grantId] = (DateTimeOffset.UtcNow.AddDays(7), Revoked: false);
+            _grantOperations[grantId] = (allowedOperations ?? ["inventory.receipt.post"]).ToHashSet(StringComparer.Ordinal);
         }
 
         public void RevokeGrant(Guid grantId)
@@ -89,17 +96,67 @@ public sealed class OfflineSyncServiceTests
 
         public Task<OfflineDeviceGrant?> RegisterDeviceAsync(
             TenantContext context, Guid clientDeviceId, string platformCode,
-            string? deviceName, CancellationToken cancellationToken)
+            string? deviceName, CancellationToken cancellationToken,
+            IReadOnlyList<string>? allowedOperations = null)
         {
             if (!DeviceActive || !CompanyActive || !CompanyScopeActive)
                 return Task.FromResult<OfflineDeviceGrant?>(null);
 
             var grantToken = "test-token";
             var grantId = Guid.NewGuid();
-            SeedGrant(grantId, grantToken, context.CompanyId);
+            var operations = allowedOperations ?? ["inventory.receipt.post"];
+            SeedGrant(grantId, grantToken, context.CompanyId, operations);
             return Task.FromResult<OfflineDeviceGrant?>(
                 new OfflineDeviceGrant(Guid.NewGuid(), grantId, grantToken,
-                    DateTimeOffset.UtcNow.AddDays(7)));
+                    DateTimeOffset.UtcNow.AddDays(7), operations));
+        }
+
+        public Task<bool> ValidateDeviceGrantAsync(
+            TenantContext context, Guid deviceId, Guid grantId, string grantToken,
+            string requiredOperation, CancellationToken cancellationToken)
+        {
+            var hash = Hash(grantToken);
+            var valid = _grants.ContainsKey((context.CompanyId, grantId, hash)) &&
+                _grantOperations.TryGetValue(grantId, out var operations) &&
+                (operations.Contains(requiredOperation) ||
+                    (requiredOperation == "sync.cursor.ack" &&
+                     operations.Any(operation => operation is "inventory.product.create" or "inventory.receipt.post"))) &&
+                _grantMetadata.TryGetValue(grantId, out var metadata) &&
+                !metadata.Revoked && metadata.ExpiresAt > DateTimeOffset.UtcNow &&
+                DeviceActive && CompanyActive && CompanyScopeActive;
+            return Task.FromResult(valid);
+        }
+
+        public async Task<OfflineDeviceCursorState?> AcknowledgeDeviceCursorsAsync(
+            TenantContext context,
+            OfflineDeviceCursorAcknowledgement acknowledgement,
+            CancellationToken cancellationToken)
+        {
+            if (!await ValidateDeviceGrantAsync(
+                context,
+                acknowledgement.DeviceId,
+                acknowledgement.GrantId,
+                acknowledgement.GrantToken,
+                "sync.cursor.ack",
+                cancellationToken))
+            {
+                return null;
+            }
+
+            if (!long.TryParse(acknowledgement.ProductsCursor, out var products) || products < 0 ||
+                !long.TryParse(acknowledgement.InventoryCursor, out var inventory) || inventory < 0 ||
+                acknowledgement.LastAcknowledgedSequence < 0)
+            {
+                return null;
+            }
+
+            _deviceCursors.TryGetValue(acknowledgement.DeviceId, out var stored);
+            var next = new OfflineDeviceCursorState(
+                Math.Max(long.Parse(stored?.ProductsCursor ?? "0"), products).ToString(),
+                Math.Max(long.Parse(stored?.InventoryCursor ?? "0"), inventory).ToString(),
+                Math.Max(stored?.LastAcknowledgedSequence ?? 0, acknowledgement.LastAcknowledgedSequence));
+            _deviceCursors[acknowledgement.DeviceId] = next;
+            return next;
         }
 
         public Task<OfflineInboxReservation> ReserveReceiptOperationAsync(
@@ -486,6 +543,62 @@ public sealed class OfflineSyncServiceTests
         Assert.False(ShouldWriteSnapshot("100", "50", "50", "100"));
         // Case 5: both regress → blocked
         Assert.False(ShouldWriteSnapshot("10", "10", "50", "100"));
+    }
+
+    [Fact]
+    public async Task DeviceCursorAcknowledgement_StoresMonotonicCursorsForAuthorizedDevice()
+    {
+        var repo = new FakeSyncRepository();
+        var deviceId = Guid.NewGuid();
+        var grantId = Guid.NewGuid();
+        repo.SeedGrant(
+            grantId,
+            "cursor-token",
+            allowedOperations: ["inventory.product.create"]);
+
+        var first = await repo.AcknowledgeDeviceCursorsAsync(
+            TestCtx,
+            new OfflineDeviceCursorAcknowledgement(deviceId, grantId, "cursor-token", "100", "40", 7),
+            CancellationToken.None);
+        var staleRetry = await repo.AcknowledgeDeviceCursorsAsync(
+            TestCtx,
+            new OfflineDeviceCursorAcknowledgement(deviceId, grantId, "cursor-token", "12", "8", 3),
+            CancellationToken.None);
+
+        Assert.Equal(new OfflineDeviceCursorState("100", "40", 7), first);
+        Assert.Equal(first, staleRetry);
+    }
+
+    [Fact]
+    public async Task DeviceCursorAcknowledgement_AllowsReadOnlyInventoryGrant()
+    {
+        var repo = new FakeSyncRepository();
+        var deviceId = Guid.NewGuid();
+        var grantId = Guid.NewGuid();
+        repo.SeedGrant(grantId, "read-only-cursor-token", allowedOperations: ["sync.cursor.ack"]);
+
+        var result = await repo.AcknowledgeDeviceCursorsAsync(
+            TestCtx,
+            new OfflineDeviceCursorAcknowledgement(
+                deviceId, grantId, "read-only-cursor-token", "20", "15", 0),
+            CancellationToken.None);
+
+        Assert.Equal(new OfflineDeviceCursorState("20", "15", 0), result);
+    }
+
+    [Fact]
+    public async Task DeviceCursorAcknowledgement_RejectsInvalidOrExpiredGrant()
+    {
+        var repo = new FakeSyncRepository();
+        var deviceId = Guid.NewGuid();
+        var grantId = Guid.NewGuid();
+        repo.SeedGrant(grantId, "cursor-token", allowedOperations: []);
+        var result = await repo.AcknowledgeDeviceCursorsAsync(
+            TestCtx,
+            new OfflineDeviceCursorAcknowledgement(deviceId, grantId, "cursor-token", "10", "10", 1),
+            CancellationToken.None);
+
+        Assert.Null(result);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

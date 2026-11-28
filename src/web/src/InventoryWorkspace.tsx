@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { apiFetch, type ApiWorkspaceScope } from "./auth";
 import {
+  acknowledgeOfflineDeviceCursors,
   enqueueReceiptOperation,
   loadInventoryChangeCursors,
   loadInventorySnapshot,
@@ -14,6 +15,7 @@ import {
 } from "./offlineReceiptQueue";
 import { getTransferSourceStock, validateStockTransfer } from "./transferHelpers";
 import { calculateAtp, validateReservation, validateCountLine } from "./reservationHelpers";
+import { applyInventoryMovementChanges, type InventoryMovementFeedChange } from "./inventoryMovementSync";
 
 type Props = {
   enabled: boolean;
@@ -220,32 +222,6 @@ async function readChangePage(
   return page;
 }
 
-async function readAllChangePages(
-  entityType: "products" | "inventory",
-  startCursor: string,
-  workspace: ApiWorkspaceScope | null,
-): Promise<string> {
-  let cursor = startCursor;
-  for (let pageNumber = 0; pageNumber < 1000; pageNumber += 1) {
-    const page = await readChangePage(entityType, cursor, workspace);
-    if (page.hasMore && page.nextCursor === cursor) throw new Error(`The ${entityType} change feed did not advance.`);
-    cursor = page.nextCursor;
-    if (!page.hasMore) return cursor;
-  }
-  throw new Error(`The ${entityType} change feed has more than 500,000 changes; synchronize in smaller batches.`);
-}
-
-async function readChangeCursors(
-  cursors: InventoryChangeCursors,
-  workspace: ApiWorkspaceScope | null,
-): Promise<InventoryChangeCursors> {
-  const [products, inventory] = await Promise.all([
-    readAllChangePages("products", cursors.products, workspace),
-    readAllChangePages("inventory", cursors.inventory, workspace),
-  ]);
-  return { products, inventory };
-}
-
 export default function InventoryWorkspace({ enabled, canQueue, persistentStorageGranted, workspace, queueScope, storageScope }: Props) {
   const [activeTab, setActiveTab] = useState<"core" | "reservations" | "picking" | "counts" | "returns" | "valuation">("core");
   const [data, setData] = useState<Data>(emptyData);
@@ -332,7 +308,7 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
   // Valuation
   const [valuationReport, setValuationReport] = useState<ValuationReport | null>(null);
 
-  // Load Master & Core Data
+  // Load Master Data and apply inventory movements from the last durable local cursor.
   useEffect(() => {
     let mounted = true;
     if (!enabled) {
@@ -354,61 +330,138 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
 
     setIsLoading(true);
     void (async () => {
-      let cursors: InventoryChangeCursors = { products: "0", inventory: "0" };
-      let feedCaughtUp = false;
+      let cursors = await loadInventoryChangeCursors(storageScope);
+      let cachedSnapshot: Data | null = null;
       try {
-        const savedCursors = await loadInventoryChangeCursors(storageScope);
-        cursors = await readChangeCursors(savedCursors, workspace);
-        feedCaughtUp = true;
+        const candidate = await loadInventorySnapshot<Data>(storageScope);
+        if (candidate && Array.isArray(candidate.balances)) cachedSnapshot = candidate;
       } catch {
-        try {
-          cursors = await loadInventoryChangeCursors(storageScope);
-        } catch {
-          // Live snapshot fallback
-        }
+        // A missing/corrupt encrypted snapshot is rebuilt from a server snapshot and cursor.
       }
 
-      const [products, units, variants, warehouses, bins, balances] = await Promise.all([
+      const [products, units, variants, warehouses, bins] = await Promise.all([
         readResponse<Product[]>("/api/v1/products", undefined, workspace),
         readResponse<Unit[]>("/api/v1/inventory/units-of-measure", undefined, workspace),
         readResponse<Variant[]>("/api/v1/inventory/variants", undefined, workspace),
         readResponse<Warehouse[]>("/api/v1/inventory/warehouses", undefined, workspace),
         readResponse<Bin[]>("/api/v1/inventory/bins", undefined, workspace),
-        readResponse<Balance[]>("/api/v1/inventory/availability", undefined, workspace),
       ]);
       if (!mounted) return;
 
-      const snapshot = { products, units, variants, warehouses, bins, balances };
+      let balances: Balance[];
+      let inventoryCursor = cursors.inventory;
+      if (cachedSnapshot) {
+        balances = cachedSnapshot.balances;
+      } else {
+        // Balances and cursor come from one repeatable-read server transaction.
+        // This prevents replaying a movement already included in the baseline snapshot.
+        const baseline = await readResponse<{ cursor: string; balances: Balance[] }>(
+          "/api/v1/sync/snapshots/inventory",
+          undefined,
+          workspace,
+        );
+        if (!/^\d+$/.test(baseline.cursor) || !Array.isArray(baseline.balances)) {
+          throw new Error("The server returned an invalid inventory snapshot.");
+        }
+        balances = baseline.balances;
+        inventoryCursor = baseline.cursor;
+        cursors = { ...cursors, inventory: inventoryCursor };
+      }
+
+      let snapshot: Data = { products, units, variants, warehouses, bins, balances };
+      setIsUsingCachedData(Boolean(cachedSnapshot));
+
+      const persistSnapshot = async (nextCursors: InventoryChangeCursors): Promise<void> => {
+        snapshot = { products, units, variants, warehouses, bins, balances };
+        await saveInventorySnapshotAndCursors(storageScope, snapshot, nextCursors);
+      };
+
+      // First persist either the retained local baseline or the atomic server baseline.
+      await persistSnapshot(cursors);
+
+      let serverCursorAcknowledged = true;
+      const acknowledge = async (nextCursors: InventoryChangeCursors): Promise<void> => {
+        try {
+          const operations = await loadReceiptOperations(storageScope);
+          const lastAcknowledgedSequence = Math.max(
+            0,
+            ...operations.filter(operation => operation.status === "accepted").map(operation => operation.deviceSequence),
+          );
+          await acknowledgeOfflineDeviceCursors(
+            storageScope,
+            workspace,
+            nextCursors,
+            lastAcknowledgedSequence,
+          );
+        } catch {
+          serverCursorAcknowledged = false;
+        }
+      };
+
+      // Read, apply, save, then acknowledge each page. A failed save never advances
+      // the local or server cursor, so the same page is replayed on the next refresh.
+      while (true) {
+        const previousCursor = inventoryCursor;
+        const page = await readChangePage("inventory", inventoryCursor, workspace);
+        if (page.changes.length > 0) {
+          balances = applyInventoryMovementChanges(
+            balances,
+            page.changes as InventoryMovementFeedChange[],
+          ) as Balance[];
+        }
+
+        if (page.hasMore && page.nextCursor === previousCursor) {
+          throw new Error("The inventory change feed did not advance its cursor.");
+        }
+        inventoryCursor = page.nextCursor;
+        cursors = { ...cursors, inventory: inventoryCursor };
+        await persistSnapshot(cursors);
+        await acknowledge(cursors);
+
+        if (!page.hasMore) break;
+      }
+
+      if (!mounted) return;
       setData(snapshot);
       setIsUsingCachedData(false);
-      let snapshotSaved = true;
-      try {
-        await saveInventorySnapshotAndCursors(storageScope, snapshot, cursors);
-      } catch {
-        snapshotSaved = false;
-      }
-      if (!mounted) return;
-
-      setProductId((c) => products.some((p) => p.productId === c && p.isActive && p.productType === "stock") ? c : products.find((p) => p.isActive && p.productType === "stock")?.productId ?? "");
-      setUnitId((c) => units.some((u) => u.unitOfMeasureId === c) ? c : units[0]?.unitOfMeasureId ?? "");
-      setWarehouseId((c) => warehouses.some((w) => w.warehouseId === c && w.isActive) ? c : warehouses.find((w) => w.isActive)?.warehouseId ?? "");
-      setReceiptVariantId((c) => variants.some((v) => v.variantId === c && v.isActive) ? c : variants.find((v) => v.isActive)?.variantId ?? "");
-      setReceiptWarehouseId((c) => warehouses.some((w) => w.warehouseId === c && w.isActive) ? c : warehouses.find((w) => w.isActive)?.warehouseId ?? "");
+      setProductId((current) =>
+        products.some((item) => item.productId === current && item.isActive && item.productType === "stock")
+          ? current
+          : products.find((item) => item.isActive && item.productType === "stock")?.productId ?? "",
+      );
+      setUnitId((current) =>
+        units.some((item) => item.unitOfMeasureId === current)
+          ? current
+          : units[0]?.unitOfMeasureId ?? "",
+      );
+      setWarehouseId((current) =>
+        warehouses.some((item) => item.warehouseId === current && item.isActive)
+          ? current
+          : warehouses.find((item) => item.isActive)?.warehouseId ?? "",
+      );
+      setReceiptVariantId((current) =>
+        variants.some((item) => item.variantId === current && item.isActive)
+          ? current
+          : variants.find((item) => item.isActive)?.variantId ?? "",
+      );
+      setReceiptWarehouseId((current) =>
+        warehouses.some((item) => item.warehouseId === current && item.isActive)
+          ? current
+          : warehouses.find((item) => item.isActive)?.warehouseId ?? "",
+      );
 
       // Default phase 5 form selectors
-      setResVariantId((c) => c || variants[0]?.variantId || "");
-      setResWarehouseId((c) => c || warehouses[0]?.warehouseId || "");
-      setPickWarehouseId((c) => c || warehouses[0]?.warehouseId || "");
-      setPickVariantId((c) => c || variants[0]?.variantId || "");
-      setCountWarehouseId((c) => c || warehouses[0]?.warehouseId || "");
-      setReturnWarehouseId((c) => c || warehouses[0]?.warehouseId || "");
-      setReturnVariantId((c) => c || variants[0]?.variantId || "");
+      setResVariantId((current) => current || variants[0]?.variantId || "");
+      setResWarehouseId((current) => current || warehouses[0]?.warehouseId || "");
+      setPickWarehouseId((current) => current || warehouses[0]?.warehouseId || "");
+      setPickVariantId((current) => current || variants[0]?.variantId || "");
+      setCountWarehouseId((current) => current || warehouses[0]?.warehouseId || "");
+      setReturnWarehouseId((current) => current || warehouses[0]?.warehouseId || "");
+      setReturnVariantId((current) => current || variants[0]?.variantId || "");
 
-      setMessage(!snapshotSaved
-        ? "Inventory loaded, but this browser could not save the encrypted snapshot and change cursors."
-        : !feedCaughtUp
-          ? "Inventory loaded. The change feed could not be checked; it will retry without advancing its saved cursor."
-          : "");
+      setMessage(!serverCursorAcknowledged
+        ? "Inventory changes are saved on this device; the server cursor acknowledgement will retry."
+        : "");
     })().catch((error: unknown) => {
       if (!mounted) return;
       void loadInventorySnapshot<Data>(storageScope).then((snapshot) => {
@@ -416,8 +469,16 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
         if (snapshot) {
           setData(snapshot);
           setIsUsingCachedData(true);
-          setMessage("The live inventory request failed. Showing the last saved snapshot; balances may be stale.");
+          setMessage(error instanceof Error
+            ? `Showing the last safely saved inventory snapshot. ${error.message}`
+            : "The live inventory request failed. Showing the last safely saved snapshot; balances may be stale.");
         } else {
+          setData(emptyData);
+          setIsUsingCachedData(false);
+          setMessage(error instanceof Error ? error.message : "Inventory could not be loaded.");
+        }
+      }).catch(() => {
+        if (mounted) {
           setData(emptyData);
           setIsUsingCachedData(false);
           setMessage(error instanceof Error ? error.message : "Inventory could not be loaded.");

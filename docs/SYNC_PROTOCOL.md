@@ -272,3 +272,43 @@ Each property below is classified based on concrete test evidence:
   - `[PASS]` Lost-acknowledgement duplicate replay verification
   - `[PASS]` Operation ID reuse mutation conflict detection (`OPERATION_ID_REUSED`)
   - `[PASS]` Incremental change feed verification (`GET /api/v1/sync/changes/inventory` returning 52 events with next cursor = 94)
+
+
+## 6. Product Catalog Offline Batch Upload
+
+The web product queue posts pending product operations to `POST /api/v1/sync/products:batch` in batches of at most 50. The endpoint requires the signed-in user's company-scoped `inventory.product.create` permission and a valid server-issued device grant whose `allowed_operations` includes `inventory.product.create`. Device enrollment issues only the operation scopes authorized for the current user. The endpoint does not trust tenant or company identifiers in operation payloads; the API uses the authenticated tenant/company context.
+
+Each operation carries its stable `operationId`, device sequence, `createdAt`, command type, and product payload. Product and receipt queues share the same browser device ID and one atomic IndexedDB device-sequence counter; legacy product queue entries that predate the shared counter are assigned a fresh global sequence immediately before their first upload. Once sent, the operation ID and sequence remain fixed for every retry. The API validates the active device, company scope, membership, grant token, grant expiry/revocation, and operation scope under PostgreSQL row locks. Each operation is then claimed by the durable `sync.operation_inbox`. Product validation, product creation, the command-idempotency record, product change-feed event, and accepted/rejected/conflict inbox receipt are committed in one database transaction. The inbox stores the serialized result, so a lost HTTP acknowledgement can be replayed without re-creating the product. Reuse of an operation ID with different content and reuse of a device sequence by another operation are recorded as durable conflicts; duplicate product codes are also returned as conflicts. Invalid product payloads are stored as rejected receipts without aborting other valid operations in the same batch.
+
+The client persists each per-operation result in its encrypted IndexedDB queue. A lost HTTP acknowledgement is safe to retry because the server has a durable operation-inbox receipt and command-idempotency result. Product and receipt operations share device enrolment, grant scope, and device sequence. Event-level merge for concurrent edits and cross-device queue recovery remain open.
+
+
+### Product feed client application and cursor commit
+
+The web app consumes `GET /api/v1/sync/changes/products` using the active tenant/company context and a page limit of 200. When a local product snapshot is missing, it first downloads the current product catalogue, stores that snapshot with the last known cursor, then replays pages after that cursor; this avoids losing changes that occur while the initial snapshot is fetched. Each feed page applies product `upsert` events by `productId` (and removes `delete` events if present), then commits the encrypted product snapshot and new product cursor together through IndexedDB. The client advances only after that transaction succeeds; interrupted reads/writes are replayed from the previous cursor. The product snapshot uses a separate storage scope from inventory snapshots.
+
+Product synchronization is idempotent, but concurrent edits of the same product fields and product deletion workflows do not yet have a full conflict merge engine. Inventory movement pages are applied incrementally as described in section 8; event-level concurrent-edit resolution remains open.
+
+
+## 7. Server-Persisted Device Feed Acknowledgements
+
+After the web client applies a product or inventory feed page and commits the corresponding encrypted local snapshot and local cursor in one IndexedDB transaction, it posts an acknowledgement to `POST /api/v1/sync/cursors:ack`. The request contains the enrolled `deviceId`, `grantId`, grant token, product cursor, inventory cursor, and last acknowledged device-operation sequence.
+
+The API requires an authenticated caller and validates that the device is active, the company scope and membership are active, the grant is not revoked or expired, and the token hash matches. Grants include `sync.cursor.ack` directly for callers with `inventory.availability.view`, or they may authorize cursor acknowledgement through an existing product-create or receipt-post operation scope. The repository serializes acknowledgements per tenant/company/device and updates `sync.device_cursors`. The stored `download_cursor` is a JSON object containing separate product and inventory high-watermarks; `last_acknowledged_sequence` stores the latest acknowledged device operation sequence. All values are monotonic: stale acknowledgements are merged with the stored maxima and cannot move a checkpoint backwards.
+
+The browser sends the server acknowledgement only after its encrypted local snapshot/cursor commit succeeds. If the server acknowledgement fails, local data remains committed and the client retries the acknowledgement on a later synchronization cycle. Legacy unrecognized cursor encodings are treated as zero so that clients replay rather than skip changes.
+
+This endpoint records what a device has acknowledged; it does not yet transfer an encrypted queue or snapshot to a replacement device. Cross-device recovery and event-level conflict merge remain separate open capabilities.
+
+
+## 8. Incremental Inventory Movement Application
+
+The inventory workspace loads its baseline from `GET /api/v1/sync/snapshots/inventory`. The endpoint reads the company's aggregated stock balances and current `sync.company_change_counters.last_sequence` in one PostgreSQL repeatable-read transaction. The balance result is aggregated by variant, warehouse, bin, and stock status, so lot-split stock rows match the browser's summary-balance grain. Valuation is supplied only for available stock; other stock-status rows do not inherit available-layer valuation.
+
+After the baseline is durably committed to the encrypted local snapshot, the browser reads `GET /api/v1/sync/changes/inventory` from that cursor. For each page it applies every `inventory_movement` upsert, commits the updated balances and new cursor together in IndexedDB, and only then acknowledges the cursor using `POST /api/v1/sync/cursors:ack`. A failed page read, unsupported event, or local write leaves the prior cursor intact, so the same page is replayed instead of skipped.
+
+The movement reducer accepts single-leg receipts, transfers, and adjustments, plus canonical multi-leg movements. Each leg has a variant, warehouse, bin, stock status, signed quantity delta, and base unit of measure. Multi-leg events support dispatches, returns, transfers, and status reclassification such as available-to-quarantine. Unknown entity/change types and malformed legs fail closed. When a movement changes an existing balance, the cached valuation is cleared because movement events do not carry the cost-layer valuation detail needed to recalculate it. A negative delta against a missing baseline row, or one that would make a balance negative, fails closed so the page is not committed or acknowledged.
+
+Feed publication is written in the same transaction as the underlying movement or stock-status change. The covered writers include inventory receipts/transfers/adjustments, offline receipts, pick dispatches and count approval, inventory returns, sales invoice and dispatch issue, sales returns, manufacturing material issue/return and finished-goods completion, purchase returns, warehouse bin transfers, and quarantine inspection/release. Warehouse transfers, purchase returns, and quarantine reclassification/release allocate quantity across locked lot-split balance rows, retain lot IDs in server movement legs, and apply the same signed deltas to the aggregated browser balance.
+
+Incremental application does not yet implement field-level conflict resolution for concurrent edits to the same inventory entity, nor does a server acknowledgement restore an encrypted snapshot or pending operation queue to a replacement device. Those remain distinct recovery capabilities.

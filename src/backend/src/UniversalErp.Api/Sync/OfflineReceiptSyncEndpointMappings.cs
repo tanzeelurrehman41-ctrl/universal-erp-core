@@ -1,5 +1,8 @@
+using System.Globalization;
 using System.Security.Cryptography;
+using System.Security.Claims;
 using System.Text;
+using Microsoft.AspNetCore.Authorization;
 using System.Text.Json;
 using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Inventory;
@@ -18,6 +21,8 @@ public static class OfflineReceiptSyncEndpointMappings
         var sync = endpoints.MapGroup("/api/v1/sync");
         var registerDevice = sync.MapPost("/devices", async (
             RegisterOfflineDeviceRequest request,
+            ClaimsPrincipal principal,
+            IAuthorizationService authorizationService,
             ITenantContextAccessor tenantContextAccessor,
             IOfflineReceiptSyncRepository repository,
             CancellationToken cancellationToken) =>
@@ -28,15 +33,60 @@ public static class OfflineReceiptSyncEndpointMappings
                 return Results.BadRequest(new { code = "INVALID_DEVICE_REGISTRATION" });
             }
 
+            var allowedOperations = new List<string>();
+            if (isDevelopment || (await authorizationService.AuthorizeAsync(principal, "inventory.receipt.post")).Succeeded)
+            {
+                allowedOperations.Add("inventory.receipt.post");
+            }
+            if (isDevelopment || (await authorizationService.AuthorizeAsync(principal, "inventory.product.create")).Succeeded)
+            {
+                allowedOperations.Add("inventory.product.create");
+            }
+            if (isDevelopment || (await authorizationService.AuthorizeAsync(principal, "inventory.availability.view")).Succeeded)
+            {
+                allowedOperations.Add("sync.cursor.ack");
+            }
+            if (allowedOperations.Count == 0)
+            {
+                return Results.Forbid();
+            }
+
             var grant = await repository.RegisterDeviceAsync(
                 tenantContextAccessor.Current,
                 request.ClientDeviceId,
                 request.PlatformCode,
                 string.IsNullOrWhiteSpace(request.DeviceName) ? null : request.DeviceName.Trim(),
-                cancellationToken);
+                cancellationToken,
+                allowedOperations);
             return grant is null
                 ? Results.Conflict(new { code = "DEVICE_REVOKED_OR_INACTIVE" })
                 : Results.Ok(grant);
+        });
+
+        var acknowledgeCursors = sync.MapPost("/cursors:ack", async (
+            OfflineDeviceCursorAcknowledgement acknowledgement,
+            ITenantContextAccessor tenantContextAccessor,
+            IOfflineReceiptSyncRepository repository,
+            CancellationToken cancellationToken) =>
+        {
+            if (acknowledgement.DeviceId == Guid.Empty ||
+                acknowledgement.GrantId == Guid.Empty ||
+                string.IsNullOrWhiteSpace(acknowledgement.GrantToken) ||
+                acknowledgement.GrantToken.Length > 256 ||
+                !IsValidCursor(acknowledgement.ProductsCursor) ||
+                !IsValidCursor(acknowledgement.InventoryCursor) ||
+                acknowledgement.LastAcknowledgedSequence < 0)
+            {
+                return Results.BadRequest(new { code = "INVALID_DEVICE_CURSOR_ACKNOWLEDGEMENT" });
+            }
+
+            var state = await repository.AcknowledgeDeviceCursorsAsync(
+                tenantContextAccessor.Current,
+                acknowledgement,
+                cancellationToken);
+            return state is null
+                ? Results.Json(new { code = "OFFLINE_DEVICE_OR_GRANT_INVALID" }, statusCode: StatusCodes.Status403Forbidden)
+                : Results.Ok(state);
         });
 
         var postOperations = sync.MapPost("/receipts:batch", async (
@@ -89,11 +139,17 @@ public static class OfflineReceiptSyncEndpointMappings
 
         if (!isDevelopment)
         {
-            registerDevice.RequireAuthorization("inventory.receipt.post");
+            registerDevice.RequireAuthorization();
+            acknowledgeCursors.RequireAuthorization();
             postOperations.RequireAuthorization("inventory.receipt.post");
         }
         return endpoints;
     }
+
+    private static bool IsValidCursor(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var cursor) &&
+        cursor >= 0;
 
     private static string ComputePayloadHash(OfflineReceiptOperation operation)
     {

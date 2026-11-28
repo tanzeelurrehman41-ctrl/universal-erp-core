@@ -61,7 +61,7 @@ type StoredCounter = { id: string; value: number };
 type StoredCursor = { id: string; value: string };
 type EncryptedSnapshot = { scopeHash: string; iv: Uint8Array; ciphertext: ArrayBuffer };
 type EncryptedSecret = { id: string; iv: Uint8Array; ciphertext: ArrayBuffer };
-type OfflineDeviceGrant = { deviceId: string; grantId: string; grantToken: string; expiresAt: string };
+export type OfflineDeviceGrant = { deviceId: string; grantId: string; grantToken: string; expiresAt: string; allowedOperations: string[] };
 
 export type InventoryChangeCursors = { products: string; inventory: string };
 
@@ -183,18 +183,23 @@ export async function decryptOfflineValue<T>(iv: Uint8Array, ciphertext: ArrayBu
   return unseal<T>(iv, ciphertext);
 }
 
-async function nextDeviceSequence(database: IDBDatabase): Promise<number> {
+export async function reserveOfflineDeviceSequence(minimumValue = 0): Promise<number> {
+  const database = await openDatabase();
   const transaction = database.transaction(METADATA_STORE, "readwrite");
   const complete = transactionComplete(transaction);
   const store = transaction.objectStore(METADATA_STORE);
   const getRequest = store.get("device-sequence") as IDBRequest<StoredCounter | undefined>;
   let sequence = 0;
   getRequest.onsuccess = () => {
-    sequence = (getRequest.result?.value ?? 0) + 1;
+    sequence = Math.max(getRequest.result?.value ?? 0, minimumValue) + 1;
     store.put({ id: "device-sequence", value: sequence } satisfies StoredCounter);
   };
   await complete;
   return sequence;
+}
+
+async function nextDeviceSequence(_database: IDBDatabase): Promise<number> {
+  return reserveOfflineDeviceSequence();
 }
 
 async function readRecord(record: EncryptedRecord): Promise<OfflineReceiptOperation> {
@@ -427,7 +432,8 @@ async function registerDeviceGrant(
   }, workspace);
   if (!response.ok) throw new Error(`The server could not authorize this device for offline receipt sync (${response.status}).`);
   const grant = await response.json() as OfflineDeviceGrant;
-  if (!grant.deviceId || !grant.grantId || !grant.grantToken || !Number.isFinite(Date.parse(grant.expiresAt))) {
+  if (!grant.deviceId || !grant.grantId || !grant.grantToken ||
+      !Number.isFinite(Date.parse(grant.expiresAt)) || !Array.isArray(grant.allowedOperations)) {
     throw new Error("The server returned an incomplete offline device grant.");
   }
   await saveDeviceGrant(storageScope, grant);
@@ -437,11 +443,88 @@ async function registerDeviceGrant(
 async function ensureDeviceGrant(
   storageScope: string,
   workspace: ApiWorkspaceScope | null,
+  requiredOperation: string,
 ): Promise<OfflineDeviceGrant> {
   const cached = await loadDeviceGrant(storageScope);
-  if (cached && Date.parse(cached.expiresAt) > Date.now() + 24 * 60 * 60 * 1000) return cached;
-  // Cached grant is missing, expired, or expires within 24 hours — re-register.
-  return registerDeviceGrant(storageScope, workspace);
+  if (
+    cached &&
+    Date.parse(cached.expiresAt) > Date.now() + 24 * 60 * 60 * 1000 &&
+    cached.allowedOperations?.includes(requiredOperation)
+  ) {
+    return cached;
+  }
+
+  const grant = await registerDeviceGrant(storageScope, workspace);
+  if (!grant.allowedOperations.includes(requiredOperation)) {
+    throw new Error("This signed-in user is not authorized for the requested offline operation.");
+  }
+  return grant;
+}
+
+export function ensureOfflineDeviceGrant(
+  storageScope: string,
+  workspace: ApiWorkspaceScope | null,
+  requiredOperation: string,
+): Promise<OfflineDeviceGrant> {
+  return ensureDeviceGrant(storageScope, workspace, requiredOperation);
+}
+
+async function ensureAnyOfflineDeviceGrant(
+  storageScope: string,
+  workspace: ApiWorkspaceScope | null,
+): Promise<OfflineDeviceGrant> {
+  const validOperations = ["inventory.product.create", "inventory.receipt.post", "sync.cursor.ack"];
+  const cached = await loadDeviceGrant(storageScope);
+  if (
+    cached &&
+    Date.parse(cached.expiresAt) > Date.now() + 24 * 60 * 60 * 1000 &&
+    cached.allowedOperations?.some(operation => validOperations.includes(operation))
+  ) {
+    return cached;
+  }
+
+  const grant = await registerDeviceGrant(storageScope, workspace);
+  if (!grant.allowedOperations.some(operation => validOperations.includes(operation))) {
+    throw new Error("This signed-in user is not authorized for offline synchronization.");
+  }
+  return grant;
+}
+
+export type OfflineDeviceCursorState = {
+  productsCursor: string;
+  inventoryCursor: string;
+  lastAcknowledgedSequence: number;
+};
+
+export async function acknowledgeOfflineDeviceCursors(
+  storageScope: string,
+  workspace: ApiWorkspaceScope | null,
+  cursors: InventoryChangeCursors,
+  lastAcknowledgedSequence: number,
+): Promise<OfflineDeviceCursorState> {
+  if (!Number.isSafeInteger(lastAcknowledgedSequence) || lastAcknowledgedSequence < 0) {
+    throw new Error("The acknowledged device sequence is invalid.");
+  }
+
+  const grant = await ensureAnyOfflineDeviceGrant(storageScope, workspace);
+  const response = await apiFetch("/api/v1/sync/cursors:ack", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      deviceId: grant.deviceId,
+      grantId: grant.grantId,
+      grantToken: grant.grantToken,
+      productsCursor: cursors.products,
+      inventoryCursor: cursors.inventory,
+      lastAcknowledgedSequence,
+    }),
+  }, workspace);
+  if (!response.ok) {
+    throw new Error(response.status === 403
+      ? "The server rejected this device cursor acknowledgement."
+      : `The server could not save the device cursor (${response.status}).`);
+  }
+  return await response.json() as OfflineDeviceCursorState;
 }
 
 export function syncPendingReceiptOperations(
@@ -458,7 +541,7 @@ export function syncPendingReceiptOperations(
 
     let grant: OfflineDeviceGrant;
     try {
-      grant = await ensureDeviceGrant(storageScope, workspace);
+      grant = await ensureDeviceGrant(storageScope, workspace, "inventory.receipt.post");
     } catch (error) {
       const message = error instanceof Error ? error.message : "The device could not be authorized. The receipt remains in the encrypted local journal.";
       for (const operation of pending) {

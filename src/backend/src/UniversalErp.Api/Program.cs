@@ -107,6 +107,7 @@ builder.Services.AddCors(options =>
 });
 builder.Services.AddScoped<IProductRepository, PostgresProductRepository>();
 builder.Services.AddScoped<ProductCatalogService>();
+builder.Services.AddScoped<ProductSyncService>();
 builder.Services.AddScoped<IInventoryWorkflowRepository, PostgresInventoryWorkflowRepository>();
 builder.Services.AddScoped<InventoryWorkflowService>();
 builder.Services.AddScoped<ISyncChangeFeed, PostgresSyncChangeFeed>();
@@ -499,62 +500,7 @@ app.MapHealthChecks("/health", new HealthCheckOptions
 app.MapGet("/api/modules", () => Results.Ok(moduleCatalog));
 app.MapSyncChangeEndpoints(effectiveDevMode);
 app.MapOfflineReceiptSyncEndpoints(effectiveDevMode);
-
-if (effectiveDevMode)
-{
-    app.MapPost("/api/v1/sync/operations:batch", async (
-        ProductSyncBatchRequest batch,
-        ProductCatalogService catalog,
-        CancellationToken cancellationToken) =>
-    {
-        if (batch.BatchId == Guid.Empty || batch.Operations is null || batch.Operations.Count > 50)
-        {
-            return Results.BadRequest(new { code = "INVALID_SYNC_BATCH" });
-        }
-
-        var results = new List<ProductSyncOperationResult>(batch.Operations.Count);
-        foreach (var operation in batch.Operations)
-        {
-            if (operation.OperationId == Guid.Empty ||
-                operation.DeviceSequence <= 0 ||
-                operation.OperationType != "product.create" ||
-                operation.Payload is null)
-            {
-                results.Add(new ProductSyncOperationResult(
-                    operation.OperationId,
-                    operation.DeviceSequence,
-                    "rejected",
-                    null,
-                    "INVALID_OPERATION"));
-                continue;
-            }
-
-            var result = await catalog.CreateAsync(
-                operation.Payload,
-                operation.OperationId,
-                cancellationToken);
-
-            results.Add(result.IsSuccess
-                ? new ProductSyncOperationResult(
-                    operation.OperationId,
-                    operation.DeviceSequence,
-                    "accepted",
-                    result.Value,
-                    null)
-                : new ProductSyncOperationResult(
-                    operation.OperationId,
-                    operation.DeviceSequence,
-                    result.Error is "DUPLICATE_PRODUCT_CODE" or "IDEMPOTENCY_KEY_REUSED"
-                        ? "conflict"
-                        : "rejected",
-                    null,
-                    result.Error));
-        }
-
-        return Results.Ok(new ProductSyncBatchResponse(batch.BatchId, results));
-    });
-}
-
+app.MapProductSyncBatchEndpoints(effectiveDevMode);
 var productApi = app.MapGroup("/api/v1");
 if (!effectiveDevMode)
 {

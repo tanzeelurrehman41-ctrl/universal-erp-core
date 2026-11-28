@@ -1,7 +1,9 @@
 using System.Data.Common;
+using System.Text.Json;
 using Npgsql;
 using UniversalErp.Application.Purchasing;
 using UniversalErp.Infrastructure.Finance;
+using UniversalErp.Infrastructure.Sync;
 
 namespace UniversalErp.Infrastructure.Purchasing;
 
@@ -314,53 +316,222 @@ public sealed partial class PostgresPurchasingRepository
             updGrnCmd.Parameters.AddWithValue("rqty", l.RejectedQty);
             await updGrnCmd.ExecuteNonQueryAsync(ct);
 
-            // If quarantined > 0, isolate stock: move from 'available' to 'quarantine' in the bin where GRN received it
+            // Reclassify quarantined quantities lot-by-lot. Balance rows are locked before
+            // allocation so the movement legs exactly match the stock quantities moved.
             if (l.QuarantinedQty > 0m)
             {
-                // Find GRN bin
-                await using var binCmd = conn.CreateCommand();
-                binCmd.CommandText = "SELECT bin_id FROM erp_purchasing.goods_received_note_line WHERE tenant_id = @tid AND company_id = @cid AND grn_id = @gid AND line_number = @gln";
-                binCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-                binCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-                binCmd.Parameters.AddWithValue("gid", req.GrnId);
-                binCmd.Parameters.AddWithValue("gln", l.GrnLineNumber);
-                var binIdObj = await binCmd.ExecuteScalarAsync(ct);
-                if (binIdObj is Guid binId)
+                Guid binId;
+                await using (var binCmd = conn.CreateCommand())
                 {
-                    // Decrement available balance
-                    await using var decCmd = conn.CreateCommand();
-                    decCmd.CommandText = """
-                        UPDATE erp_inventory.stock_balance
-                        SET on_hand_qty = GREATEST(0, on_hand_qty - @qty), updated_at = now()
-                        WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
-                          AND warehouse_id = @wh AND bin_id = @bin AND status_code = 'available';
+                    binCmd.CommandText = """
+                        SELECT bin_id
+                        FROM erp_purchasing.goods_received_note_line
+                        WHERE tenant_id = @tid AND company_id = @cid AND grn_id = @gid AND line_number = @gln;
                         """;
-                    decCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-                    decCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-                    decCmd.Parameters.AddWithValue("var", l.VariantId);
-                    decCmd.Parameters.AddWithValue("wh", warehouseId);
-                    decCmd.Parameters.AddWithValue("bin", binId);
-                    decCmd.Parameters.AddWithValue("qty", l.QuarantinedQty);
-                    await decCmd.ExecuteNonQueryAsync(ct);
-
-                    // Increment quarantine balance
-                    await using var incCmd = conn.CreateCommand();
-                    incCmd.CommandText = """
-                        INSERT INTO erp_inventory.stock_balance
-                            (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, on_hand_qty, balance_id)
-                        VALUES
-                            (@tid, @cid, @var, @wh, @bin, 'quarantine', @qty, gen_random_uuid())
-                        ON CONFLICT (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, (COALESCE(lot_id, '00000000-0000-0000-0000-000000000000'::uuid)))
-                        DO UPDATE SET on_hand_qty = erp_inventory.stock_balance.on_hand_qty + EXCLUDED.on_hand_qty, updated_at = now();
-                        """;
-                    incCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-                    incCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-                    incCmd.Parameters.AddWithValue("var", l.VariantId);
-                    incCmd.Parameters.AddWithValue("wh", warehouseId);
-                    incCmd.Parameters.AddWithValue("bin", binId);
-                    incCmd.Parameters.AddWithValue("qty", l.QuarantinedQty);
-                    await incCmd.ExecuteNonQueryAsync(ct);
+                    binCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    binCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    binCmd.Parameters.AddWithValue("gid", req.GrnId);
+                    binCmd.Parameters.AddWithValue("gln", l.GrnLineNumber);
+                    binId = (Guid)(await binCmd.ExecuteScalarAsync(ct)
+                        ?? throw new InvalidOperationException("GRN_LINE_NOT_FOUND"));
                 }
+
+                Guid baseUomId;
+                await using (var getUom = conn.CreateCommand())
+                {
+                    getUom.CommandText = "SELECT base_uom_id FROM erp_inventory.product_variant WHERE tenant_id = @tid AND variant_id = @var;";
+                    getUom.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    getUom.Parameters.AddWithValue("var", l.VariantId);
+                    baseUomId = (Guid)(await getUom.ExecuteScalarAsync(ct)
+                        ?? throw new InvalidOperationException("PRODUCT_VARIANT_NOT_FOUND"));
+                }
+
+                var availableRows = new List<(Guid BalanceId, Guid? LotId, decimal OnHand)>();
+                await using (var sourceCheck = conn.CreateCommand())
+                {
+                    sourceCheck.CommandText = """
+                        SELECT balance_id, lot_id, on_hand_qty
+                        FROM erp_inventory.stock_balance
+                        WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
+                          AND warehouse_id = @wh AND bin_id = @bin AND status_code = 'available'
+                        ORDER BY lot_id NULLS FIRST, balance_id
+                        FOR UPDATE;
+                        """;
+                    sourceCheck.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    sourceCheck.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    sourceCheck.Parameters.AddWithValue("var", l.VariantId);
+                    sourceCheck.Parameters.AddWithValue("wh", warehouseId);
+                    sourceCheck.Parameters.AddWithValue("bin", binId);
+                    await using var sourceRows = await sourceCheck.ExecuteReaderAsync(ct);
+                    while (await sourceRows.ReadAsync(ct))
+                    {
+                        availableRows.Add((
+                            sourceRows.GetGuid(0),
+                            sourceRows.IsDBNull(1) ? null : sourceRows.GetGuid(1),
+                            sourceRows.GetDecimal(2)));
+                    }
+                    await sourceRows.CloseAsync();
+                }
+
+                var totalAvailable = availableRows.Sum(row => row.OnHand);
+                if (totalAvailable < l.QuarantinedQty)
+                {
+                    throw new InvalidOperationException(
+                        $"INSUFFICIENT_AVAILABLE_STOCK_FOR_QUARANTINE: Available {totalAvailable}, requested {l.QuarantinedQty}.");
+                }
+
+                var movementId = Guid.NewGuid();
+                var occurredAt = DateTimeOffset.UtcNow;
+                await using (var movement = conn.CreateCommand())
+                {
+                    movement.CommandText = """
+                        INSERT INTO erp_inventory.inventory_movement
+                            (tenant_id, company_id, movement_id, client_transaction_id, movement_type,
+                             source_document_type, source_document_id, occurred_at, created_by, note)
+                        VALUES
+                            (@tid, @cid, @mid, @txid, 'transfer',
+                             'purchase_inspection', @sourceId, @occurred, @by, @note);
+                        """;
+                    movement.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    movement.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    movement.Parameters.AddWithValue("mid", movementId);
+                    movement.Parameters.AddWithValue("txid", Guid.NewGuid());
+                    movement.Parameters.AddWithValue("sourceId", inspId);
+                    movement.Parameters.AddWithValue("occurred", occurredAt);
+                    movement.Parameters.AddWithValue("by", inspectorId == Guid.Empty ? Ctx.UserId : inspectorId);
+                    movement.Parameters.AddWithValue("note", $"Quarantine isolation for inspection {req.InspectionNumber}");
+                    await movement.ExecuteNonQueryAsync(ct);
+                }
+
+                decimal remainingToQuarantine = l.QuarantinedQty;
+                short legNumber = 1;
+                var feedLegs = new List<object>();
+                foreach (var row in availableRows)
+                {
+                    if (remainingToQuarantine <= 0m) break;
+                    var take = Math.Min(row.OnHand, remainingToQuarantine);
+                    if (take <= 0m) continue;
+
+                    await using (var decrement = conn.CreateCommand())
+                    {
+                        decrement.CommandText = """
+                            UPDATE erp_inventory.stock_balance
+                            SET on_hand_qty = on_hand_qty - @qty, updated_at = now()
+                            WHERE tenant_id = @tid AND company_id = @cid AND balance_id = @balanceId;
+                            """;
+                        decrement.Parameters.AddWithValue("tid", Ctx.TenantId);
+                        decrement.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                        decrement.Parameters.AddWithValue("balanceId", row.BalanceId);
+                        decrement.Parameters.AddWithValue("qty", take);
+                        await decrement.ExecuteNonQueryAsync(ct);
+                    }
+
+                    await using (var increment = conn.CreateCommand())
+                    {
+                        increment.CommandText = """
+                            INSERT INTO erp_inventory.stock_balance
+                                (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code,
+                                 on_hand_qty, lot_id, balance_id)
+                            VALUES
+                                (@tid, @cid, @var, @wh, @bin, 'quarantine', @qty, @lot, @balanceId)
+                            ON CONFLICT (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code,
+                                         (COALESCE(lot_id, '00000000-0000-0000-0000-000000000000'::uuid)))
+                            DO UPDATE SET on_hand_qty = erp_inventory.stock_balance.on_hand_qty + EXCLUDED.on_hand_qty,
+                                          updated_at = now();
+                            """;
+                        increment.Parameters.AddWithValue("tid", Ctx.TenantId);
+                        increment.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                        increment.Parameters.AddWithValue("var", l.VariantId);
+                        increment.Parameters.AddWithValue("wh", warehouseId);
+                        increment.Parameters.AddWithValue("bin", binId);
+                        increment.Parameters.AddWithValue("qty", take);
+                        increment.Parameters.Add("lot", NpgsqlTypes.NpgsqlDbType.Uuid).Value =
+                            (object?)row.LotId ?? DBNull.Value;
+                        increment.Parameters.AddWithValue("balanceId", Guid.NewGuid());
+                        await increment.ExecuteNonQueryAsync(ct);
+                    }
+
+                    await using (var sourceLeg = conn.CreateCommand())
+                    {
+                        sourceLeg.CommandText = """
+                            INSERT INTO erp_inventory.inventory_movement_leg
+                                (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                                 bin_id, status_code, lot_id, quantity_delta, base_uom_id)
+                            VALUES
+                                (@tid, @cid, @mid, @ln, @var, @wh, @bin, 'available', @lot, @delta, @uom);
+                            """;
+                        sourceLeg.Parameters.AddWithValue("tid", Ctx.TenantId);
+                        sourceLeg.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                        sourceLeg.Parameters.AddWithValue("mid", movementId);
+                        sourceLeg.Parameters.AddWithValue("ln", legNumber++);
+                        sourceLeg.Parameters.AddWithValue("var", l.VariantId);
+                        sourceLeg.Parameters.AddWithValue("wh", warehouseId);
+                        sourceLeg.Parameters.AddWithValue("bin", binId);
+                        sourceLeg.Parameters.Add("lot", NpgsqlTypes.NpgsqlDbType.Uuid).Value =
+                            (object?)row.LotId ?? DBNull.Value;
+                        sourceLeg.Parameters.AddWithValue("delta", -take);
+                        sourceLeg.Parameters.AddWithValue("uom", baseUomId);
+                        await sourceLeg.ExecuteNonQueryAsync(ct);
+                    }
+
+                    await using (var destinationLeg = conn.CreateCommand())
+                    {
+                        destinationLeg.CommandText = """
+                            INSERT INTO erp_inventory.inventory_movement_leg
+                                (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                                 bin_id, status_code, lot_id, quantity_delta, base_uom_id)
+                            VALUES
+                                (@tid, @cid, @mid, @ln, @var, @wh, @bin, 'quarantine', @lot, @delta, @uom);
+                            """;
+                        destinationLeg.Parameters.AddWithValue("tid", Ctx.TenantId);
+                        destinationLeg.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                        destinationLeg.Parameters.AddWithValue("mid", movementId);
+                        destinationLeg.Parameters.AddWithValue("ln", legNumber++);
+                        destinationLeg.Parameters.AddWithValue("var", l.VariantId);
+                        destinationLeg.Parameters.AddWithValue("wh", warehouseId);
+                        destinationLeg.Parameters.AddWithValue("bin", binId);
+                        destinationLeg.Parameters.Add("lot", NpgsqlTypes.NpgsqlDbType.Uuid).Value =
+                            (object?)row.LotId ?? DBNull.Value;
+                        destinationLeg.Parameters.AddWithValue("delta", take);
+                        destinationLeg.Parameters.AddWithValue("uom", baseUomId);
+                        await destinationLeg.ExecuteNonQueryAsync(ct);
+                    }
+
+                    feedLegs.Add(new
+                    {
+                        variantId = l.VariantId,
+                        warehouseId,
+                        binId,
+                        stockStatus = "available",
+                        quantityDelta = -take,
+                        unitOfMeasureId = baseUomId,
+                        lotId = row.LotId,
+                    });
+                    feedLegs.Add(new
+                    {
+                        variantId = l.VariantId,
+                        warehouseId,
+                        binId,
+                        stockStatus = "quarantine",
+                        quantityDelta = take,
+                        unitOfMeasureId = baseUomId,
+                        lotId = row.LotId,
+                    });
+
+                    remainingToQuarantine -= take;
+                }
+
+                var quarantineFeedPayload = JsonSerializer.Serialize(new
+                {
+                    movementId,
+                    movementType = "transfer",
+                    legs = feedLegs,
+                    occurredAt,
+                    postedAt = occurredAt,
+                });
+                await CompanyChangeLogWriter.AppendAsync(
+                    conn, tx, Ctx.TenantId, Ctx.CompanyId,
+                    "inventory_movement", movementId, 1, "upsert", quarantineFeedPayload, ct);
             }
         }
 
@@ -423,103 +594,244 @@ public sealed partial class PostgresPurchasingRepository
         await using var cmd = conn.CreateCommand();
         await SetRls(cmd, Ctx);
 
-        // Verify quarantine stock balance
-        cmd.CommandText = """
-            SELECT sb.on_hand_qty, sb.warehouse_id
-            FROM erp_inventory.stock_balance sb
-            WHERE sb.tenant_id = @tid AND sb.company_id = @cid AND sb.variant_id = @var
-              AND sb.bin_id = @bin AND sb.status_code = 'quarantine'
-            FOR UPDATE;
-            """;
-        cmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-        cmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-        cmd.Parameters.AddWithValue("var", req.VariantId);
-        cmd.Parameters.AddWithValue("bin", req.SourceBinId);
-
-        decimal onHandQuarantine = 0m;
-        Guid warehouseId = Guid.Empty;
-        await using (var reader = await cmd.ExecuteReaderAsync(ct))
+        var sourceRows = new List<(Guid BalanceId, Guid? LotId, Guid WarehouseId, decimal OnHand)>();
+        await using (var sourceQuery = conn.CreateCommand())
         {
-            if (await reader.ReadAsync(ct))
+            sourceQuery.CommandText = """
+                SELECT balance_id, lot_id, warehouse_id, on_hand_qty
+                FROM erp_inventory.stock_balance
+                WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
+                  AND bin_id = @bin AND status_code = 'quarantine'
+                ORDER BY lot_id NULLS FIRST, balance_id
+                FOR UPDATE;
+                """;
+            sourceQuery.Parameters.AddWithValue("tid", Ctx.TenantId);
+            sourceQuery.Parameters.AddWithValue("cid", Ctx.CompanyId);
+            sourceQuery.Parameters.AddWithValue("var", req.VariantId);
+            sourceQuery.Parameters.AddWithValue("bin", req.SourceBinId);
+            await using var reader = await sourceQuery.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
             {
-                onHandQuarantine = reader.GetDecimal(0);
-                warehouseId = reader.GetGuid(1);
+                sourceRows.Add((
+                    reader.GetGuid(0),
+                    reader.IsDBNull(1) ? null : reader.GetGuid(1),
+                    reader.GetGuid(2),
+                    reader.GetDecimal(3)));
             }
+            await reader.CloseAsync();
         }
 
-        if (onHandQuarantine < req.ReleasedQty)
+        var totalQuarantine = sourceRows.Sum(row => row.OnHand);
+        if (totalQuarantine < req.ReleasedQty)
         {
-            throw new InvalidOperationException($"INSUFFICIENT_QUARANTINE_STOCK: Available in quarantine {onHandQuarantine}, requested {req.ReleasedQty}");
+            throw new InvalidOperationException(
+                $"INSUFFICIENT_QUARANTINE_STOCK: Available in quarantine {totalQuarantine}, requested {req.ReleasedQty}");
+        }
+        if (sourceRows.Count == 0)
+        {
+            throw new InvalidOperationException("QUARANTINE_STOCK_NOT_FOUND");
+        }
+
+        Guid baseUomId;
+        await using (var getUom = conn.CreateCommand())
+        {
+            getUom.CommandText = "SELECT base_uom_id FROM erp_inventory.product_variant WHERE tenant_id = @tid AND variant_id = @var;";
+            getUom.Parameters.AddWithValue("tid", Ctx.TenantId);
+            getUom.Parameters.AddWithValue("var", req.VariantId);
+            baseUomId = (Guid)(await getUom.ExecuteScalarAsync(ct)
+                ?? throw new InvalidOperationException("PRODUCT_VARIANT_NOT_FOUND"));
         }
 
         var releaseId = Guid.NewGuid();
-        await using var relCmd = conn.CreateCommand();
-        relCmd.CommandText = """
-            INSERT INTO erp_purchasing.quarantine_release_record
-                (tenant_id, company_id, release_id, release_number, inspection_line_id,
-                 grn_id, variant_id, source_bin_id, target_bin_id, released_qty,
-                 release_destination, authorized_by, released_at, notes)
-            VALUES
-                (@tid, @cid, @id, @no, @inLine,
-                 @gid, @var, @sBin, @tBin, @qty,
-                 @dest, @by, now(), @notes);
-            """;
-        relCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-        relCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-        relCmd.Parameters.AddWithValue("id", releaseId);
-        relCmd.Parameters.AddWithValue("no", req.ReleaseNumber.Trim());
-        relCmd.Parameters.AddWithValue("inLine", req.InspectionLineId);
-        relCmd.Parameters.AddWithValue("gid", req.GrnId);
-        relCmd.Parameters.AddWithValue("var", req.VariantId);
-        relCmd.Parameters.AddWithValue("sBin", req.SourceBinId);
-        relCmd.Parameters.AddWithValue("tBin", req.TargetBinId);
-        relCmd.Parameters.AddWithValue("qty", req.ReleasedQty);
-        relCmd.Parameters.AddWithValue("dest", req.ReleaseDestination);
-        relCmd.Parameters.AddWithValue("by", authorizedBy == Guid.Empty ? Ctx.UserId : authorizedBy);
-        relCmd.Parameters.AddWithValue("notes", (object?)req.Notes ?? DBNull.Value);
-        await relCmd.ExecuteNonQueryAsync(ct);
-
-        // Deduct from quarantine
-        await using var decCmd = conn.CreateCommand();
-        decCmd.CommandText = """
-            UPDATE erp_inventory.stock_balance
-            SET on_hand_qty = on_hand_qty - @qty, updated_at = now()
-            WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
-              AND bin_id = @bin AND status_code = 'quarantine';
-            """;
-        decCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-        decCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-        decCmd.Parameters.AddWithValue("var", req.VariantId);
-        decCmd.Parameters.AddWithValue("bin", req.SourceBinId);
-        decCmd.Parameters.AddWithValue("qty", req.ReleasedQty);
-        await decCmd.ExecuteNonQueryAsync(ct);
-
-        // If destination is available, add to target bin available stock (No duplicate valuation or layer created!)
-        if (req.ReleaseDestination == "available")
+        await using (var releaseRecord = conn.CreateCommand())
         {
-            await using var incCmd = conn.CreateCommand();
-            incCmd.CommandText = """
-                INSERT INTO erp_inventory.stock_balance
-                    (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, on_hand_qty, balance_id)
+            releaseRecord.CommandText = """
+                INSERT INTO erp_purchasing.quarantine_release_record
+                    (tenant_id, company_id, release_id, release_number, inspection_line_id,
+                     grn_id, variant_id, source_bin_id, target_bin_id, released_qty,
+                     release_destination, authorized_by, released_at, notes)
                 VALUES
-                    (@tid, @cid, @var, @wh, @bin, 'available', @qty, gen_random_uuid())
-                ON CONFLICT (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code, (COALESCE(lot_id, '00000000-0000-0000-0000-000000000000'::uuid)))
-                DO UPDATE SET on_hand_qty = erp_inventory.stock_balance.on_hand_qty + EXCLUDED.on_hand_qty, updated_at = now();
+                    (@tid, @cid, @id, @no, @inLine,
+                     @gid, @var, @sBin, @tBin, @qty,
+                     @dest, @by, now(), @notes);
                 """;
-            incCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-            incCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-            incCmd.Parameters.AddWithValue("var", req.VariantId);
-            incCmd.Parameters.AddWithValue("wh", warehouseId);
-            incCmd.Parameters.AddWithValue("bin", req.TargetBinId);
-            incCmd.Parameters.AddWithValue("qty", req.ReleasedQty);
-            await incCmd.ExecuteNonQueryAsync(ct);
+            releaseRecord.Parameters.AddWithValue("tid", Ctx.TenantId);
+            releaseRecord.Parameters.AddWithValue("cid", Ctx.CompanyId);
+            releaseRecord.Parameters.AddWithValue("id", releaseId);
+            releaseRecord.Parameters.AddWithValue("no", req.ReleaseNumber.Trim());
+            releaseRecord.Parameters.AddWithValue("inLine", req.InspectionLineId);
+            releaseRecord.Parameters.AddWithValue("gid", req.GrnId);
+            releaseRecord.Parameters.AddWithValue("var", req.VariantId);
+            releaseRecord.Parameters.AddWithValue("sBin", req.SourceBinId);
+            releaseRecord.Parameters.AddWithValue("tBin", req.TargetBinId);
+            releaseRecord.Parameters.AddWithValue("qty", req.ReleasedQty);
+            releaseRecord.Parameters.AddWithValue("dest", req.ReleaseDestination);
+            releaseRecord.Parameters.AddWithValue("by", authorizedBy == Guid.Empty ? Ctx.UserId : authorizedBy);
+            releaseRecord.Parameters.AddWithValue("notes", (object?)req.Notes ?? DBNull.Value);
+            await releaseRecord.ExecuteNonQueryAsync(ct);
         }
+
+        var movementId = Guid.NewGuid();
+        var occurredAt = DateTimeOffset.UtcNow;
+        await using (var movement = conn.CreateCommand())
+        {
+            movement.CommandText = """
+                INSERT INTO erp_inventory.inventory_movement
+                    (tenant_id, company_id, movement_id, client_transaction_id, movement_type,
+                     source_document_type, source_document_id, occurred_at, created_by, note)
+                VALUES
+                    (@tid, @cid, @mid, @txid, 'transfer',
+                     'quarantine_release', @sourceId, @occurred, @by, @note);
+                """;
+            movement.Parameters.AddWithValue("tid", Ctx.TenantId);
+            movement.Parameters.AddWithValue("cid", Ctx.CompanyId);
+            movement.Parameters.AddWithValue("mid", movementId);
+            movement.Parameters.AddWithValue("txid", Guid.NewGuid());
+            movement.Parameters.AddWithValue("sourceId", releaseId);
+            movement.Parameters.AddWithValue("occurred", occurredAt);
+            movement.Parameters.AddWithValue("by", authorizedBy == Guid.Empty ? Ctx.UserId : authorizedBy);
+            movement.Parameters.AddWithValue("note", $"Quarantine release {req.ReleaseNumber}");
+            await movement.ExecuteNonQueryAsync(ct);
+        }
+
+        decimal remaining = req.ReleasedQty;
+        short legNumber = 1;
+        var feedLegs = new List<object>();
+        var warehouseId = sourceRows[0].WarehouseId;
+        foreach (var row in sourceRows)
+        {
+            if (remaining <= 0m) break;
+            var take = Math.Min(row.OnHand, remaining);
+            if (take <= 0m) continue;
+
+            await using (var decrement = conn.CreateCommand())
+            {
+                decrement.CommandText = """
+                    UPDATE erp_inventory.stock_balance
+                    SET on_hand_qty = on_hand_qty - @qty, updated_at = now()
+                    WHERE tenant_id = @tid AND company_id = @cid AND balance_id = @balanceId;
+                    """;
+                decrement.Parameters.AddWithValue("tid", Ctx.TenantId);
+                decrement.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                decrement.Parameters.AddWithValue("balanceId", row.BalanceId);
+                decrement.Parameters.AddWithValue("qty", take);
+                await decrement.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var sourceLeg = conn.CreateCommand())
+            {
+                sourceLeg.CommandText = """
+                    INSERT INTO erp_inventory.inventory_movement_leg
+                        (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                         bin_id, status_code, lot_id, quantity_delta, base_uom_id)
+                    VALUES
+                        (@tid, @cid, @mid, @ln, @var, @wh, @bin, 'quarantine', @lot, @delta, @uom);
+                    """;
+                sourceLeg.Parameters.AddWithValue("tid", Ctx.TenantId);
+                sourceLeg.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                sourceLeg.Parameters.AddWithValue("mid", movementId);
+                sourceLeg.Parameters.AddWithValue("ln", legNumber++);
+                sourceLeg.Parameters.AddWithValue("var", req.VariantId);
+                sourceLeg.Parameters.AddWithValue("wh", warehouseId);
+                sourceLeg.Parameters.AddWithValue("bin", req.SourceBinId);
+                sourceLeg.Parameters.Add("lot", NpgsqlTypes.NpgsqlDbType.Uuid).Value =
+                    (object?)row.LotId ?? DBNull.Value;
+                sourceLeg.Parameters.AddWithValue("delta", -take);
+                sourceLeg.Parameters.AddWithValue("uom", baseUomId);
+                await sourceLeg.ExecuteNonQueryAsync(ct);
+            }
+
+            feedLegs.Add(new
+            {
+                variantId = req.VariantId,
+                warehouseId,
+                binId = req.SourceBinId,
+                stockStatus = "quarantine",
+                quantityDelta = -take,
+                unitOfMeasureId = baseUomId,
+                lotId = row.LotId,
+            });
+
+            if (req.ReleaseDestination == "available")
+            {
+                await using (var increment = conn.CreateCommand())
+                {
+                    increment.CommandText = """
+                        INSERT INTO erp_inventory.stock_balance
+                            (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code,
+                             on_hand_qty, lot_id, balance_id)
+                        VALUES
+                            (@tid, @cid, @var, @wh, @bin, 'available', @qty, @lot, @balanceId)
+                        ON CONFLICT (tenant_id, company_id, variant_id, warehouse_id, bin_id, status_code,
+                                     (COALESCE(lot_id, '00000000-0000-0000-0000-000000000000'::uuid)))
+                        DO UPDATE SET on_hand_qty = erp_inventory.stock_balance.on_hand_qty + EXCLUDED.on_hand_qty,
+                                      updated_at = now();
+                        """;
+                    increment.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    increment.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    increment.Parameters.AddWithValue("var", req.VariantId);
+                    increment.Parameters.AddWithValue("wh", warehouseId);
+                    increment.Parameters.AddWithValue("bin", req.TargetBinId);
+                    increment.Parameters.AddWithValue("qty", take);
+                    increment.Parameters.Add("lot", NpgsqlTypes.NpgsqlDbType.Uuid).Value =
+                        (object?)row.LotId ?? DBNull.Value;
+                    increment.Parameters.AddWithValue("balanceId", Guid.NewGuid());
+                    await increment.ExecuteNonQueryAsync(ct);
+                }
+
+                await using (var destinationLeg = conn.CreateCommand())
+                {
+                    destinationLeg.CommandText = """
+                        INSERT INTO erp_inventory.inventory_movement_leg
+                            (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                             bin_id, status_code, lot_id, quantity_delta, base_uom_id)
+                        VALUES
+                            (@tid, @cid, @mid, @ln, @var, @wh, @bin, 'available', @lot, @delta, @uom);
+                        """;
+                    destinationLeg.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    destinationLeg.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    destinationLeg.Parameters.AddWithValue("mid", movementId);
+                    destinationLeg.Parameters.AddWithValue("ln", legNumber++);
+                    destinationLeg.Parameters.AddWithValue("var", req.VariantId);
+                    destinationLeg.Parameters.AddWithValue("wh", warehouseId);
+                    destinationLeg.Parameters.AddWithValue("bin", req.TargetBinId);
+                    destinationLeg.Parameters.Add("lot", NpgsqlTypes.NpgsqlDbType.Uuid).Value =
+                        (object?)row.LotId ?? DBNull.Value;
+                    destinationLeg.Parameters.AddWithValue("delta", take);
+                    destinationLeg.Parameters.AddWithValue("uom", baseUomId);
+                    await destinationLeg.ExecuteNonQueryAsync(ct);
+                }
+
+                feedLegs.Add(new
+                {
+                    variantId = req.VariantId,
+                    warehouseId,
+                    binId = req.TargetBinId,
+                    stockStatus = "available",
+                    quantityDelta = take,
+                    unitOfMeasureId = baseUomId,
+                    lotId = row.LotId,
+                });
+            }
+
+            remaining -= take;
+        }
+
+        var releaseFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "transfer",
+            legs = feedLegs,
+            occurredAt,
+            postedAt = occurredAt,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId,
+            "inventory_movement", movementId, 1, "upsert", releaseFeedPayload, ct);
 
         await tx.CommitAsync(ct);
         return releaseId;
     }
-
-    // ── Supplier Invoices & 3-Way Matching ──────────────────────────────────────
 
     public async Task<IReadOnlyList<SupplierInvoiceSummary>> ListSupplierInvoicesAsync(Guid? supplierId, CancellationToken ct)
     {
@@ -1162,6 +1474,8 @@ public sealed partial class PostgresPurchasingRepository
         var movementId = Guid.NewGuid();
         var clientTxId = Guid.NewGuid();
         var occurredAt = DateTimeOffset.UtcNow;
+        var feedLegs = new List<object>();
+        int legNumber = 1;
 
         // Record inventory issue movement
         await using (var movCmd = conn.CreateCommand())
@@ -1190,43 +1504,109 @@ public sealed partial class PostgresPurchasingRepository
         {
             var l = ret.Lines[i];
 
-            // Verify stock balance
-            await using var chkCmd = conn.CreateCommand();
-            chkCmd.CommandText = """
-                SELECT on_hand_qty FROM erp_inventory.stock_balance
-                WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
-                  AND warehouse_id = @wh AND bin_id = @bin AND status_code = @status
-                FOR UPDATE;
-                """;
-            chkCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-            chkCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-            chkCmd.Parameters.AddWithValue("var", l.VariantId);
-            chkCmd.Parameters.AddWithValue("wh", l.WarehouseId);
-            chkCmd.Parameters.AddWithValue("bin", l.BinId);
-            chkCmd.Parameters.AddWithValue("status", l.FromStockStatus);
+            // Lock all lot-split balance rows and allocate this return across them exactly once.
+            var sourceRows = new List<(Guid BalanceId, Guid? LotId, decimal OnHand)>();
+            await using (var chkCmd = conn.CreateCommand())
+            {
+                chkCmd.CommandText = """
+                    SELECT balance_id, lot_id, on_hand_qty
+                    FROM erp_inventory.stock_balance
+                    WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
+                      AND warehouse_id = @wh AND bin_id = @bin AND status_code = @status
+                    ORDER BY lot_id NULLS FIRST, balance_id
+                    FOR UPDATE;
+                    """;
+                chkCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+                chkCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                chkCmd.Parameters.AddWithValue("var", l.VariantId);
+                chkCmd.Parameters.AddWithValue("wh", l.WarehouseId);
+                chkCmd.Parameters.AddWithValue("bin", l.BinId);
+                chkCmd.Parameters.AddWithValue("status", l.FromStockStatus);
+                await using var reader = await chkCmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    sourceRows.Add((
+                        reader.GetGuid(0),
+                        reader.IsDBNull(1) ? null : reader.GetGuid(1),
+                        reader.GetDecimal(2)));
+                }
+                await reader.CloseAsync();
+            }
 
-            var onHand = (decimal)(await chkCmd.ExecuteScalarAsync(ct) ?? 0m);
+            var onHand = sourceRows.Sum(row => row.OnHand);
             if (onHand < l.ReturnQty)
             {
                 throw new InvalidOperationException($"INSUFFICIENT_STOCK_FOR_RETURN: Available {onHand}, requested return {l.ReturnQty}");
             }
 
-            // Deduct balance
-            await using var decCmd = conn.CreateCommand();
-            decCmd.CommandText = """
-                UPDATE erp_inventory.stock_balance
-                SET on_hand_qty = on_hand_qty - @qty, updated_at = now()
-                WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
-                  AND warehouse_id = @wh AND bin_id = @bin AND status_code = @status;
-                """;
-            decCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-            decCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-            decCmd.Parameters.AddWithValue("var", l.VariantId);
-            decCmd.Parameters.AddWithValue("wh", l.WarehouseId);
-            decCmd.Parameters.AddWithValue("bin", l.BinId);
-            decCmd.Parameters.AddWithValue("status", l.FromStockStatus);
-            decCmd.Parameters.AddWithValue("qty", l.ReturnQty);
-            await decCmd.ExecuteNonQueryAsync(ct);
+            Guid baseUomId;
+            await using (var getUom = conn.CreateCommand())
+            {
+                getUom.CommandText = "SELECT base_uom_id FROM erp_inventory.product_variant WHERE tenant_id = @tid AND variant_id = @var;";
+                getUom.Parameters.AddWithValue("tid", Ctx.TenantId);
+                getUom.Parameters.AddWithValue("var", l.VariantId);
+                baseUomId = (Guid)(await getUom.ExecuteScalarAsync(ct)
+                    ?? throw new InvalidOperationException("PRODUCT_VARIANT_NOT_FOUND"));
+            }
+
+            decimal remainingFromBalances = l.ReturnQty;
+            foreach (var row in sourceRows)
+            {
+                if (remainingFromBalances <= 0m) break;
+                var take = Math.Min(row.OnHand, remainingFromBalances);
+                if (take <= 0m) continue;
+
+                await using (var decrement = conn.CreateCommand())
+                {
+                    decrement.CommandText = """
+                        UPDATE erp_inventory.stock_balance
+                        SET on_hand_qty = on_hand_qty - @qty, updated_at = now()
+                        WHERE tenant_id = @tid AND company_id = @cid AND balance_id = @balanceId;
+                        """;
+                    decrement.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    decrement.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    decrement.Parameters.AddWithValue("balanceId", row.BalanceId);
+                    decrement.Parameters.AddWithValue("qty", take);
+                    await decrement.ExecuteNonQueryAsync(ct);
+                }
+
+                await using (var leg = conn.CreateCommand())
+                {
+                    leg.CommandText = """
+                        INSERT INTO erp_inventory.inventory_movement_leg
+                            (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                             bin_id, status_code, lot_id, quantity_delta, base_uom_id)
+                        VALUES
+                            (@tid, @cid, @mid, @ln, @var, @wh, @bin, @status, @lot, @delta, @uom);
+                        """;
+                    leg.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    leg.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    leg.Parameters.AddWithValue("mid", movementId);
+                    leg.Parameters.AddWithValue("ln", legNumber++);
+                    leg.Parameters.AddWithValue("var", l.VariantId);
+                    leg.Parameters.AddWithValue("wh", l.WarehouseId);
+                    leg.Parameters.AddWithValue("bin", l.BinId);
+                    leg.Parameters.AddWithValue("status", l.FromStockStatus);
+                    leg.Parameters.Add("lot", NpgsqlTypes.NpgsqlDbType.Uuid).Value =
+                        (object?)row.LotId ?? DBNull.Value;
+                    leg.Parameters.AddWithValue("delta", -take);
+                    leg.Parameters.AddWithValue("uom", baseUomId);
+                    await leg.ExecuteNonQueryAsync(ct);
+                }
+
+                feedLegs.Add(new
+                {
+                    variantId = l.VariantId,
+                    warehouseId = l.WarehouseId,
+                    binId = l.BinId,
+                    stockStatus = l.FromStockStatus,
+                    quantityDelta = -take,
+                    unitOfMeasureId = baseUomId,
+                    lotId = row.LotId,
+                });
+
+                remainingFromBalances -= take;
+            }
 
             // If from available, consume oldest open FIFO layer
             if (l.FromStockStatus == "available")
@@ -1293,6 +1673,18 @@ public sealed partial class PostgresPurchasingRepository
         retUpd.Parameters.AddWithValue("id", returnId);
         retUpd.Parameters.AddWithValue("by", authorizedBy == Guid.Empty ? Ctx.UserId : authorizedBy);
         await retUpd.ExecuteNonQueryAsync(ct);
+
+        var purchaseReturnFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "issue",
+            legs = feedLegs,
+            occurredAt,
+            postedAt = occurredAt,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId,
+            "inventory_movement", movementId, 1, "upsert", purchaseReturnFeedPayload, ct);
 
         await tx.CommitAsync(ct);
         return true;

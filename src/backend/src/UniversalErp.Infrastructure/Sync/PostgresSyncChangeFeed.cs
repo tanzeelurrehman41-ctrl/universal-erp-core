@@ -1,6 +1,8 @@
+using System.Data;
 using System.Text.Json;
 using Npgsql;
 using NpgsqlTypes;
+using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Sync;
 using UniversalErp.Domain.Tenancy;
 
@@ -8,6 +10,122 @@ namespace UniversalErp.Infrastructure.Sync;
 
 public sealed class PostgresSyncChangeFeed(NpgsqlDataSource dataSource) : ISyncChangeFeed
 {
+    public async Task<InventoryBalanceSnapshot> ReadInventorySnapshotAsync(
+        TenantContext context,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.RepeatableRead, cancellationToken);
+
+        await using (var setScope = new NpgsqlCommand(
+            "SELECT set_config('app.tenant_id', @tenantId, true), set_config('app.company_id', @companyId, true)",
+            connection,
+            transaction))
+        {
+            setScope.Parameters.AddWithValue("tenantId", context.TenantId.ToString());
+            setScope.Parameters.AddWithValue("companyId", context.CompanyId.ToString());
+            await setScope.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        long cursor;
+        await using (var readCursor = new NpgsqlCommand(
+            """
+            SELECT COALESCE(
+                (SELECT last_sequence
+                 FROM sync.company_change_counters
+                 WHERE tenant_id = @tenantId AND company_id = @companyId),
+                0)
+            """,
+            connection,
+            transaction))
+        {
+            readCursor.Parameters.AddWithValue("tenantId", context.TenantId);
+            readCursor.Parameters.AddWithValue("companyId", context.CompanyId);
+            cursor = Convert.ToInt64(await readCursor.ExecuteScalarAsync(cancellationToken));
+        }
+
+        bool hasCostLayersTable;
+        await using (var check = new NpgsqlCommand(
+            "SELECT to_regclass('erp_inventory.inventory_cost_layer') IS NOT NULL",
+            connection,
+            transaction))
+        {
+            hasCostLayersTable = await check.ExecuteScalarAsync(cancellationToken) as bool? == true;
+        }
+
+        var balanceSql = hasCostLayersTable
+            ? """
+              WITH balance_totals AS (
+                  SELECT variant_id, warehouse_id, bin_id, status_code, SUM(on_hand_qty) AS on_hand_qty
+                  FROM erp_inventory.stock_balance
+                  WHERE tenant_id = @tenantId AND company_id = @companyId
+                  GROUP BY variant_id, warehouse_id, bin_id, status_code
+              )
+              SELECT balance.variant_id, balance.warehouse_id, balance.bin_id,
+                     balance.status_code, balance.on_hand_qty, variant.base_uom_id,
+                     CASE WHEN balance.status_code = 'available'
+                          THEN COALESCE(valued.valued_qty, 0)
+                          ELSE NULL
+                     END AS valued_qty
+              FROM balance_totals AS balance
+              JOIN erp_inventory.product_variant AS variant
+                ON variant.tenant_id = @tenantId
+               AND variant.variant_id = balance.variant_id
+              LEFT JOIN (
+                  SELECT variant_id, warehouse_id, bin_id, SUM(remaining_qty) AS valued_qty
+                  FROM erp_inventory.inventory_cost_layer
+                  WHERE tenant_id = @tenantId AND company_id = @companyId
+                    AND status_code = 'available' AND remaining_qty > 0 AND unit_cost > 0
+                  GROUP BY variant_id, warehouse_id, bin_id
+              ) AS valued
+                ON valued.variant_id = balance.variant_id
+               AND valued.warehouse_id = balance.warehouse_id
+               AND valued.bin_id = balance.bin_id
+              ORDER BY balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code
+              """
+            : """
+              WITH balance_totals AS (
+                  SELECT variant_id, warehouse_id, bin_id, status_code, SUM(on_hand_qty) AS on_hand_qty
+                  FROM erp_inventory.stock_balance
+                  WHERE tenant_id = @tenantId AND company_id = @companyId
+                  GROUP BY variant_id, warehouse_id, bin_id, status_code
+              )
+              SELECT balance.variant_id, balance.warehouse_id, balance.bin_id,
+                     balance.status_code, balance.on_hand_qty, variant.base_uom_id,
+                     NULL::numeric AS valued_qty
+              FROM balance_totals AS balance
+              JOIN erp_inventory.product_variant AS variant
+                ON variant.tenant_id = @tenantId
+               AND variant.variant_id = balance.variant_id
+              ORDER BY balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code
+              """;
+
+        var balances = new List<InventoryAvailabilitySummary>();
+        await using (var command = new NpgsqlCommand(balanceSql, connection, transaction))
+        {
+            command.Parameters.AddWithValue("tenantId", context.TenantId);
+            command.Parameters.AddWithValue("companyId", context.CompanyId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                balances.Add(new InventoryAvailabilitySummary(
+                    reader.GetGuid(0),
+                    reader.GetGuid(1),
+                    reader.GetGuid(2),
+                    reader.GetString(3),
+                    reader.GetDecimal(4),
+                    reader.GetGuid(5),
+                    reader.IsDBNull(6) ? null : reader.GetDecimal(6)));
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return new InventoryBalanceSnapshot(
+            cursor.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            balances);
+    }
+
     public async Task<SyncChangePage> ReadPageAsync(
         TenantContext context,
         string entityType,

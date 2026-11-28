@@ -7,7 +7,21 @@ public sealed record OfflineDeviceGrant(
     Guid DeviceId,
     Guid GrantId,
     string GrantToken,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    IReadOnlyList<string> AllowedOperations);
+
+public sealed record OfflineDeviceCursorAcknowledgement(
+    Guid DeviceId,
+    Guid GrantId,
+    string GrantToken,
+    string ProductsCursor,
+    string InventoryCursor,
+    long LastAcknowledgedSequence);
+
+public sealed record OfflineDeviceCursorState(
+    string ProductsCursor,
+    string InventoryCursor,
+    long LastAcknowledgedSequence);
 
 public sealed record OfflineReceiptOperation(
     Guid OperationId,
@@ -46,6 +60,20 @@ public interface IOfflineReceiptSyncRepository
         Guid clientDeviceId,
         string platformCode,
         string? deviceName,
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? allowedOperations = null);
+
+    Task<bool> ValidateDeviceGrantAsync(
+        TenantContext context,
+        Guid deviceId,
+        Guid grantId,
+        string grantToken,
+        string requiredOperation,
+        CancellationToken cancellationToken);
+
+    Task<OfflineDeviceCursorState?> AcknowledgeDeviceCursorsAsync(
+        TenantContext context,
+        OfflineDeviceCursorAcknowledgement acknowledgement,
         CancellationToken cancellationToken);
 
     Task<OfflineInboxReservation> ReserveReceiptOperationAsync(

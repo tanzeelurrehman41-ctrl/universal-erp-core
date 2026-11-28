@@ -1,5 +1,6 @@
 import { decryptOfflineValue, encryptOfflineValue } from "./offlineReceiptQueue";
-import { apiUrl } from "./auth";
+import { apiUrl, type ApiWorkspaceScope } from "./auth";
+import { ensureOfflineDeviceGrant, reserveOfflineDeviceSequence } from "./offlineReceiptQueue";
 
 export type ProductCreatePayload = {
   productCode: string;
@@ -29,6 +30,7 @@ export type QueueWorkspace = {
 export type SyncAuthorization = QueueWorkspace & {
   accessToken: string;
   ownerKey: string;
+  storageScope: string;
 };
 
 export type QueueStatus = "queued" | "syncing" | "accepted" | "conflict" | "rejected";
@@ -44,6 +46,8 @@ export type OfflineProductOperation = {
   companyId?: string;
   companyName?: string;
   ownerKey?: string;
+  sharedSequence?: boolean;
+  syncAttempted?: boolean;
   serverProduct?: ProductSummary;
   message?: string;
 };
@@ -218,16 +222,21 @@ async function ensureEncryptedQueue(): Promise<void> {
 }
 
 async function nextDeviceSequence(database: IDBDatabase): Promise<number> {
-  const transaction = database.transaction(METADATA_STORE, "readwrite");
-  const complete = transactionComplete(transaction);
-  const store = transaction.objectStore(METADATA_STORE);
-  const request = store.get("product-device-sequence") as IDBRequest<StoredCounter | undefined>;
-  let sequence = 0;
-  request.onsuccess = () => {
-    sequence = (request.result?.value ?? 0) + 1;
-    store.put({ id: "product-device-sequence", value: sequence } satisfies StoredCounter);
-  };
-  await complete;
+  const read = database.transaction(METADATA_STORE, "readonly");
+  const readComplete = transactionComplete(read);
+  const current = await requestResult(
+    read.objectStore(METADATA_STORE).get("product-device-sequence") as IDBRequest<StoredCounter | undefined>,
+  );
+  await readComplete;
+
+  const sequence = await reserveOfflineDeviceSequence(current?.value ?? 0);
+  const write = database.transaction(METADATA_STORE, "readwrite");
+  const writeComplete = transactionComplete(write);
+  write.objectStore(METADATA_STORE).put({
+    id: "product-device-sequence",
+    value: sequence,
+  } satisfies StoredCounter);
+  await writeComplete;
   return sequence;
 }
 
@@ -251,6 +260,8 @@ export async function enqueueProductOperation(
     deviceSequence: await nextDeviceSequence(database),
     operationType: "product.create",
     payload,
+    sharedSequence: true,
+    syncAttempted: false,
     status: "queued",
     createdAt: new Date().toISOString(),
     ...workspace,
@@ -276,7 +287,7 @@ export async function loadProductOperations(): Promise<OfflineProductOperation[]
 
 async function updateOperation(
   operationId: string,
-  updates: Partial<Pick<OfflineProductOperation, "status" | "serverProduct" | "message">>,
+  updates: Partial<Pick<OfflineProductOperation, "status" | "serverProduct" | "message" | "deviceSequence" | "sharedSequence" | "syncAttempted">>,
 ): Promise<void> {
   await ensureEncryptedQueue();
   const database = await openDatabase();
@@ -316,73 +327,168 @@ async function syncWithAuthenticatedServer(
     });
   }
 
-  for (const operation of eligible) {
-    await updateOperation(operation.operationId, { status: "syncing", message: undefined });
+  let deviceGrant: Awaited<ReturnType<typeof ensureOfflineDeviceGrant>>;
+  try {
+    const workspace: ApiWorkspaceScope = {
+      tenantId: authorization.tenantId,
+      companyId: authorization.companyId,
+    };
+    deviceGrant = await ensureOfflineDeviceGrant(
+      authorization.storageScope,
+      workspace,
+      "inventory.product.create",
+    );
+  } catch (error) {
+    const message = error instanceof Error
+      ? error.message
+      : "This device could not be authorized for product sync. Saved products remain on this device.";
+    for (const operation of eligible) {
+      await updateOperation(operation.operationId, { status: "queued", message });
+    }
+    return;
+  }
+
+  const prepared: OfflineProductOperation[] = [];
+  for (const original of eligible) {
+    let operation = original;
+    if (!operation.sharedSequence) {
+      const nextSequence = await reserveOfflineDeviceSequence(operation.deviceSequence);
+      operation = {
+        ...operation,
+        deviceSequence: nextSequence,
+        sharedSequence: true,
+      };
+    }
+    await updateOperation(operation.operationId, {
+      deviceSequence: operation.deviceSequence,
+      sharedSequence: true,
+      syncAttempted: true,
+      status: "syncing",
+      message: undefined,
+    });
+    prepared.push({ ...operation, syncAttempted: true, status: "syncing", message: undefined });
+  }
+
+  for (let offset = 0; offset < prepared.length; offset += 50) {
+    const batch = prepared.slice(offset, offset + 50);
+
     try {
-      const response = await fetch(apiUrl("/api/v1/products"), {
+      const batchId = crypto.randomUUID();
+      const response = await fetch(apiUrl("/api/v1/sync/products:batch"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": operation.operationId,
           Authorization: `Bearer ${authorization.accessToken}`,
           "X-Tenant-Id": authorization.tenantId,
           "X-Company-Id": authorization.companyId,
         },
-        body: JSON.stringify(operation.payload),
+        body: JSON.stringify({
+          batchId,
+          deviceId: deviceGrant.deviceId,
+          grantId: deviceGrant.grantId,
+          grantToken: deviceGrant.grantToken,
+          operations: batch.map((operation) => ({
+            operationId: operation.operationId,
+            deviceSequence: operation.deviceSequence,
+            operationType: operation.operationType,
+            createdAt: operation.createdAt,
+            payload: operation.payload,
+          })),
+        }),
       });
 
-      if (response.ok) {
-        const product = (await response.json()) as ProductSummary;
-        await updateOperation(operation.operationId, {
-          status: "accepted",
-          serverProduct: product,
-          message: "Confirmed by the shared server.",
-        });
+      if (!response.ok) {
+        const problem = await response.json().catch(() => ({})) as { title?: string; code?: string };
+        const message = problem.title ?? problem.code ?? `The server returned ${response.status}.`;
+        if (response.status === 401 || response.status === 403) {
+          const accessMessage = response.status === 401
+            ? "Sign in again to sync these saved entries. They remain on this device."
+            : "This account lacks product-create permission. These entries remain saved on this device."; 
+          for (const operation of batch) {
+            await updateOperation(operation.operationId, { status: "queued", message: accessMessage });
+          }
+          break;
+        }
+
+        if (response.status === 429 || response.status >= 500) {
+          for (const operation of batch) {
+            await updateOperation(operation.operationId, {
+              status: "queued",
+              message: "The server is temporarily unavailable. These saved entries will be retried.",
+            });
+          }
+          break;
+        }
+
+        for (const operation of batch) {
+          await updateOperation(operation.operationId, { status: "rejected", message });
+        }
         continue;
       }
 
-      const problem = await response.json().catch(() => ({})) as { title?: string; code?: string };
-      const message = problem.title ?? problem.code ?? `The server returned ${response.status}.`;
-      if (response.status === 401) {
-        await updateOperation(operation.operationId, {
-          status: "queued",
-          message: "Sign in again to sync this saved entry. It remains on this device.",
-        });
-        break;
-      }
-      if (response.status === 403) {
-        await updateOperation(operation.operationId, {
-          status: "queued",
-          message: "This account lacks permission. The entry stays saved and can retry after access is granted.",
-        });
-        break;
-      }
-      if (response.status === 409 || response.status === 422) {
-        await updateOperation(operation.operationId, {
-          status: response.status === 409 ? "conflict" : "rejected",
-          message,
-        });
-        continue;
-      }
-      if (response.status === 429 || response.status >= 500) {
-        await updateOperation(operation.operationId, {
-          status: "queued",
-          message: "The server is temporarily unavailable. This saved entry will be retried.",
-        });
-        break;
+      const result = await response.json() as {
+        batchId: string;
+        results: Array<{
+          operationId: string;
+          deviceSequence: number;
+          status: string;
+          product?: ProductSummary | null;
+          code?: string | null;
+        }>;
+      };
+      if (result.batchId !== batchId || !Array.isArray(result.results)) {
+        throw new Error("The server returned an invalid product sync receipt.");
       }
 
-      await updateOperation(operation.operationId, { status: "rejected", message });
+      const resultsById = new Map(result.results.map((item) => [item.operationId, item]));
+      if (resultsById.size !== result.results.length) {
+        throw new Error("The server returned duplicate product sync receipts.");
+      }
+
+      for (const operation of batch) {
+        const item = resultsById.get(operation.operationId);
+        if (!item || item.deviceSequence !== operation.deviceSequence) {
+          await updateOperation(operation.operationId, {
+            status: "queued",
+            message: "The server receipt was incomplete. This operation will retry with the same ID.",
+          });
+          continue;
+        }
+
+        if (item.status === "accepted" && item.product) {
+          await updateOperation(operation.operationId, {
+            status: "accepted",
+            serverProduct: item.product,
+            message: "Confirmed by the shared server.",
+          });
+        } else if (item.status === "conflict") {
+          await updateOperation(operation.operationId, {
+            status: "conflict",
+            message: item.code ?? "The server detected a product sync conflict.",
+          });
+        } else if (item.status === "rejected") {
+          await updateOperation(operation.operationId, {
+            status: "rejected",
+            message: item.code ?? "The server rejected this product operation.",
+          });
+        } else {
+          await updateOperation(operation.operationId, {
+            status: "queued",
+            message: "The server did not confirm this operation. It will retry with the same ID.",
+          });
+        }
+      }
     } catch {
-      await updateOperation(operation.operationId, {
-        status: "queued",
-        message: "Connection interrupted. This saved action will retry with the same ID.",
-      });
+      for (const operation of batch) {
+        await updateOperation(operation.operationId, {
+          status: "queued",
+          message: "Connection interrupted. This saved batch will retry with the same operation IDs.",
+        });
+      }
       break;
     }
   }
 }
-
 async function syncQueue(authorization?: SyncAuthorization): Promise<OfflineProductOperation[]> {
   let operations = await loadProductOperations();
   const pending = operations.filter((operation) => operation.status === "queued");
