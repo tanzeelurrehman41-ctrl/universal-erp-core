@@ -1,7 +1,9 @@
+using System.Text.Json;
 using Npgsql;
 using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Sales;
 using UniversalErp.Infrastructure.Finance;
+using UniversalErp.Infrastructure.Sync;
 
 namespace UniversalErp.Infrastructure.Sales;
 
@@ -644,6 +646,7 @@ public sealed partial class PostgresSalesRepository
         var movementId = Guid.NewGuid();
         var clientTxId = Guid.NewGuid();
         var totalCost = 0m;
+        var feedLegs = new List<object>();
 
         // Insert inventory movement header
         await using (var movCmd = conn.CreateCommand())
@@ -815,6 +818,16 @@ public sealed partial class PostgresSalesRepository
             legCmd.Parameters.AddWithValue("uom", l.UnitOfMeasureId);
             await legCmd.ExecuteNonQueryAsync(ct);
 
+            feedLegs.Add(new
+            {
+                variantId = l.VariantId,
+                warehouseId = dispatch.WarehouseId,
+                binId = l.BinId,
+                stockStatus = "available",
+                quantityDelta = -l.DispatchedQty,
+                unitOfMeasureId = l.UnitOfMeasureId,
+            });
+
             // Update dispatch line costs
             await using var updDl = conn.CreateCommand();
             updDl.Transaction = tx;
@@ -976,6 +989,18 @@ public sealed partial class PostgresSalesRepository
             updD.Parameters.AddWithValue("mid", movementId);
             await updD.ExecuteNonQueryAsync(ct);
         }
+
+        var dispatchFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "issue",
+            legs = feedLegs,
+            occurredAt = DateTimeOffset.UtcNow,
+            postedAt = DateTimeOffset.UtcNow,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId,
+            "inventory_movement", movementId, 1, "upsert", dispatchFeedPayload, ct);
 
         await tx.CommitAsync(ct);
         return true;
@@ -1727,6 +1752,7 @@ public sealed partial class PostgresSalesRepository
             conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
         var totalCost = 0m;
         var movementId = Guid.NewGuid();
+        var returnFeedLegs = new List<object>();
 
         // 1. Create movement header for goods return
         await using (var movCmd = conn.CreateCommand())
@@ -1801,6 +1827,49 @@ public sealed partial class PostgresSalesRepository
             layerCmd.Parameters.AddWithValue("cost", effectiveCost);
             layerCmd.Parameters.AddWithValue("cur", functionalCurrency);
             await layerCmd.ExecuteNonQueryAsync(ct);
+
+            Guid baseUomId;
+            await using (var getUom = conn.CreateCommand())
+            {
+                getUom.Transaction = tx;
+                getUom.CommandText = "SELECT base_uom_id FROM erp_inventory.product_variant WHERE tenant_id = @tid AND variant_id = @var;";
+                getUom.Parameters.AddWithValue("tid", Ctx.TenantId);
+                getUom.Parameters.AddWithValue("var", l.VariantId);
+                baseUomId = (Guid)(await getUom.ExecuteScalarAsync(ct)
+                    ?? throw new InvalidOperationException("PRODUCT_VARIANT_NOT_FOUND"));
+            }
+
+            await using (var legCmd = conn.CreateCommand())
+            {
+                legCmd.Transaction = tx;
+                legCmd.CommandText = """
+                    INSERT INTO erp_inventory.inventory_movement_leg
+                        (tenant_id, company_id, movement_id, leg_number, variant_id,
+                         warehouse_id, bin_id, status_code, quantity_delta, base_uom_id)
+                    VALUES
+                        (@tid, @cid, @mid, @ln, @var, @wh, @bin, 'available', @qtyDelta, @uom);
+                    """;
+                legCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+                legCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                legCmd.Parameters.AddWithValue("mid", movementId);
+                legCmd.Parameters.AddWithValue("ln", ln);
+                legCmd.Parameters.AddWithValue("var", l.VariantId);
+                legCmd.Parameters.AddWithValue("wh", l.WarehouseId);
+                legCmd.Parameters.AddWithValue("bin", l.BinId);
+                legCmd.Parameters.AddWithValue("qtyDelta", l.ReturnedQty);
+                legCmd.Parameters.AddWithValue("uom", baseUomId);
+                await legCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            returnFeedLegs.Add(new
+            {
+                variantId = l.VariantId,
+                warehouseId = l.WarehouseId,
+                binId = l.BinId,
+                stockStatus = "available",
+                quantityDelta = l.ReturnedQty,
+                unitOfMeasureId = baseUomId,
+            });
         }
 
         // 2. Post COGS Reversal Journal: Dr 1200 (Inventory Asset) / Cr 5010 (COGS)
@@ -1913,6 +1982,18 @@ public sealed partial class PostgresSalesRepository
             updR.Parameters.AddWithValue("cost", totalCost);
             await updR.ExecuteNonQueryAsync(ct);
         }
+
+        var returnFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "receipt",
+            legs = returnFeedLegs,
+            occurredAt = DateTimeOffset.UtcNow,
+            postedAt = DateTimeOffset.UtcNow,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId,
+            "inventory_movement", movementId, 1, "upsert", returnFeedPayload, ct);
 
         await tx.CommitAsync(ct);
         return true;
