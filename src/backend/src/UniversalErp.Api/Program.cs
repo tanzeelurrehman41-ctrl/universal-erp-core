@@ -107,6 +107,7 @@ builder.Services.AddCors(options =>
 builder.Services.AddScoped<IProductRepository, PostgresProductRepository>();
 builder.Services.AddScoped<ProductCatalogService>();
 builder.Services.AddScoped<ProductSyncService>();
+builder.Services.AddScoped<ProductSyncService>();
 builder.Services.AddScoped<IInventoryWorkflowRepository, PostgresInventoryWorkflowRepository>();
 builder.Services.AddScoped<InventoryWorkflowService>();
 builder.Services.AddScoped<ISyncChangeFeed, PostgresSyncChangeFeed>();
@@ -499,6 +500,7 @@ app.MapHealthChecks("/health", new HealthCheckOptions
 app.MapGet("/api/modules", () => Results.Ok(moduleCatalog));
 app.MapSyncChangeEndpoints(effectiveDevMode);
 app.MapOfflineReceiptSyncEndpoints(effectiveDevMode);
+app.MapProductSyncBatchEndpoints(effectiveDevMode);
 
 app.MapProductSyncBatchEndpoints(effectiveDevMode);
 var productApi = app.MapGroup("/api/v1");
