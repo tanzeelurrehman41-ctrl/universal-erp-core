@@ -1,7 +1,9 @@
 using System.Data.Common;
+using System.Text.Json;
 using Npgsql;
 using UniversalErp.Application.Purchasing;
 using UniversalErp.Infrastructure.Finance;
+using UniversalErp.Infrastructure.Sync;
 
 namespace UniversalErp.Infrastructure.Purchasing;
 
@@ -1162,6 +1164,7 @@ public sealed partial class PostgresPurchasingRepository
         var movementId = Guid.NewGuid();
         var clientTxId = Guid.NewGuid();
         var occurredAt = DateTimeOffset.UtcNow;
+        var feedLegs = new List<object>();
 
         // Record inventory issue movement
         await using (var movCmd = conn.CreateCommand())
@@ -1228,6 +1231,48 @@ public sealed partial class PostgresPurchasingRepository
             decCmd.Parameters.AddWithValue("qty", l.ReturnQty);
             await decCmd.ExecuteNonQueryAsync(ct);
 
+            Guid baseUomId;
+            await using (var getUom = conn.CreateCommand())
+            {
+                getUom.CommandText = "SELECT base_uom_id FROM erp_inventory.product_variant WHERE tenant_id = @tid AND variant_id = @var;";
+                getUom.Parameters.AddWithValue("tid", Ctx.TenantId);
+                getUom.Parameters.AddWithValue("var", l.VariantId);
+                baseUomId = (Guid)(await getUom.ExecuteScalarAsync(ct)
+                    ?? throw new InvalidOperationException("PRODUCT_VARIANT_NOT_FOUND"));
+            }
+
+            await using (var leg = conn.CreateCommand())
+            {
+                leg.CommandText = """
+                    INSERT INTO erp_inventory.inventory_movement_leg
+                        (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                         bin_id, status_code, quantity_delta, base_uom_id)
+                    VALUES
+                        (@tid, @cid, @mid, @ln, @var, @wh, @bin, @status, @delta, @uom);
+                    """;
+                leg.Parameters.AddWithValue("tid", Ctx.TenantId);
+                leg.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                leg.Parameters.AddWithValue("mid", movementId);
+                leg.Parameters.AddWithValue("ln", i + 1);
+                leg.Parameters.AddWithValue("var", l.VariantId);
+                leg.Parameters.AddWithValue("wh", l.WarehouseId);
+                leg.Parameters.AddWithValue("bin", l.BinId);
+                leg.Parameters.AddWithValue("status", l.FromStockStatus);
+                leg.Parameters.AddWithValue("delta", -l.ReturnQty);
+                leg.Parameters.AddWithValue("uom", baseUomId);
+                await leg.ExecuteNonQueryAsync(ct);
+            }
+
+            feedLegs.Add(new
+            {
+                variantId = l.VariantId,
+                warehouseId = l.WarehouseId,
+                binId = l.BinId,
+                stockStatus = l.FromStockStatus,
+                quantityDelta = -l.ReturnQty,
+                unitOfMeasureId = baseUomId,
+            });
+
             // If from available, consume oldest open FIFO layer
             if (l.FromStockStatus == "available")
             {
@@ -1293,6 +1338,18 @@ public sealed partial class PostgresPurchasingRepository
         retUpd.Parameters.AddWithValue("id", returnId);
         retUpd.Parameters.AddWithValue("by", authorizedBy == Guid.Empty ? Ctx.UserId : authorizedBy);
         await retUpd.ExecuteNonQueryAsync(ct);
+
+        var purchaseReturnFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "issue",
+            legs = feedLegs,
+            occurredAt,
+            postedAt = occurredAt,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId,
+            "inventory_movement", movementId, 1, "upsert", purchaseReturnFeedPayload, ct);
 
         await tx.CommitAsync(ct);
         return true;
