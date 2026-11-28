@@ -20,8 +20,15 @@ public sealed class PostgresOfflineReceiptSyncRepository(NpgsqlDataSource dataSo
         Guid clientDeviceId,
         string platformCode,
         string? deviceName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? allowedOperations = null)
     {
+        var operations = (allowedOperations ?? ["inventory.receipt.post"])
+            .Where(operation => operation is "inventory.receipt.post" or "inventory.product.create")
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (operations.Length == 0) return null;
+
         var deviceHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
             $"{context.TenantId:N}:{clientDeviceId:N}"))).ToLowerInvariant();
         await using var db = await OpenScopeAsync(context.TenantId, context.CompanyId, cancellationToken);
@@ -127,7 +134,7 @@ public sealed class PostgresOfflineReceiptSyncRepository(NpgsqlDataSource dataSo
             grant.Parameters.AddWithValue("userId", context.UserId);
             grant.Parameters.Add(new NpgsqlParameter("operations", NpgsqlDbType.Jsonb)
             {
-                Value = "[\"inventory.receipt.post\"]",
+                Value = JsonSerializer.Serialize(operations, JsonOptions),
             });
             grant.Parameters.Add(new NpgsqlParameter("limits", NpgsqlDbType.Jsonb)
             {
@@ -142,7 +149,22 @@ public sealed class PostgresOfflineReceiptSyncRepository(NpgsqlDataSource dataSo
         }
 
         await db.Transaction.CommitAsync(cancellationToken);
-        return new OfflineDeviceGrant(deviceId, grantId, grantToken, expiresAt);
+        return new OfflineDeviceGrant(deviceId, grantId, grantToken, expiresAt, operations);
+    }
+
+    public async Task<bool> ValidateDeviceGrantAsync(
+        TenantContext context,
+        Guid deviceId,
+        Guid grantId,
+        string grantToken,
+        string requiredOperation,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(context.TenantId, context.CompanyId, cancellationToken);
+        var isAuthorized = await ValidateAuthorizationAsync(
+            db, context, deviceId, grantId, grantToken, requiredOperation, cancellationToken);
+        await db.Transaction.CommitAsync(cancellationToken);
+        return isAuthorized;
     }
 
     public async Task<OfflineInboxReservation> ReserveReceiptOperationAsync(
@@ -599,13 +621,25 @@ public sealed class PostgresOfflineReceiptSyncRepository(NpgsqlDataSource dataSo
         return new OfflineReceiptOperationResult(operation.OperationId, operation.DeviceSequence, "accepted", summary, null);
     }
 
-    private static async Task<bool> ValidateAuthorizationAsync(
+    private static Task<bool> ValidateAuthorizationAsync(
         DbScope db,
         TenantContext context,
         OfflineReceiptBatchRequest batch,
+        CancellationToken cancellationToken) =>
+        ValidateAuthorizationAsync(
+            db, context, batch.DeviceId, batch.GrantId, batch.GrantToken,
+            "inventory.receipt.post", cancellationToken);
+
+    private static async Task<bool> ValidateAuthorizationAsync(
+        DbScope db,
+        TenantContext context,
+        Guid deviceId,
+        Guid grantId,
+        string grantToken,
+        string requiredOperation,
         CancellationToken cancellationToken)
     {
-        var grantHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(batch.GrantToken))).ToLowerInvariant();
+        var grantHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(grantToken))).ToLowerInvariant();
         await using var validate = new NpgsqlCommand(
             """
             SELECT EXISTS (
@@ -634,18 +668,19 @@ public sealed class PostgresOfflineReceiptSyncRepository(NpgsqlDataSource dataSo
                   AND offline_grant.revoked_at IS NULL
                   AND offline_grant.expires_at > now()
                   AND offline_grant.grant_signature = @grantHash
-                  AND offline_grant.allowed_operations ? 'inventory.receipt.post'
+                  AND offline_grant.allowed_operations ? @requiredOperation
                 FOR SHARE OF device, company_scope, membership, offline_grant
             )
             """,
             db.Connection,
             db.Transaction);
         validate.Parameters.AddWithValue("tenantId", context.TenantId);
-        validate.Parameters.AddWithValue("deviceId", batch.DeviceId);
+        validate.Parameters.AddWithValue("deviceId", deviceId);
         validate.Parameters.AddWithValue("companyId", context.CompanyId);
-        validate.Parameters.AddWithValue("grantId", batch.GrantId);
+        validate.Parameters.AddWithValue("grantId", grantId);
         validate.Parameters.AddWithValue("userId", context.UserId);
         validate.Parameters.AddWithValue("grantHash", grantHash);
+        validate.Parameters.AddWithValue("requiredOperation", requiredOperation);
         return await validate.ExecuteScalarAsync(cancellationToken) as bool? == true;
     }
 
