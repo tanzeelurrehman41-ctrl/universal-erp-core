@@ -57,8 +57,9 @@ public sealed class ProductSyncService(ProductCatalogService catalog)
             throw new ArgumentException(headerError, nameof(batch));
         }
 
-        var results = new List<ProductSyncOperationResult>(batch.Operations!.Count);
-        foreach (var operation in batch.Operations)
+        var operations = batch.Operations!;
+        var results = new List<ProductSyncOperationResult>(operations.Count);
+        foreach (var operation in operations)
         {
             if (operation.OperationId == Guid.Empty ||
                 operation.DeviceSequence <= 0 ||
