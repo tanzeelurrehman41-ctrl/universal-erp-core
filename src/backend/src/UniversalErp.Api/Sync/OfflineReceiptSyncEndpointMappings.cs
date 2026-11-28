@@ -42,6 +42,10 @@ public static class OfflineReceiptSyncEndpointMappings
             {
                 allowedOperations.Add("inventory.product.create");
             }
+            if (isDevelopment || (await authorizationService.AuthorizeAsync(principal, "inventory.availability.view")).Succeeded)
+            {
+                allowedOperations.Add("sync.cursor.ack");
+            }
             if (allowedOperations.Count == 0)
             {
                 return Results.Forbid();
