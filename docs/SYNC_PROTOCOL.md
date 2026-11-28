@@ -299,3 +299,16 @@ The API requires an authenticated caller and validates that the device is active
 The browser sends the server acknowledgement only after its encrypted local snapshot/cursor commit succeeds. If the server acknowledgement fails, local data remains committed and the client retries the acknowledgement on a later synchronization cycle. Legacy unrecognized cursor encodings are treated as zero so that clients replay rather than skip changes.
 
 This endpoint records what a device has acknowledged; it does not yet transfer an encrypted queue or snapshot to a replacement device. Cross-device recovery and event-level conflict merge remain separate open capabilities.
+
+
+## 8. Incremental Inventory Movement Application
+
+The inventory workspace loads its baseline from `GET /api/v1/sync/snapshots/inventory`. The endpoint reads the company's aggregated stock balances and current `sync.company_change_counters.last_sequence` in one PostgreSQL repeatable-read transaction. The balance result is aggregated by variant, warehouse, bin, and stock status, so lot-split stock rows match the browser's summary-balance grain. Valuation is supplied only for available stock; other stock-status rows do not inherit available-layer valuation.
+
+After the baseline is durably committed to the encrypted local snapshot, the browser reads `GET /api/v1/sync/changes/inventory` from that cursor. For each page it applies every `inventory_movement` upsert, commits the updated balances and new cursor together in IndexedDB, and only then acknowledges the cursor using `POST /api/v1/sync/cursors:ack`. A failed page read, unsupported event, or local write leaves the prior cursor intact, so the same page is replayed instead of skipped.
+
+The movement reducer accepts single-leg receipts, transfers, and adjustments, plus canonical multi-leg movements. Each leg has a variant, warehouse, bin, stock status, signed quantity delta, and base unit of measure. Multi-leg events support dispatches, returns, transfers, and status reclassification such as available-to-quarantine. Unknown entity/change types and malformed legs fail closed. When a movement changes an existing balance, the cached valuation is cleared because movement events do not carry the cost-layer valuation detail needed to recalculate it.
+
+Feed publication is written in the same transaction as the underlying movement or stock-status change. The covered writers include inventory receipts/transfers/adjustments, offline receipts, pick dispatches and count approval, inventory returns, sales invoice and dispatch issue, sales returns, manufacturing material issue/return and finished-goods completion, purchase returns, warehouse bin transfers, and quarantine inspection/release.
+
+Incremental application does not yet implement field-level conflict resolution for concurrent edits to the same inventory entity, nor does a server acknowledgement restore an encrypted snapshot or pending operation queue to a replacement device. Those remain distinct recovery capabilities.
