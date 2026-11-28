@@ -362,6 +362,93 @@ public sealed partial class PostgresPurchasingRepository
                     incCmd.Parameters.AddWithValue("bin", binId);
                     incCmd.Parameters.AddWithValue("qty", l.QuarantinedQty);
                     await incCmd.ExecuteNonQueryAsync(ct);
+
+                    Guid baseUomId;
+                    await using (var getUom = conn.CreateCommand())
+                    {
+                        getUom.CommandText = "SELECT base_uom_id FROM erp_inventory.product_variant WHERE tenant_id = @tid AND variant_id = @var;";
+                        getUom.Parameters.AddWithValue("tid", Ctx.TenantId);
+                        getUom.Parameters.AddWithValue("var", l.VariantId);
+                        baseUomId = (Guid)(await getUom.ExecuteScalarAsync(ct)
+                            ?? throw new InvalidOperationException("PRODUCT_VARIANT_NOT_FOUND"));
+                    }
+
+                    var movementId = Guid.NewGuid();
+                    var occurredAt = DateTimeOffset.UtcNow;
+                    await using (var movement = conn.CreateCommand())
+                    {
+                        movement.CommandText = """
+                            INSERT INTO erp_inventory.inventory_movement
+                                (tenant_id, company_id, movement_id, client_transaction_id, movement_type,
+                                 source_document_type, source_document_id, occurred_at, created_by, note)
+                            VALUES
+                                (@tid, @cid, @mid, @txid, 'status_transfer',
+                                 'purchase_inspection', @sourceId, @occurred, @by, @note);
+                            """;
+                        movement.Parameters.AddWithValue("tid", Ctx.TenantId);
+                        movement.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                        movement.Parameters.AddWithValue("mid", movementId);
+                        movement.Parameters.AddWithValue("txid", Guid.NewGuid());
+                        movement.Parameters.AddWithValue("sourceId", inspId);
+                        movement.Parameters.AddWithValue("occurred", occurredAt);
+                        movement.Parameters.AddWithValue("by", inspectorId == Guid.Empty ? Ctx.UserId : inspectorId);
+                        movement.Parameters.AddWithValue("note", $"Quarantine isolation for inspection {req.InspectionNumber}");
+                        await movement.ExecuteNonQueryAsync(ct);
+                    }
+
+                    await using (var legs = conn.CreateCommand())
+                    {
+                        legs.CommandText = """
+                            INSERT INTO erp_inventory.inventory_movement_leg
+                                (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                                 bin_id, status_code, quantity_delta, base_uom_id)
+                            VALUES
+                                (@tid, @cid, @mid, 1, @var, @wh, @bin, 'available', @negativeQty, @uom),
+                                (@tid, @cid, @mid, 2, @var, @wh, @bin, 'quarantine', @positiveQty, @uom);
+                            """;
+                        legs.Parameters.AddWithValue("tid", Ctx.TenantId);
+                        legs.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                        legs.Parameters.AddWithValue("mid", movementId);
+                        legs.Parameters.AddWithValue("var", l.VariantId);
+                        legs.Parameters.AddWithValue("wh", warehouseId);
+                        legs.Parameters.AddWithValue("bin", binId);
+                        legs.Parameters.AddWithValue("negativeQty", -l.QuarantinedQty);
+                        legs.Parameters.AddWithValue("positiveQty", l.QuarantinedQty);
+                        legs.Parameters.AddWithValue("uom", baseUomId);
+                        await legs.ExecuteNonQueryAsync(ct);
+                    }
+
+                    var quarantineFeedPayload = JsonSerializer.Serialize(new
+                    {
+                        movementId,
+                        movementType = "status_transfer",
+                        legs = new[]
+                        {
+                            new
+                            {
+                                variantId = l.VariantId,
+                                warehouseId,
+                                binId,
+                                stockStatus = "available",
+                                quantityDelta = -l.QuarantinedQty,
+                                unitOfMeasureId = baseUomId,
+                            },
+                            new
+                            {
+                                variantId = l.VariantId,
+                                warehouseId,
+                                binId,
+                                stockStatus = "quarantine",
+                                quantityDelta = l.QuarantinedQty,
+                                unitOfMeasureId = baseUomId,
+                            },
+                        },
+                        occurredAt,
+                        postedAt = occurredAt,
+                    });
+                    await CompanyChangeLogWriter.AppendAsync(
+                        conn, tx, Ctx.TenantId, Ctx.CompanyId,
+                        "inventory_movement", movementId, 1, "upsert", quarantineFeedPayload, ct);
                 }
             }
         }
@@ -516,6 +603,114 @@ public sealed partial class PostgresPurchasingRepository
             incCmd.Parameters.AddWithValue("qty", req.ReleasedQty);
             await incCmd.ExecuteNonQueryAsync(ct);
         }
+
+        Guid baseUomId;
+        await using (var getUom = conn.CreateCommand())
+        {
+            getUom.CommandText = "SELECT base_uom_id FROM erp_inventory.product_variant WHERE tenant_id = @tid AND variant_id = @var;";
+            getUom.Parameters.AddWithValue("tid", Ctx.TenantId);
+            getUom.Parameters.AddWithValue("var", req.VariantId);
+            baseUomId = (Guid)(await getUom.ExecuteScalarAsync(ct)
+                ?? throw new InvalidOperationException("PRODUCT_VARIANT_NOT_FOUND"));
+        }
+
+        var movementId = Guid.NewGuid();
+        var occurredAt = DateTimeOffset.UtcNow;
+        await using (var movement = conn.CreateCommand())
+        {
+            movement.CommandText = """
+                INSERT INTO erp_inventory.inventory_movement
+                    (tenant_id, company_id, movement_id, client_transaction_id, movement_type,
+                     source_document_type, source_document_id, occurred_at, created_by, note)
+                VALUES
+                    (@tid, @cid, @mid, @txid, 'status_transfer',
+                     'quarantine_release', @sourceId, @occurred, @by, @note);
+                """;
+            movement.Parameters.AddWithValue("tid", Ctx.TenantId);
+            movement.Parameters.AddWithValue("cid", Ctx.CompanyId);
+            movement.Parameters.AddWithValue("mid", movementId);
+            movement.Parameters.AddWithValue("txid", Guid.NewGuid());
+            movement.Parameters.AddWithValue("sourceId", releaseId);
+            movement.Parameters.AddWithValue("occurred", occurredAt);
+            movement.Parameters.AddWithValue("by", authorizedBy == Guid.Empty ? Ctx.UserId : authorizedBy);
+            movement.Parameters.AddWithValue("note", $"Quarantine release {req.ReleaseNumber}");
+            await movement.ExecuteNonQueryAsync(ct);
+        }
+
+        var releaseLegs = new List<object>
+        {
+            new
+            {
+                variantId = req.VariantId,
+                warehouseId,
+                binId = req.SourceBinId,
+                stockStatus = "quarantine",
+                quantityDelta = -req.ReleasedQty,
+                unitOfMeasureId = baseUomId,
+            },
+        };
+        await using (var legs = conn.CreateCommand())
+        {
+            legs.CommandText = """
+                INSERT INTO erp_inventory.inventory_movement_leg
+                    (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                     bin_id, status_code, quantity_delta, base_uom_id)
+                VALUES
+                    (@tid, @cid, @mid, 1, @var, @wh, @sourceBin, 'quarantine', @negativeQty, @uom);
+                """;
+            legs.Parameters.AddWithValue("tid", Ctx.TenantId);
+            legs.Parameters.AddWithValue("cid", Ctx.CompanyId);
+            legs.Parameters.AddWithValue("mid", movementId);
+            legs.Parameters.AddWithValue("var", req.VariantId);
+            legs.Parameters.AddWithValue("wh", warehouseId);
+            legs.Parameters.AddWithValue("sourceBin", req.SourceBinId);
+            legs.Parameters.AddWithValue("negativeQty", -req.ReleasedQty);
+            legs.Parameters.AddWithValue("uom", baseUomId);
+            await legs.ExecuteNonQueryAsync(ct);
+        }
+
+        if (req.ReleaseDestination == "available")
+        {
+            await using var availableLeg = conn.CreateCommand();
+            availableLeg.CommandText = """
+                INSERT INTO erp_inventory.inventory_movement_leg
+                    (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                     bin_id, status_code, quantity_delta, base_uom_id)
+                VALUES
+                    (@tid, @cid, @mid, 2, @var, @wh, @targetBin, 'available', @positiveQty, @uom);
+                """;
+            availableLeg.Parameters.AddWithValue("tid", Ctx.TenantId);
+            availableLeg.Parameters.AddWithValue("cid", Ctx.CompanyId);
+            availableLeg.Parameters.AddWithValue("mid", movementId);
+            availableLeg.Parameters.AddWithValue("var", req.VariantId);
+            availableLeg.Parameters.AddWithValue("wh", warehouseId);
+            availableLeg.Parameters.AddWithValue("targetBin", req.TargetBinId);
+            availableLeg.Parameters.AddWithValue("positiveQty", req.ReleasedQty);
+            availableLeg.Parameters.AddWithValue("uom", baseUomId);
+            await availableLeg.ExecuteNonQueryAsync(ct);
+
+            releaseLegs.Add(new
+            {
+                variantId = req.VariantId,
+                warehouseId,
+                binId = req.TargetBinId,
+                stockStatus = "available",
+                quantityDelta = req.ReleasedQty,
+                unitOfMeasureId = baseUomId,
+            });
+        }
+
+        var releaseFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "status_transfer",
+            legs = releaseLegs,
+            occurredAt,
+            postedAt = occurredAt,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId,
+            "inventory_movement", movementId, 1, "upsert", releaseFeedPayload, ct);
 
         await tx.CommitAsync(ct);
         return releaseId;
