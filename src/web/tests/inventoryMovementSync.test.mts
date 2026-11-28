@@ -59,7 +59,12 @@ test("transfer movement applies equal and opposite source and destination deltas
 });
 
 test("multi-leg dispatch applies every signed movement leg", () => {
-  const result = applyInventoryMovementChanges([balance()], [
+  const secondBin: InventoryBalanceRow = {
+    ...balance(),
+    binId: "bin-b",
+    onHandQuantity: 5,
+  };
+  const result = applyInventoryMovementChanges([balance(), secondBin], [
     change({
       movementId: "movement-issue",
       movementType: "issue",
@@ -85,7 +90,7 @@ test("multi-leg dispatch applies every signed movement leg", () => {
   ]);
 
   assert.equal(result.find(row => row.binId === "bin-a")?.onHandQuantity, 6);
-  assert.equal(result.find(row => row.binId === "bin-b")?.onHandQuantity, -2);
+  assert.equal(result.find(row => row.binId === "bin-b")?.onHandQuantity, 3);
 });
 
 test("adjustment movement applies a signed quantity delta", () => {
