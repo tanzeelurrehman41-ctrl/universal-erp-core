@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Npgsql;
+using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Sync;
 using UniversalErp.Domain.Tenancy;
@@ -192,6 +193,11 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
         Guid LocationId,
         PostgresOfflineReceiptSyncRepository Repository);
 
+    private sealed class FixedTenantContextAccessor(TenantContext context) : ITenantContextAccessor
+    {
+        public TenantContext Current => context;
+    }
+
     private async Task<TestFixture> CreateFixtureAsync(CancellationToken cancellationToken = default)
     {
         var tenantId = Guid.NewGuid();
@@ -366,6 +372,9 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
                 """
                 DELETE FROM sync.operation_conflicts WHERE tenant_id = @id;
                 DELETE FROM sync.operation_inbox WHERE tenant_id = @id;
+                DELETE FROM sync.device_cursors WHERE tenant_id = @id;
+                DELETE FROM sync.change_log WHERE tenant_id = @id;
+                DELETE FROM sync.company_change_counters WHERE tenant_id = @id;
                 DELETE FROM sync.offline_grants WHERE tenant_id = @id;
                 DELETE FROM sync.device_location_scopes WHERE tenant_id = @id;
                 DELETE FROM sync.device_company_scopes WHERE tenant_id = @id;
@@ -394,6 +403,167 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
         catch
         {
             // Best effort cleanup
+        }
+    }
+
+    [Fact]
+    public async Task DeviceCursorAcknowledgement_IsStoredAndNeverRegresses()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            var grant = await fixture.Repository.RegisterDeviceAsync(
+                fixture.Context,
+                Guid.NewGuid(),
+                "web",
+                "Cursor Device",
+                CancellationToken.None,
+                ["inventory.product.create"])
+                ?? throw new InvalidOperationException("Failed to register cursor test device.");
+
+            var first = await fixture.Repository.AcknowledgeDeviceCursorsAsync(
+                fixture.Context,
+                new OfflineDeviceCursorAcknowledgement(
+                    grant.DeviceId, grant.GrantId, grant.GrantToken, "120", "45", 9),
+                CancellationToken.None);
+            var stale = await fixture.Repository.AcknowledgeDeviceCursorsAsync(
+                fixture.Context,
+                new OfflineDeviceCursorAcknowledgement(
+                    grant.DeviceId, grant.GrantId, grant.GrantToken, "80", "20", 4),
+                CancellationToken.None);
+
+            Assert.Equal(new OfflineDeviceCursorState("120", "45", 9), first);
+            Assert.Equal(first, stale);
+
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
+            await using (var scope = new NpgsqlCommand(
+                "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
+            {
+                scope.Parameters.AddWithValue("t", fixture.Context.TenantId.ToString());
+                scope.Parameters.AddWithValue("c", fixture.Context.CompanyId.ToString());
+                await scope.ExecuteNonQueryAsync();
+            }
+
+            await using var check = new NpgsqlCommand(
+                """
+                SELECT download_cursor::jsonb ->> 'products',
+                       download_cursor::jsonb ->> 'inventory',
+                       last_acknowledged_sequence
+                FROM sync.device_cursors
+                WHERE tenant_id = @tenantId AND company_id = @companyId AND device_id = @deviceId
+                """,
+                conn);
+            check.Parameters.AddWithValue("tenantId", fixture.Context.TenantId);
+            check.Parameters.AddWithValue("companyId", fixture.Context.CompanyId);
+            check.Parameters.AddWithValue("deviceId", grant.DeviceId);
+            await using var reader = await check.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal("120", reader.GetString(0));
+            Assert.Equal("45", reader.GetString(1));
+            Assert.Equal(9L, reader.GetInt64(2));
+        }
+        finally
+        {
+            await CleanupFixtureAsync(fixture);
+        }
+    }
+
+    [Fact]
+    public async Task ProductBatch_CreateAndReplay_PersistsOneProductAndOneInboxReceipt()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            var grant = await fixture.Repository.RegisterDeviceAsync(
+                fixture.Context,
+                Guid.NewGuid(),
+                "web",
+                "Product Sync Device",
+                CancellationToken.None,
+                ["inventory.product.create"])
+                ?? throw new InvalidOperationException("Failed to register product sync device.");
+
+            var productRepository = new PostgresProductRepository(_appDataSource);
+            var catalog = new ProductCatalogService(
+                new FixedTenantContextAccessor(fixture.Context),
+                productRepository);
+            var productSync = new ProductSyncService(catalog);
+            var operation = new ProductSyncOperation(
+                Guid.NewGuid(),
+                17,
+                "product.create",
+                DateTimeOffset.UtcNow,
+                new CreateProductRequest("OFFLINE-001", "Offline Product", "Durable offline create", "stock"));
+            var batch = new ProductSyncBatchRequest(
+                Guid.NewGuid(),
+                grant.DeviceId,
+                grant.GrantId,
+                grant.GrantToken,
+                [operation]);
+
+            var first = await productSync.ProcessBatchAsync(batch);
+            var replay = await productSync.ProcessBatchAsync(batch with { BatchId = Guid.NewGuid() });
+            var firstResult = Assert.Single(first.Results);
+            var replayResult = Assert.Single(replay.Results);
+
+            Assert.Equal("accepted", firstResult.Status);
+            Assert.Equal("accepted", replayResult.Status);
+            Assert.Equal(firstResult.Product?.ProductId, replayResult.Product?.ProductId);
+
+            await using var conn = await _adminDataSource.OpenConnectionAsync();
+            await using (var scope = new NpgsqlCommand(
+                "SELECT set_config('app.tenant_id', @t, false), set_config('app.company_id', @c, false)", conn))
+            {
+                scope.Parameters.AddWithValue("t", fixture.Context.TenantId.ToString());
+                scope.Parameters.AddWithValue("c", fixture.Context.CompanyId.ToString());
+                await scope.ExecuteNonQueryAsync();
+            }
+
+            await using (var productCount = new NpgsqlCommand(
+                "SELECT COUNT(*) FROM erp_inventory.product WHERE tenant_id = @tenantId AND product_code = 'OFFLINE-001'",
+                conn))
+            {
+                productCount.Parameters.AddWithValue("tenantId", fixture.Context.TenantId);
+                Assert.Equal(1L, (long)(await productCount.ExecuteScalarAsync() ?? 0L));
+            }
+
+            await using (var inbox = new NpgsqlCommand(
+                """
+                SELECT COUNT(*), MAX(outcome), COUNT(DISTINCT batch_id)
+                FROM sync.operation_inbox
+                WHERE tenant_id = @tenantId AND company_id = @companyId
+                  AND operation_id = @operationId
+                """,
+                conn))
+            {
+                inbox.Parameters.AddWithValue("tenantId", fixture.Context.TenantId);
+                inbox.Parameters.AddWithValue("companyId", fixture.Context.CompanyId);
+                inbox.Parameters.AddWithValue("operationId", operation.OperationId);
+                await using var reader = await inbox.ExecuteReaderAsync();
+                Assert.True(await reader.ReadAsync());
+                Assert.Equal(1L, reader.GetInt64(0));
+                Assert.Equal("accepted", reader.GetString(1));
+                Assert.Equal(1L, reader.GetInt64(2));
+            }
+
+            await using (var changes = new NpgsqlCommand(
+                """
+                SELECT COUNT(*)
+                FROM sync.change_log
+                WHERE tenant_id = @tenantId AND company_id = @companyId
+                  AND entity_type = 'product' AND entity_id = @productId
+                """,
+                conn))
+            {
+                changes.Parameters.AddWithValue("tenantId", fixture.Context.TenantId);
+                changes.Parameters.AddWithValue("companyId", fixture.Context.CompanyId);
+                changes.Parameters.AddWithValue("productId", firstResult.Product!.ProductId);
+                Assert.Equal(1L, (long)(await changes.ExecuteScalarAsync() ?? 0L));
+            }
+        }
+        finally
+        {
+            await CleanupFixtureAsync(fixture);
         }
     }
 
