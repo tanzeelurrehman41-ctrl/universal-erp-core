@@ -1,3 +1,4 @@
+using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Sync;
 
 namespace UniversalErp.Api.Sync;
@@ -12,12 +13,26 @@ public static class ProductSyncEndpointMappings
         var batch = sync.MapPost("/products:batch", async (
             ProductSyncBatchRequest request,
             ProductSyncService service,
+            ITenantContextAccessor tenantContextAccessor,
+            IOfflineReceiptSyncRepository deviceRepository,
             CancellationToken cancellationToken) =>
         {
             var validationError = ProductSyncService.ValidateBatchHeader(request);
             if (validationError is not null)
             {
                 return Results.BadRequest(new { code = validationError });
+            }
+
+            var grantIsValid = await deviceRepository.ValidateDeviceGrantAsync(
+                tenantContextAccessor.Current,
+                request.DeviceId,
+                request.GrantId,
+                request.GrantToken,
+                "inventory.product.create",
+                cancellationToken);
+            if (!grantIsValid)
+            {
+                return Results.Json(new { code = "OFFLINE_DEVICE_OR_GRANT_INVALID" }, statusCode: StatusCodes.Status403Forbidden);
             }
 
             var result = await service.ProcessBatchAsync(request, cancellationToken);
