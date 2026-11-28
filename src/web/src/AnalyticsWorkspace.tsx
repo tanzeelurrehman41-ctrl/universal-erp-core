@@ -226,45 +226,55 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
   }, [enabled, workspace?.companyId, canViewConfidentialSalary]);
 
   async function loadAllAnalytics() {
+    if (!enabled || !workspace?.companyId) return;
+
     setIsLoading(true);
     setError(null);
+    setDashboard(null);
+    setReconciliation(null);
+    setSales(null);
+    setPurchasing(null);
+    setInventory(null);
+    setWorkforce(null);
+
+    const filters = new URLSearchParams();
+    if (startDate) filters.set("startDate", startDate);
+    if (endDate) filters.set("endDate", endDate);
+    const suffix = filters.toString();
+    const withFilters = (path: string) => suffix ? `${path}?${suffix}` : path;
+    const failures: string[] = [];
+
+    async function fetchReport<T>(label: string, path: string): Promise<T | null> {
+      try {
+        const response = await apiFetch(path);
+        if (!response.ok) {
+          failures.push(response.status === 403 ? `${label}: permission denied` : `${label}: HTTP ${response.status}`);
+          return null;
+        }
+        return await response.json() as T;
+      } catch {
+        failures.push(`${label}: request failed`);
+        return null;
+      }
+    }
+
     try {
-      // 1. Executive Dashboard
-      const dashRes = await apiFetch(`/api/v1/analytics/dashboard?includeSalary=${canViewConfidentialSalary}`);
-      if (dashRes.ok) {
-        setDashboard(await dashRes.json());
-      } else {
-        // Fallback default dev state
-        setDashboard(getMockDashboard());
-      }
+      const [dash, rec, salesReport, purchasingReport, inventoryReport, workforceReport] = await Promise.all([
+        fetchReport<ExecutiveDashboard>("Executive dashboard", `${withFilters("/api/v1/analytics/dashboard")}${suffix ? "&" : "?"}includeSalary=${canViewConfidentialSalary}`),
+        fetchReport<PlatformReconciliation>("Reconciliation", "/api/v1/analytics/reconciliation"),
+        fetchReport<SalesAnalytics>("Sales", withFilters("/api/v1/analytics/sales")),
+        fetchReport<PurchasingAnalytics>("Purchasing", withFilters("/api/v1/analytics/purchasing")),
+        fetchReport<InventoryAgeingAnalytics>("Inventory", withFilters("/api/v1/analytics/inventory")),
+        fetchReport<WorkforceCostAnalytics>("Workforce", `${withFilters("/api/v1/analytics/workforce")}${suffix ? "&" : "?"}includeSalary=${canViewConfidentialSalary}`),
+      ]);
 
-      // 2. Platform Reconciliation
-      const recRes = await apiFetch("/api/v1/analytics/reconciliation");
-      if (recRes.ok) {
-        setReconciliation(await recRes.json());
-      } else {
-        setReconciliation(getMockReconciliation());
-      }
-
-      // 3. Sales Analytics
-      const salesRes = await apiFetch("/api/v1/analytics/sales");
-      if (salesRes.ok) setSales(await salesRes.json());
-
-      // 4. Purchasing Analytics
-      const purchRes = await apiFetch("/api/v1/analytics/purchasing");
-      if (purchRes.ok) setPurchasing(await purchRes.json());
-
-      // 5. Inventory Valuation & FIFO Ageing
-      const invRes = await apiFetch("/api/v1/analytics/inventory-ageing");
-      if (invRes.ok) setInventory(await invRes.json());
-
-      // 6. Workforce Analytics
-      const wfRes = await apiFetch(`/api/v1/analytics/workforce?includeSalary=${canViewConfidentialSalary}`);
-      if (wfRes.ok) setWorkforce(await wfRes.json());
-    } catch (err: any) {
-      console.warn("Analytics API fetch fallback to cached operational baseline", err);
-      setDashboard(getMockDashboard());
-      setReconciliation(getMockReconciliation());
+      setDashboard(dash);
+      setReconciliation(rec);
+      setSales(salesReport);
+      setPurchasing(purchasingReport);
+      setInventory(inventoryReport);
+      setWorkforce(workforceReport);
+      if (failures.length > 0) setError(`Some reports are unavailable: ${failures.join("; ")}.`);
     } finally {
       setIsLoading(false);
     }
