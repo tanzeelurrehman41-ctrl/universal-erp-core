@@ -71,41 +71,18 @@ public sealed class ProductSyncService(ProductCatalogService catalog)
         {
             if (operation.OperationId == Guid.Empty ||
                 operation.DeviceSequence <= 0 ||
-                !string.Equals(operation.OperationType, "product.create", StringComparison.Ordinal) ||
-                operation.Payload is null)
+                operation.CreatedAt == default)
             {
                 results.Add(new ProductSyncOperationResult(
                     operation.OperationId,
                     operation.DeviceSequence,
                     "rejected",
                     null,
-                    "INVALID_PRODUCT_SYNC_OPERATION"));
+                    "INVALID_PRODUCT_SYNC_IDENTITY"));
                 continue;
             }
 
-            var result = await catalog.CreateAsync(
-                operation.Payload,
-                operation.OperationId,
-                cancellationToken);
-
-            if (result.IsSuccess)
-            {
-                results.Add(new ProductSyncOperationResult(
-                    operation.OperationId,
-                    operation.DeviceSequence,
-                    "accepted",
-                    result.Value,
-                    null));
-                continue;
-            }
-
-            var isConflict = result.Error is "DUPLICATE_PRODUCT_CODE" or "IDEMPOTENCY_KEY_REUSED";
-            results.Add(new ProductSyncOperationResult(
-                operation.OperationId,
-                operation.DeviceSequence,
-                isConflict ? "conflict" : "rejected",
-                null,
-                result.Error));
+            results.Add(await catalog.CreateOfflineAsync(batch, operation, cancellationToken));
         }
 
         return new ProductSyncBatchResponse(batch.BatchId, results);
