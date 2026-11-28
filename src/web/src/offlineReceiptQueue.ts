@@ -469,6 +469,64 @@ export function ensureOfflineDeviceGrant(
   return ensureDeviceGrant(storageScope, workspace, requiredOperation);
 }
 
+async function ensureAnyOfflineDeviceGrant(
+  storageScope: string,
+  workspace: ApiWorkspaceScope | null,
+): Promise<OfflineDeviceGrant> {
+  const validOperations = ["inventory.product.create", "inventory.receipt.post"];
+  const cached = await loadDeviceGrant(storageScope);
+  if (
+    cached &&
+    Date.parse(cached.expiresAt) > Date.now() + 24 * 60 * 60 * 1000 &&
+    cached.allowedOperations?.some(operation => validOperations.includes(operation))
+  ) {
+    return cached;
+  }
+
+  const grant = await registerDeviceGrant(storageScope, workspace);
+  if (!grant.allowedOperations.some(operation => validOperations.includes(operation))) {
+    throw new Error("This signed-in user is not authorized for offline synchronization.");
+  }
+  return grant;
+}
+
+export type OfflineDeviceCursorState = {
+  productsCursor: string;
+  inventoryCursor: string;
+  lastAcknowledgedSequence: number;
+};
+
+export async function acknowledgeOfflineDeviceCursors(
+  storageScope: string,
+  workspace: ApiWorkspaceScope | null,
+  cursors: InventoryChangeCursors,
+  lastAcknowledgedSequence: number,
+): Promise<OfflineDeviceCursorState> {
+  if (!Number.isSafeInteger(lastAcknowledgedSequence) || lastAcknowledgedSequence < 0) {
+    throw new Error("The acknowledged device sequence is invalid.");
+  }
+
+  const grant = await ensureAnyOfflineDeviceGrant(storageScope, workspace);
+  const response = await apiFetch("/api/v1/sync/cursors:ack", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      deviceId: grant.deviceId,
+      grantId: grant.grantId,
+      grantToken: grant.grantToken,
+      productsCursor: cursors.products,
+      inventoryCursor: cursors.inventory,
+      lastAcknowledgedSequence,
+    }),
+  }, workspace);
+  if (!response.ok) {
+    throw new Error(response.status === 403
+      ? "The server rejected this device cursor acknowledgement."
+      : `The server could not save the device cursor (${response.status}).`);
+  }
+  return await response.json() as OfflineDeviceCursorState;
+}
+
 export function syncPendingReceiptOperations(
   storageScope: string,
   workspace: ApiWorkspaceScope | null,
