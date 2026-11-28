@@ -272,3 +272,12 @@ Each property below is classified based on concrete test evidence:
   - `[PASS]` Lost-acknowledgement duplicate replay verification
   - `[PASS]` Operation ID reuse mutation conflict detection (`OPERATION_ID_REUSED`)
   - `[PASS]` Incremental change feed verification (`GET /api/v1/sync/changes/inventory` returning 52 events with next cursor = 94)
+
+
+## 6. Product Catalog Offline Batch Upload
+
+The web product queue posts pending product operations to `POST /api/v1/sync/products:batch` in batches of at most 50. The endpoint is available in production and requires the signed-in user's company-scoped `inventory.product.create` permission. It does not trust a tenant or company identifier in the operation payload; the API uses the authenticated tenant/company context.
+
+Each operation carries its stable `operationId`, device-local `deviceSequence`, command type, and product payload. The service delegates each valid `product.create` to `ProductCatalogService`, which validates and normalizes the payload and persists the result with the existing `erp_inventory.command_idempotency` record in the same transaction as product creation and change-feed publication. Replaying the same operation ID and payload returns the original product. Reusing the ID with different content returns a conflict; a duplicate product code is also reported as a conflict. Invalid operations are returned as rejected without aborting other valid operations in the same batch.
+
+The client persists each per-operation result in its encrypted IndexedDB queue. A lost HTTP acknowledgement is safe to retry because accepted creates are idempotent. The batch endpoint does **not** yet use the receipt-specific `sync.offline_grants` or dedicated `sync.operation_inbox`; it is authenticated user sync, not delegated/offline device-grant sync. Durable product rejected/conflict records on the server, device-grant revocation for product commands, per-device download acknowledgements, event-level merge, and cross-device queue recovery remain open.
