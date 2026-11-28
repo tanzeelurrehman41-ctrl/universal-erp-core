@@ -118,9 +118,9 @@ public sealed class OfflineSyncServiceTests
             var hash = Hash(grantToken);
             var valid = _grants.ContainsKey((context.CompanyId, grantId, hash)) &&
                 _grantOperations.TryGetValue(grantId, out var operations) &&
-                (requiredOperation == "sync.cursor.ack"
-                    ? operations.Any(operation => operation is "inventory.product.create" or "inventory.receipt.post")
-                    : operations.Contains(requiredOperation)) &&
+                (operations.Contains(requiredOperation) ||
+                    (requiredOperation == "sync.cursor.ack" &&
+                     operations.Any(operation => operation is "inventory.product.create" or "inventory.receipt.post"))) &&
                 _grantMetadata.TryGetValue(grantId, out var metadata) &&
                 !metadata.Revoked && metadata.ExpiresAt > DateTimeOffset.UtcNow &&
                 DeviceActive && CompanyActive && CompanyScopeActive;
@@ -567,6 +567,23 @@ public sealed class OfflineSyncServiceTests
 
         Assert.Equal(new OfflineDeviceCursorState("100", "40", 7), first);
         Assert.Equal(first, staleRetry);
+    }
+
+    [Fact]
+    public async Task DeviceCursorAcknowledgement_AllowsReadOnlyInventoryGrant()
+    {
+        var repo = new FakeSyncRepository();
+        var deviceId = Guid.NewGuid();
+        var grantId = Guid.NewGuid();
+        repo.SeedGrant(grantId, "read-only-cursor-token", allowedOperations: ["sync.cursor.ack"]);
+
+        var result = await repo.AcknowledgeDeviceCursorsAsync(
+            TestCtx,
+            new OfflineDeviceCursorAcknowledgement(
+                deviceId, grantId, "read-only-cursor-token", "20", "15", 0),
+            CancellationToken.None);
+
+        Assert.Equal(new OfflineDeviceCursorState("20", "15", 0), result);
     }
 
     [Fact]
