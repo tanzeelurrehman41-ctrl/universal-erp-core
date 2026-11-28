@@ -184,6 +184,7 @@ export default function App() {
   });
   const activeWorkspace = workspaces.find((workspace) => workspaceKey(workspace) === activeWorkspaceKey) ?? null;
   const queueOwnerKey = ownerKeyForUser(authUser);
+  const inventoryStorageScope = `${queueOwnerKey ?? "development"}:${activeWorkspace ? workspaceKey(activeWorkspace) : "local"}`;
   const [activeNavTab, setActiveNavTab] = useState<
     | "overview"
     | "inventory"
@@ -385,6 +386,7 @@ export default function App() {
             companyId: activeWorkspace.companyId,
             companyName: activeWorkspace.companyName,
             ownerKey: queueOwnerKey,
+            storageScope: inventoryStorageScope,
           };
         }
 
@@ -503,6 +505,7 @@ export default function App() {
             companyId: activeWorkspace.companyId,
             companyName: activeWorkspace.companyName,
             ownerKey: queueOwnerKey,
+            storageScope: inventoryStorageScope,
           };
         }
       }
@@ -669,7 +672,7 @@ export default function App() {
     }
   }
   const inventoryEnabled = apiStatus === "online" && (!oidcConfigured || Boolean(authUser && !authUser.expired && activeWorkspace));
-  const inventoryStorageScope = `${queueOwnerKey ?? "development"}:${activeWorkspace ? workspaceKey(activeWorkspace) : "local"}`;
+
 
   const navItems: NavItem[] = [
     { id: "overview", label: "Executive Overview", icon: "📊", group: "overview" },
