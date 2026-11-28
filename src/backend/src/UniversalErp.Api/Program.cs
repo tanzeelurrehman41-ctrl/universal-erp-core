@@ -108,7 +108,6 @@ builder.Services.AddCors(options =>
 builder.Services.AddScoped<IProductRepository, PostgresProductRepository>();
 builder.Services.AddScoped<ProductCatalogService>();
 builder.Services.AddScoped<ProductSyncService>();
-builder.Services.AddScoped<ProductSyncService>();
 builder.Services.AddScoped<IInventoryWorkflowRepository, PostgresInventoryWorkflowRepository>();
 builder.Services.AddScoped<InventoryWorkflowService>();
 builder.Services.AddScoped<ISyncChangeFeed, PostgresSyncChangeFeed>();
