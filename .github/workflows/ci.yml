@@ -57,5 +57,7 @@ jobs:
           cache-dependency-path: src/web/package-lock.json
       - name: Install locked dependencies
         run: npm ci
+      - name: Run web unit tests
+        run: node --experimental-strip-types --test tests/*.test.mts
       - name: Typecheck and build
         run: npm run build
