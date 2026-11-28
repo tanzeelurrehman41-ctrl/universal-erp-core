@@ -339,6 +339,27 @@ async function syncWithAuthenticatedServer(
     return;
   }
 
+  let deviceGrant: Awaited<ReturnType<typeof ensureOfflineDeviceGrant>>;
+  try {
+    const workspace: ApiWorkspaceScope = {
+      tenantId: authorization.tenantId,
+      companyId: authorization.companyId,
+    };
+    deviceGrant = await ensureOfflineDeviceGrant(
+      authorization.storageScope,
+      workspace,
+      "inventory.product.create",
+    );
+  } catch (error) {
+    const message = error instanceof Error
+      ? error.message
+      : "This device could not be authorized for product sync. Saved products remain on this device.";
+    for (const operation of eligible) {
+      await updateOperation(operation.operationId, { status: "queued", message });
+    }
+    return;
+  }
+
   for (let offset = 0; offset < eligible.length; offset += 50) {
     const batch = eligible.slice(offset, offset + 50);
     for (const operation of batch) {
