@@ -207,7 +207,7 @@ public static class AnalyticsEndpointMappings
             HttpContext httpContext) =>
         {
             var ctx = ResolveContext(httpContext, ctxAccessor);
-            var dataPermissions = GetExportDataPermissions(req.ReportType);
+            var dataPermissions = AnalyticsExportPermissions.GetRequiredPermissions(req.ReportType);
             if (dataPermissions.Length == 0)
             {
                 return Results.BadRequest(new { code = "UNSUPPORTED_ANALYTICS_EXPORT" });
@@ -227,20 +227,6 @@ public static class AnalyticsEndpointMappings
         }).RequireAuthorization("analytics.export");
 
         return endpoints;
-    }
-
-    private static string[] GetExportDataPermissions(string? reportType)
-    {
-        return reportType?.Trim().ToLowerInvariant() switch
-        {
-            "sales" or "purchasing" or "inventory_ageing" =>
-                ["analytics.supply_chain.view"],
-            "workforce" =>
-                ["analytics.workforce.view"],
-            "reconciliation" =>
-                ["analytics.financial.view", "analytics.supply_chain.view"],
-            _ => Array.Empty<string>(),
-        };
     }
 
     private static async Task<bool> CheckAnalyticsPermissionAsync(
