@@ -10,6 +10,7 @@ using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Warehouse;
 using UniversalErp.Domain.Common;
 using UniversalErp.Domain.Tenancy;
+using UniversalErp.Infrastructure.Sync;
 
 namespace UniversalErp.Infrastructure.Warehouse;
 
@@ -1813,6 +1814,75 @@ public class PostgresWarehouseRepository : IWarehouseRepository
         cmd.Parameters.AddWithValue("tenantId", context.TenantId);
         cmd.Parameters.AddWithValue("companyId", context.CompanyId);
         await cmd.ExecuteNonQueryAsync(ct);
+
+        Guid baseUomId;
+        await using (var getUom = conn.CreateCommand())
+        {
+            getUom.Transaction = tx;
+            getUom.CommandText = "SELECT base_uom_id FROM erp_inventory.product_variant WHERE tenant_id = @tenantId AND variant_id = @variantId;";
+            getUom.Parameters.AddWithValue("tenantId", context.TenantId);
+            getUom.Parameters.AddWithValue("variantId", req.VariantId);
+            baseUomId = (Guid)(await getUom.ExecuteScalarAsync(ct)
+                ?? throw new InvalidOperationException("PRODUCT_VARIANT_NOT_FOUND"));
+        }
+
+        await using (var insertLegs = conn.CreateCommand())
+        {
+            insertLegs.Transaction = tx;
+            insertLegs.CommandText = """
+                INSERT INTO erp_inventory.inventory_movement_leg
+                    (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                     bin_id, status_code, quantity_delta, base_uom_id)
+                VALUES
+                    (@tenantId, @companyId, @movementId, 1, @variantId, @sourceWarehouseId,
+                     @sourceBinId, 'available', -@quantity, @unitOfMeasureId),
+                    (@tenantId, @companyId, @movementId, 2, @variantId, @destinationWarehouseId,
+                     @destinationBinId, 'available', @quantity, @unitOfMeasureId);
+                """;
+            insertLegs.Parameters.AddWithValue("tenantId", context.TenantId);
+            insertLegs.Parameters.AddWithValue("companyId", context.CompanyId);
+            insertLegs.Parameters.AddWithValue("movementId", movementId);
+            insertLegs.Parameters.AddWithValue("variantId", req.VariantId);
+            insertLegs.Parameters.AddWithValue("sourceWarehouseId", req.SourceWarehouseId);
+            insertLegs.Parameters.AddWithValue("sourceBinId", req.SourceBinId);
+            insertLegs.Parameters.AddWithValue("destinationWarehouseId", req.DestinationWarehouseId);
+            insertLegs.Parameters.AddWithValue("destinationBinId", req.DestinationBinId);
+            insertLegs.Parameters.AddWithValue("quantity", req.Quantity);
+            insertLegs.Parameters.AddWithValue("unitOfMeasureId", baseUomId);
+            await insertLegs.ExecuteNonQueryAsync(ct);
+        }
+
+        var transferFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "transfer",
+            legs = new[]
+            {
+                new
+                {
+                    variantId = req.VariantId,
+                    warehouseId = req.SourceWarehouseId,
+                    binId = req.SourceBinId,
+                    stockStatus = "available",
+                    quantityDelta = -req.Quantity,
+                    unitOfMeasureId = baseUomId,
+                },
+                new
+                {
+                    variantId = req.VariantId,
+                    warehouseId = req.DestinationWarehouseId,
+                    binId = req.DestinationBinId,
+                    stockStatus = "available",
+                    quantityDelta = req.Quantity,
+                    unitOfMeasureId = baseUomId,
+                },
+            },
+            occurredAt = DateTimeOffset.UtcNow,
+            postedAt = DateTimeOffset.UtcNow,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn, tx, context.TenantId, context.CompanyId,
+            "inventory_movement", movementId, 1, "upsert", transferFeedPayload, ct);
 
         await tx.CommitAsync(ct);
 
