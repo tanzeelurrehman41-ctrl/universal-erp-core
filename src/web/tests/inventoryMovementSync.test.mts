@@ -58,6 +58,36 @@ test("transfer movement applies equal and opposite source and destination deltas
   assert.equal(result.length, 2);
 });
 
+test("multi-leg dispatch applies every signed movement leg", () => {
+  const result = applyInventoryMovementChanges([balance()], [
+    change({
+      movementId: "movement-issue",
+      movementType: "issue",
+      legs: [
+        {
+          variantId: "variant-1",
+          warehouseId: "warehouse-a",
+          binId: "bin-a",
+          stockStatus: "available",
+          quantityDelta: -4,
+          unitOfMeasureId: "uom-ea",
+        },
+        {
+          variantId: "variant-1",
+          warehouseId: "warehouse-a",
+          binId: "bin-b",
+          stockStatus: "available",
+          quantityDelta: -2,
+          unitOfMeasureId: "uom-ea",
+        },
+      ],
+    }),
+  ]);
+
+  assert.equal(result.find(row => row.binId === "bin-a")?.onHandQuantity, 6);
+  assert.equal(result.find(row => row.binId === "bin-b")?.onHandQuantity, -2);
+});
+
 test("adjustment movement applies a signed quantity delta", () => {
   const result = applyInventoryMovementChanges([balance()], [
     change({
