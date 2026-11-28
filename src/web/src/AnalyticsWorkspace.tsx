@@ -315,12 +315,14 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
     document.body.removeChild(link);
   }
 
-  const health: PlatformHealthEvaluation = evaluatePlatformHealth(
-    reconciliation?.glReconciliation.isBalanced ?? true,
-    reconciliation?.glReconciliation.discrepancy ?? 0,
-    reconciliation?.fifoReconciliation.isReconciled ?? true,
-    reconciliation?.fifoReconciliation.variancePkr ?? 0
-  );
+  const health: PlatformHealthEvaluation | null = reconciliation
+    ? evaluatePlatformHealth(
+        reconciliation.glReconciliation.isBalanced,
+        reconciliation.glReconciliation.discrepancy,
+        reconciliation.fifoReconciliation.isReconciled,
+        reconciliation.fifoReconciliation.variancePkr
+      )
+    : null;
 
   return (
     <div style={{ padding: "20px", maxWidth: "1400px", margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
@@ -340,18 +342,18 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
           display: "flex",
           alignItems: "center",
           gap: "12px",
-          backgroundColor: health.isHealthy ? "#ECFDF5" : "#FEF2F2",
-          border: `1px solid ${health.isHealthy ? "#10B981" : "#EF4444"}`,
+          backgroundColor: health ? (health.isHealthy ? "#ECFDF5" : "#FEF2F2") : "#F3F4F6",
+          border: `1px solid ${health ? (health.isHealthy ? "#10B981" : "#EF4444") : "#D1D5DB"}`,
           padding: "10px 16px",
           borderRadius: "8px"
         }}>
-          <span style={{ fontSize: "20px" }}>{health.isHealthy ? "🛡️" : "⚠️"}</span>
+          <span style={{ fontSize: "20px" }}>{health ? (health.isHealthy ? "🛡️" : "⚠️") : "ℹ️"}</span>
           <div>
-            <div style={{ fontSize: "13px", fontWeight: "bold", color: health.isHealthy ? "#065F46" : "#991B1B" }}>
-              GL & Model A FIFO Audit: {health.glStatus} / {health.fifoStatus}
+            <div style={{ fontSize: "13px", fontWeight: "bold", color: health ? (health.isHealthy ? "#065F46" : "#991B1B") : "#374151" }}>
+              {health ? `GL & FIFO Audit: ${health.glStatus} / ${health.fifoStatus}` : "GL & FIFO Audit: Not available"}
             </div>
-            <div style={{ fontSize: "11px", color: health.isHealthy ? "#047857" : "#B91C1C" }}>
-              Active FIFO Stock: 50 EA | Valuation: PKR 2,250 | Variance: PKR 0.00
+            <div style={{ fontSize: "11px", color: "#4B5563" }}>
+              {reconciliation ? `Active layers: ${reconciliation.fifoReconciliation.totalActiveLayers} | Quantity: ${reconciliation.fifoReconciliation.totalActiveQuantity}` : "No live reconciliation result has been loaded."}
             </div>
           </div>
         </div>
@@ -419,6 +421,12 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
         </div>
       </div>
 
+      {error && (
+        <div role="alert" style={{ marginBottom: "16px", padding: "12px 16px", borderRadius: "8px", border: "1px solid #D97706", backgroundColor: "#FFFBEB", color: "#92400E", fontSize: "13px" }}>
+          {error}
+        </div>
+      )}
+
       {/* Navigation Tabs */}
       <div style={{ display: "flex", borderBottom: "2px solid #E5E7EB", marginBottom: "20px", gap: "4px", overflowX: "auto" }}>
         {[
@@ -462,36 +470,36 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "16px", marginBottom: "24px" }}>
             <MetricCard
               title="Total Revenue"
-              value={`PKR ${(dashboard?.financials.totalRevenuePkr || 1250000).toLocaleString()}`}
-              subtitle="Gross margin: 38.0%"
+              value={dashboard ? `PKR ${dashboard.financials.totalRevenuePkr.toLocaleString()}` : "—"}
+              subtitle={dashboard ? `Gross margin: ${dashboard.financials.grossProfitMarginPercentage}%` : "No live dashboard data"}
               trend="up"
               status="on_track"
             />
             <MetricCard
               title="Operating Cash Flow"
-              value={`PKR ${(dashboard?.financials.operatingCashFlowPkr || 340000).toLocaleString()}`}
-              subtitle="Cash position stable"
+              value={dashboard ? `PKR ${dashboard.financials.operatingCashFlowPkr.toLocaleString()}` : "—"}
+              subtitle={dashboard ? "Current company reporting period" : "No live dashboard data"}
               trend="up"
               status="on_track"
             />
             <MetricCard
               title="FIFO Inventory Valuation"
-              value={`PKR ${(dashboard?.supplyChain.fifoValuationPkr || 2250).toLocaleString()}`}
-              subtitle="Model A Baseline Reconciled"
+              value={dashboard ? `PKR ${dashboard.supplyChain.fifoValuationPkr.toLocaleString()}` : "—"}
+              subtitle={dashboard ? (dashboard.supplyChain.isFifoReconciled ? "FIFO valuation reconciled" : "FIFO valuation variance detected") : "No live dashboard data"}
               trend="flat"
               status="on_track"
             />
             <MetricCard
               title="Work Orders Completion"
-              value={`${dashboard?.manufacturing.workOrderCompletionRatePercentage || 88.5}%`}
-              subtitle="WIP: PKR 75,000"
+              value={dashboard ? `${dashboard.manufacturing.workOrderCompletionRatePercentage}%` : "—"}
+              subtitle={dashboard ? `WIP: PKR ${dashboard.manufacturing.workInProgressValuationPkr.toLocaleString()}` : "No live dashboard data"}
               trend="up"
               status="on_track"
             />
             <MetricCard
               title="Active Headcount"
-              value={`${dashboard?.workforce.totalActiveEmployees || 1} staff`}
-              subtitle={`Gross cost: ${canViewConfidentialSalary ? 'PKR 175,000' : '••••••••'}`}
+              value={dashboard ? `${dashboard.workforce.totalActiveEmployees} staff` : "—"}
+              subtitle={dashboard ? "Active workforce" : "No live dashboard data"}
               trend="flat"
               status="on_track"
             />
@@ -515,7 +523,7 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                 </tr>
               </thead>
               <tbody>
-                {(dashboard?.keyPerformanceIndicators || getDefaultKpis()).map(kpi => (
+                {(dashboard?.keyPerformanceIndicators ?? []).map(kpi => (
                   <tr key={kpi.code} style={{ borderBottom: "1px solid #F3F4F6" }}>
                     <td style={{ padding: "10px", fontWeight: "600" }}><code>{kpi.code}</code></td>
                     <td style={{ padding: "10px" }}>{kpi.name}</td>
@@ -539,6 +547,9 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                     </td>
                   </tr>
                 ))}
+                {(!dashboard || dashboard.keyPerformanceIndicators.length === 0) && (
+                  <tr><td colSpan={7} style={{ padding: "16px", color: "#6B7280" }}>No KPI data is available for this company.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
