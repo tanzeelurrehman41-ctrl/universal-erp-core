@@ -26,6 +26,37 @@ public sealed class ProductSyncServiceTests
             Task.FromResult(_products.Values.FirstOrDefault(product =>
                 product.TenantId == tenantId && product.ProductId == productId));
 
+        public async Task<ProductSyncOperationResult> CreateOfflineAsync(
+            TenantContext context,
+            ProductSyncBatchRequest batch,
+            ProductSyncOperation operation,
+            CreateProductRequest? normalizedRequest,
+            string requestHash,
+            string? validationError,
+            CancellationToken cancellationToken)
+        {
+            if (validationError is not null || normalizedRequest is null)
+            {
+                return new ProductSyncOperationResult(operation.OperationId, operation.DeviceSequence, "rejected", null,
+                    validationError ?? "INVALID_PRODUCT_PAYLOAD");
+            }
+
+            try
+            {
+                var product = await CreateAsync(context.TenantId, context.CompanyId, operation.OperationId,
+                    requestHash, normalizedRequest, cancellationToken);
+                return new ProductSyncOperationResult(operation.OperationId, operation.DeviceSequence, "accepted", product, null);
+            }
+            catch (ProductCodeConflictException)
+            {
+                return new ProductSyncOperationResult(operation.OperationId, operation.DeviceSequence, "conflict", null, "DUPLICATE_PRODUCT_CODE");
+            }
+            catch (IdempotencyKeyConflictException)
+            {
+                return new ProductSyncOperationResult(operation.OperationId, operation.DeviceSequence, "conflict", null, "IDEMPOTENCY_KEY_REUSED");
+            }
+        }
+
         public Task<Product> CreateAsync(
             Guid tenantId,
             Guid companyId,
@@ -78,15 +109,25 @@ public sealed class ProductSyncServiceTests
         return (new ProductSyncService(catalog), repository);
     }
 
+    private static ProductSyncOperation Operation(
+        Guid operationId,
+        long sequence,
+        string? operationType,
+        CreateProductRequest? payload,
+        DateTimeOffset? createdAt = null) =>
+        new(operationId, sequence, operationType, createdAt ?? DateTimeOffset.UtcNow, payload);
+
+    private static ProductSyncBatchRequest Batch(params ProductSyncOperation[] operations) =>
+        new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "offline-grant-token", operations);
+
     [Fact]
     public async Task ProcessBatch_AcceptsProductAndReturnsCreatedRecord()
     {
         var (service, _) = CreateService();
         var operationId = Guid.NewGuid();
-        var batch = new ProductSyncBatchRequest(
-            Guid.NewGuid(),
-            [new ProductSyncOperation(operationId, 1, "product.create",
-                new CreateProductRequest("SKU-001", "Product One", "Test item", "stock"))]);
+        var batch = Batch(Operation(
+            operationId, 1, "product.create",
+            new CreateProductRequest("SKU-001", "Product One", "Test item", "stock")));
 
         var result = await service.ProcessBatchAsync(batch);
 
@@ -103,12 +144,12 @@ public sealed class ProductSyncServiceTests
     {
         var (service, _) = CreateService();
         var operationId = Guid.NewGuid();
-        var operation = new ProductSyncOperation(
+        var operation = Operation(
             operationId, 1, "product.create",
             new CreateProductRequest("SKU-002", "Product Two", null, "stock"));
 
-        var first = await service.ProcessBatchAsync(new ProductSyncBatchRequest(Guid.NewGuid(), [operation]));
-        var retry = await service.ProcessBatchAsync(new ProductSyncBatchRequest(Guid.NewGuid(), [operation]));
+        var first = await service.ProcessBatchAsync(Batch(operation));
+        var retry = await service.ProcessBatchAsync(Batch(operation));
 
         Assert.Equal("accepted", Assert.Single(first.Results).Status);
         var replay = Assert.Single(retry.Results);
@@ -121,7 +162,7 @@ public sealed class ProductSyncServiceTests
     {
         var (service, _) = CreateService();
         var operationId = Guid.NewGuid();
-        var first = new ProductSyncOperation(
+        var first = Operation(
             operationId, 1, "product.create",
             new CreateProductRequest("SKU-003", "Original", null, "stock"));
         var changed = first with
@@ -129,8 +170,8 @@ public sealed class ProductSyncServiceTests
             Payload = new CreateProductRequest("SKU-003", "Changed", null, "stock")
         };
 
-        await service.ProcessBatchAsync(new ProductSyncBatchRequest(Guid.NewGuid(), [first]));
-        var result = await service.ProcessBatchAsync(new ProductSyncBatchRequest(Guid.NewGuid(), [changed]));
+        await service.ProcessBatchAsync(Batch(first));
+        var result = await service.ProcessBatchAsync(Batch(changed));
 
         var conflict = Assert.Single(result.Results);
         Assert.Equal("conflict", conflict.Status);
@@ -141,15 +182,15 @@ public sealed class ProductSyncServiceTests
     public async Task ProcessBatch_DuplicateProductCodeReturnsConflictWithoutOverwritingOriginal()
     {
         var (service, repository) = CreateService();
-        var first = new ProductSyncOperation(
+        var first = Operation(
             Guid.NewGuid(), 1, "product.create",
             new CreateProductRequest("SKU-004", "Original", null, "stock"));
-        var second = new ProductSyncOperation(
+        var second = Operation(
             Guid.NewGuid(), 2, "product.create",
             new CreateProductRequest("SKU-004", "Second", null, "stock"));
 
-        await service.ProcessBatchAsync(new ProductSyncBatchRequest(Guid.NewGuid(), [first]));
-        var result = await service.ProcessBatchAsync(new ProductSyncBatchRequest(Guid.NewGuid(), [second]));
+        await service.ProcessBatchAsync(Batch(first));
+        var result = await service.ProcessBatchAsync(Batch(second));
 
         var conflict = Assert.Single(result.Results);
         Assert.Equal("conflict", conflict.Status);
@@ -161,14 +202,11 @@ public sealed class ProductSyncServiceTests
     public async Task ProcessBatch_InvalidOperationIsRejectedWithoutStoppingOtherOperations()
     {
         var (service, _) = CreateService();
-        var batch = new ProductSyncBatchRequest(
-            Guid.NewGuid(),
-            [
-                new ProductSyncOperation(Guid.NewGuid(), 1, "unknown.command",
-                    new CreateProductRequest("SKU-005", "Invalid", null, "stock")),
-                new ProductSyncOperation(Guid.NewGuid(), 2, "product.create",
-                    new CreateProductRequest("SKU-006", "Valid", null, "stock"))
-            ]);
+        var batch = Batch(
+            Operation(Guid.NewGuid(), 1, "unknown.command",
+                new CreateProductRequest("SKU-005", "Invalid", null, "stock")),
+            Operation(Guid.NewGuid(), 2, "product.create",
+                new CreateProductRequest("SKU-006", "Valid", null, "stock")));
 
         var result = await service.ProcessBatchAsync(batch);
 
@@ -184,17 +222,15 @@ public sealed class ProductSyncServiceTests
         var operationId = Guid.NewGuid();
         var operations = new[]
         {
-            new ProductSyncOperation(operationId, 1, "product.create",
+            Operation(operationId, 1, "product.create",
                 new CreateProductRequest("SKU-007", "One", null, "stock")),
-            new ProductSyncOperation(operationId, 2, "product.create",
+            Operation(operationId, 2, "product.create",
                 new CreateProductRequest("SKU-008", "Two", null, "stock"))
         };
-        var duplicateIds = new ProductSyncBatchRequest(Guid.NewGuid(), operations);
-        var duplicateSequences = new ProductSyncBatchRequest(Guid.NewGuid(),
-        [
+        var duplicateIds = Batch(operations);
+        var duplicateSequences = Batch(
             operations[0],
-            operations[1] with { OperationId = Guid.NewGuid(), DeviceSequence = 1 }
-        ]);
+            operations[1] with { OperationId = Guid.NewGuid(), DeviceSequence = 1 });
 
         Assert.Equal("DUPLICATE_OR_MISSING_PRODUCT_SYNC_IDENTITY",
             ProductSyncService.ValidateBatchHeader(duplicateIds));
@@ -206,10 +242,11 @@ public sealed class ProductSyncServiceTests
     public void ValidateBatchHeader_RejectsEmptyOrOversizedBatch()
     {
         Assert.Equal("INVALID_PRODUCT_SYNC_BATCH",
-            ProductSyncService.ValidateBatchHeader(new ProductSyncBatchRequest(Guid.Empty, [])));
+            ProductSyncService.ValidateBatchHeader(new ProductSyncBatchRequest(
+                Guid.Empty, Guid.Empty, Guid.Empty, string.Empty, [])));
 
         var oversized = Enumerable.Range(1, ProductSyncService.MaximumBatchSize + 1)
-            .Select(index => new ProductSyncOperation(
+            .Select(index => Operation(
                 Guid.NewGuid(),
                 index,
                 "product.create",
@@ -217,6 +254,6 @@ public sealed class ProductSyncServiceTests
             .ToArray();
 
         Assert.Equal("INVALID_PRODUCT_SYNC_BATCH",
-            ProductSyncService.ValidateBatchHeader(new ProductSyncBatchRequest(Guid.NewGuid(), oversized)));
+            ProductSyncService.ValidateBatchHeader(Batch(oversized)));
     }
 }
