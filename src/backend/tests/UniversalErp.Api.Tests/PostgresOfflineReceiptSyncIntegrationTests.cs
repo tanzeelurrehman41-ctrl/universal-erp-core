@@ -407,6 +407,75 @@ public sealed class PostgresOfflineReceiptSyncIntegrationTests : IAsyncDisposabl
     }
 
     [Fact]
+    public async Task InventorySnapshot_BalancesAndCursorShareOneCommittedDatabaseSnapshot()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            var feed = new PostgresSyncChangeFeed(_appDataSource);
+            var before = await feed.ReadInventorySnapshotAsync(fixture.Context, CancellationToken.None);
+            var operation = new OfflineReceiptOperation(
+                Guid.NewGuid(),
+                1,
+                "inventory.receipt.post",
+                DateTimeOffset.UtcNow,
+                new PostInventoryReceiptRequest(
+                    fixture.VariantId,
+                    fixture.WarehouseId,
+                    fixture.BinId,
+                    6m,
+                    fixture.BaseUomId,
+                    null,
+                    null,
+                    null,
+                    "Atomic snapshot test"));
+            var batch = new OfflineReceiptBatchRequest(
+                Guid.NewGuid(),
+                fixture.DeviceId,
+                fixture.GrantId,
+                fixture.GrantToken,
+                [operation]);
+
+            var posted = await fixture.Repository.ProcessReceiptOperationAtomicAsync(
+                fixture.Context,
+                batch,
+                operation,
+                ComputeHash(operation),
+                CancellationToken.None);
+            Assert.Equal("accepted", posted.Status);
+
+            var after = await feed.ReadInventorySnapshotAsync(fixture.Context, CancellationToken.None);
+            Assert.True(long.Parse(after.Cursor) > long.Parse(before.Cursor));
+            var targetBalance = Assert.Single(after.Balances.Where(balance =>
+                balance.VariantId == fixture.VariantId &&
+                balance.WarehouseId == fixture.WarehouseId &&
+                balance.BinId == fixture.BinId &&
+                balance.StockStatus == "available"));
+            Assert.Equal(6m, targetBalance.OnHandQuantity);
+
+            var pageAfterSnapshot = await feed.ReadPageAsync(
+                fixture.Context,
+                "inventory_movement",
+                long.Parse(after.Cursor),
+                50,
+                CancellationToken.None);
+            Assert.Empty(pageAfterSnapshot.Changes);
+
+            var pageAfterBefore = await feed.ReadPageAsync(
+                fixture.Context,
+                "inventory_movement",
+                long.Parse(before.Cursor),
+                50,
+                CancellationToken.None);
+            Assert.Contains(pageAfterBefore.Changes, change => change.EntityId == posted.Receipt!.MovementId);
+        }
+        finally
+        {
+            await CleanupFixtureAsync(fixture);
+        }
+    }
+
+    [Fact]
     public async Task DeviceCursorAcknowledgement_IsStoredAndNeverRegresses()
     {
         var fixture = await CreateFixtureAsync();
