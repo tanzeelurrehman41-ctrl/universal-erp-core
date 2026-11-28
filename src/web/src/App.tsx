@@ -39,8 +39,10 @@ import {
   type SyncAuthorization,
 } from "./offlineProductQueue";
 import {
+  acknowledgeOfflineDeviceCursors,
   loadInventoryChangeCursors,
   loadInventorySnapshot,
+  loadReceiptOperations,
   saveInventorySnapshotAndCursors,
 } from "./offlineReceiptQueue";
 
@@ -359,6 +361,30 @@ export default function App() {
           products: cursor,
           inventory: cursors.inventory,
         });
+
+        // The server checkpoint advances only after the encrypted local snapshot and cursor commit.
+        try {
+          const [productOperations, receiptOperations] = await Promise.all([
+            loadProductOperations(),
+            loadReceiptOperations(storageScope),
+          ]);
+          const lastAcknowledgedSequence = Math.max(
+            0,
+            ...productOperations.filter(operation => operation.status === "accepted").map(operation => operation.deviceSequence),
+            ...receiptOperations.filter(operation => operation.status === "accepted").map(operation => operation.deviceSequence),
+          );
+          await acknowledgeOfflineDeviceCursors(
+            storageScope,
+            activeWorkspace,
+            { products: cursor, inventory: cursors.inventory },
+            lastAcknowledgedSequence,
+          );
+        } catch {
+          if (isMounted) {
+            setCatalogMessage("Product snapshot is saved locally; the server device-cursor acknowledgement will retry.");
+          }
+        }
+
         if (isMounted) setProducts(products);
 
         if (!page.hasMore) break;
