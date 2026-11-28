@@ -705,6 +705,7 @@ public sealed partial class PostgresSalesRepository(
 
         // 5. Server-Side FIFO Valuation Consumption, Invoice Lines, Movement Legs & Stock Relief
         decimal totalCost = 0m;
+        var inventoryFeedLegs = new List<object>();
         for (var i = 0; i < lines.Count; i++)
         {
             var l = lines[i];
@@ -891,7 +892,37 @@ public sealed partial class PostgresSalesRepository(
                 legCmd.Parameters.AddWithValue("uom", l.UnitOfMeasureId);
                 await legCmd.ExecuteNonQueryAsync(ct);
             }
+
+            inventoryFeedLegs.Add(new
+            {
+                variantId = l.VariantId,
+                warehouseId = l.WarehouseId,
+                binId = l.BinId,
+                stockStatus = "available",
+                quantityDelta = -l.Quantity,
+                unitOfMeasureId = l.UnitOfMeasureId,
+            });
         }
+
+        var inventoryFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "issue",
+            legs = inventoryFeedLegs,
+            occurredAt = DateTimeOffset.UtcNow,
+            postedAt = DateTimeOffset.UtcNow,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn,
+            tx,
+            Ctx.TenantId,
+            Ctx.CompanyId,
+            "inventory_movement",
+            movementId,
+            1,
+            "upsert",
+            inventoryFeedPayload,
+            ct);
 
         // 6. Update Customer Outstanding Balance if credit sale
         if (req.PaymentMethod == "credit")
