@@ -1,5 +1,6 @@
 import { decryptOfflineValue, encryptOfflineValue } from "./offlineReceiptQueue";
-import { apiUrl } from "./auth";
+import { apiUrl, type ApiWorkspaceScope } from "./auth";
+import { ensureOfflineDeviceGrant } from "./offlineReceiptQueue";
 
 export type ProductCreatePayload = {
   productCode: string;
@@ -29,6 +30,7 @@ export type QueueWorkspace = {
 export type SyncAuthorization = QueueWorkspace & {
   accessToken: string;
   ownerKey: string;
+  storageScope: string;
 };
 
 export type QueueStatus = "queued" | "syncing" | "accepted" | "conflict" | "rejected";
@@ -316,6 +318,27 @@ async function syncWithAuthenticatedServer(
     });
   }
 
+  let deviceGrant;
+  try {
+    const workspace: ApiWorkspaceScope = {
+      tenantId: authorization.tenantId,
+      companyId: authorization.companyId,
+    };
+    deviceGrant = await ensureOfflineDeviceGrant(
+      authorization.storageScope,
+      workspace,
+      "inventory.product.create",
+    );
+  } catch (error) {
+    const message = error instanceof Error
+      ? error.message
+      : "This device could not be authorized for product sync. Saved products remain on this device.";
+    for (const operation of eligible) {
+      await updateOperation(operation.operationId, { status: "queued", message });
+    }
+    return;
+  }
+
   for (let offset = 0; offset < eligible.length; offset += 50) {
     const batch = eligible.slice(offset, offset + 50);
     for (const operation of batch) {
@@ -334,10 +357,14 @@ async function syncWithAuthenticatedServer(
         },
         body: JSON.stringify({
           batchId,
+          deviceId: deviceGrant.deviceId,
+          grantId: deviceGrant.grantId,
+          grantToken: deviceGrant.grantToken,
           operations: batch.map((operation) => ({
             operationId: operation.operationId,
             deviceSequence: operation.deviceSequence,
             operationType: operation.operationType,
+            createdAt: operation.createdAt,
             payload: operation.payload,
           })),
         }),
