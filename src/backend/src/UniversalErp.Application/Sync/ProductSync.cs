@@ -7,10 +7,14 @@ public sealed record ProductSyncOperation(
     Guid OperationId,
     long DeviceSequence,
     string? OperationType,
+    DateTimeOffset CreatedAt,
     CreateProductRequest? Payload);
 
 public sealed record ProductSyncBatchRequest(
     Guid BatchId,
+    Guid DeviceId,
+    Guid GrantId,
+    string GrantToken,
     IReadOnlyList<ProductSyncOperation>? Operations);
 
 public sealed record ProductSyncOperationResult(
@@ -31,6 +35,10 @@ public sealed class ProductSyncService(ProductCatalogService catalog)
     public static string? ValidateBatchHeader(ProductSyncBatchRequest batch)
     {
         if (batch.BatchId == Guid.Empty ||
+            batch.DeviceId == Guid.Empty ||
+            batch.GrantId == Guid.Empty ||
+            string.IsNullOrWhiteSpace(batch.GrantToken) ||
+            batch.GrantToken.Length > 256 ||
             batch.Operations is null ||
             batch.Operations.Count is < 1 or > MaximumBatchSize)
         {
