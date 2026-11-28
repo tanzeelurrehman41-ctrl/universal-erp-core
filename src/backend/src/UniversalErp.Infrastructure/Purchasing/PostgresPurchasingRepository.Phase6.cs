@@ -382,7 +382,7 @@ public sealed partial class PostgresPurchasingRepository
                                 (tenant_id, company_id, movement_id, client_transaction_id, movement_type,
                                  source_document_type, source_document_id, occurred_at, created_by, note)
                             VALUES
-                                (@tid, @cid, @mid, @txid, 'status_transfer',
+                                (@tid, @cid, @mid, @txid, 'transfer',
                                  'purchase_inspection', @sourceId, @occurred, @by, @note);
                             """;
                         movement.Parameters.AddWithValue("tid", Ctx.TenantId);
@@ -623,7 +623,7 @@ public sealed partial class PostgresPurchasingRepository
                     (tenant_id, company_id, movement_id, client_transaction_id, movement_type,
                      source_document_type, source_document_id, occurred_at, created_by, note)
                 VALUES
-                    (@tid, @cid, @mid, @txid, 'status_transfer',
+                    (@tid, @cid, @mid, @txid, 'transfer',
                      'quarantine_release', @sourceId, @occurred, @by, @note);
                 """;
             movement.Parameters.AddWithValue("tid", Ctx.TenantId);
