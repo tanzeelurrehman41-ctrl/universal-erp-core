@@ -183,18 +183,23 @@ export async function decryptOfflineValue<T>(iv: Uint8Array, ciphertext: ArrayBu
   return unseal<T>(iv, ciphertext);
 }
 
-async function nextDeviceSequence(database: IDBDatabase): Promise<number> {
+export async function reserveOfflineDeviceSequence(minimumValue = 0): Promise<number> {
+  const database = await openDatabase();
   const transaction = database.transaction(METADATA_STORE, "readwrite");
   const complete = transactionComplete(transaction);
   const store = transaction.objectStore(METADATA_STORE);
   const getRequest = store.get("device-sequence") as IDBRequest<StoredCounter | undefined>;
   let sequence = 0;
   getRequest.onsuccess = () => {
-    sequence = (getRequest.result?.value ?? 0) + 1;
+    sequence = Math.max(getRequest.result?.value ?? 0, minimumValue) + 1;
     store.put({ id: "device-sequence", value: sequence } satisfies StoredCounter);
   };
   await complete;
   return sequence;
+}
+
+async function nextDeviceSequence(_database: IDBDatabase): Promise<number> {
+  return reserveOfflineDeviceSequence();
 }
 
 async function readRecord(record: EncryptedRecord): Promise<OfflineReceiptOperation> {
