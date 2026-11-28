@@ -164,6 +164,36 @@ test("quarantine status transfers move quantity between status rows without chan
   assert.equal(result.reduce((sum, row) => sum + row.onHandQuantity, 0), 12);
 });
 
+test("movement cannot create a negative balance when the bin is absent from the snapshot", () => {
+  assert.throws(
+    () => applyInventoryMovementChanges([], [
+      change({
+        variantId: "variant-1",
+        warehouseId: "warehouse-a",
+        binId: "bin-a",
+        quantityDelta: -1,
+        unitOfMeasureId: "uom-ea",
+      }),
+    ]),
+    /absent in the current baseline/,
+  );
+});
+
+test("movement cannot reduce an existing status balance below zero", () => {
+  assert.throws(
+    () => applyInventoryMovementChanges([balance()], [
+      change({
+        variantId: "variant-1",
+        warehouseId: "warehouse-a",
+        binId: "bin-a",
+        quantityDelta: -11,
+        unitOfMeasureId: "uom-ea",
+      }),
+    ]),
+    /would make available stock negative/,
+  );
+});
+
 test("unsupported feed events fail closed without mutating the saved balances", () => {
   const saved = [balance()];
 
