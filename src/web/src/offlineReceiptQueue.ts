@@ -61,7 +61,7 @@ type StoredCounter = { id: string; value: number };
 type StoredCursor = { id: string; value: string };
 type EncryptedSnapshot = { scopeHash: string; iv: Uint8Array; ciphertext: ArrayBuffer };
 type EncryptedSecret = { id: string; iv: Uint8Array; ciphertext: ArrayBuffer };
-type OfflineDeviceGrant = { deviceId: string; grantId: string; grantToken: string; expiresAt: string };
+export type OfflineDeviceGrant = { deviceId: string; grantId: string; grantToken: string; expiresAt: string; allowedOperations: string[] };
 
 export type InventoryChangeCursors = { products: string; inventory: string };
 
@@ -427,7 +427,8 @@ async function registerDeviceGrant(
   }, workspace);
   if (!response.ok) throw new Error(`The server could not authorize this device for offline receipt sync (${response.status}).`);
   const grant = await response.json() as OfflineDeviceGrant;
-  if (!grant.deviceId || !grant.grantId || !grant.grantToken || !Number.isFinite(Date.parse(grant.expiresAt))) {
+  if (!grant.deviceId || !grant.grantId || !grant.grantToken ||
+      !Number.isFinite(Date.parse(grant.expiresAt)) || !Array.isArray(grant.allowedOperations)) {
     throw new Error("The server returned an incomplete offline device grant.");
   }
   await saveDeviceGrant(storageScope, grant);
@@ -437,11 +438,30 @@ async function registerDeviceGrant(
 async function ensureDeviceGrant(
   storageScope: string,
   workspace: ApiWorkspaceScope | null,
+  requiredOperation: string,
 ): Promise<OfflineDeviceGrant> {
   const cached = await loadDeviceGrant(storageScope);
-  if (cached && Date.parse(cached.expiresAt) > Date.now() + 24 * 60 * 60 * 1000) return cached;
-  // Cached grant is missing, expired, or expires within 24 hours — re-register.
-  return registerDeviceGrant(storageScope, workspace);
+  if (
+    cached &&
+    Date.parse(cached.expiresAt) > Date.now() + 24 * 60 * 60 * 1000 &&
+    cached.allowedOperations?.includes(requiredOperation)
+  ) {
+    return cached;
+  }
+
+  const grant = await registerDeviceGrant(storageScope, workspace);
+  if (!grant.allowedOperations.includes(requiredOperation)) {
+    throw new Error("This signed-in user is not authorized for the requested offline operation.");
+  }
+  return grant;
+}
+
+export function ensureOfflineDeviceGrant(
+  storageScope: string,
+  workspace: ApiWorkspaceScope | null,
+  requiredOperation: string,
+): Promise<OfflineDeviceGrant> {
+  return ensureDeviceGrant(storageScope, workspace, requiredOperation);
 }
 
 export function syncPendingReceiptOperations(
@@ -458,7 +478,7 @@ export function syncPendingReceiptOperations(
 
     let grant: OfflineDeviceGrant;
     try {
-      grant = await ensureDeviceGrant(storageScope, workspace);
+      grant = await ensureDeviceGrant(storageScope, workspace, "inventory.receipt.post");
     } catch (error) {
       const message = error instanceof Error ? error.message : "The device could not be authorized. The receipt remains in the encrypted local journal.";
       for (const operation of pending) {
