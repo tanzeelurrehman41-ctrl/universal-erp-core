@@ -24,7 +24,7 @@ public sealed class PostgresOfflineReceiptSyncRepository(NpgsqlDataSource dataSo
         IReadOnlyList<string>? allowedOperations = null)
     {
         var operations = (allowedOperations ?? ["inventory.receipt.post"])
-            .Where(operation => operation is "inventory.receipt.post" or "inventory.product.create")
+            .Where(operation => operation is "inventory.receipt.post" or "inventory.product.create" or "sync.cursor.ack")
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         if (operations.Length == 0) return null;
