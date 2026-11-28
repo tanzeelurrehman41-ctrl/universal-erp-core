@@ -473,7 +473,7 @@ async function ensureAnyOfflineDeviceGrant(
   storageScope: string,
   workspace: ApiWorkspaceScope | null,
 ): Promise<OfflineDeviceGrant> {
-  const validOperations = ["inventory.product.create", "inventory.receipt.post"];
+  const validOperations = ["inventory.product.create", "inventory.receipt.post", "sync.cursor.ack"];
   const cached = await loadDeviceGrant(storageScope);
   if (
     cached &&
