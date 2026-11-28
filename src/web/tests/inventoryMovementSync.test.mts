@@ -128,6 +128,42 @@ test("a new balance row is created when a movement targets an empty bin", () => 
   }]);
 });
 
+test("quarantine status transfers move quantity between status rows without changing total stock", () => {
+  const available = balance();
+  const quarantined: InventoryBalanceRow = {
+    ...balance(),
+    stockStatus: "quarantine",
+    onHandQuantity: 2,
+    valuedQuantity: undefined,
+  };
+  const result = applyInventoryMovementChanges([available, quarantined], [
+    change({
+      legs: [
+        {
+          variantId: "variant-1",
+          warehouseId: "warehouse-a",
+          binId: "bin-a",
+          stockStatus: "available",
+          quantityDelta: -3,
+          unitOfMeasureId: "uom-ea",
+        },
+        {
+          variantId: "variant-1",
+          warehouseId: "warehouse-a",
+          binId: "bin-a",
+          stockStatus: "quarantine",
+          quantityDelta: 3,
+          unitOfMeasureId: "uom-ea",
+        },
+      ],
+    }),
+  ]);
+
+  assert.equal(result.find(row => row.stockStatus === "available")?.onHandQuantity, 7);
+  assert.equal(result.find(row => row.stockStatus === "quarantine")?.onHandQuantity, 5);
+  assert.equal(result.reduce((sum, row) => sum + row.onHandQuantity, 0), 12);
+});
+
 test("unsupported feed events fail closed without mutating the saved balances", () => {
   const saved = [balance()];
 
