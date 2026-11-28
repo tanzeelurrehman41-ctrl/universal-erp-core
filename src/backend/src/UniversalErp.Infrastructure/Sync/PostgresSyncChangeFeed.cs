@@ -56,12 +56,21 @@ public sealed class PostgresSyncChangeFeed(NpgsqlDataSource dataSource) : ISyncC
 
         var balanceSql = hasCostLayersTable
             ? """
+              WITH balance_totals AS (
+                  SELECT variant_id, warehouse_id, bin_id, status_code, SUM(on_hand_qty) AS on_hand_qty
+                  FROM erp_inventory.stock_balance
+                  WHERE tenant_id = @tenantId AND company_id = @companyId
+                  GROUP BY variant_id, warehouse_id, bin_id, status_code
+              )
               SELECT balance.variant_id, balance.warehouse_id, balance.bin_id,
                      balance.status_code, balance.on_hand_qty, variant.base_uom_id,
-                     COALESCE(valued.valued_qty, 0) AS valued_qty
-              FROM erp_inventory.stock_balance AS balance
+                     CASE WHEN balance.status_code = 'available'
+                          THEN COALESCE(valued.valued_qty, 0)
+                          ELSE NULL
+                     END AS valued_qty
+              FROM balance_totals AS balance
               JOIN erp_inventory.product_variant AS variant
-                ON variant.tenant_id = balance.tenant_id
+                ON variant.tenant_id = @tenantId
                AND variant.variant_id = balance.variant_id
               LEFT JOIN (
                   SELECT variant_id, warehouse_id, bin_id, SUM(remaining_qty) AS valued_qty
@@ -73,18 +82,22 @@ public sealed class PostgresSyncChangeFeed(NpgsqlDataSource dataSource) : ISyncC
                 ON valued.variant_id = balance.variant_id
                AND valued.warehouse_id = balance.warehouse_id
                AND valued.bin_id = balance.bin_id
-              WHERE balance.tenant_id = @tenantId AND balance.company_id = @companyId
               ORDER BY balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code
               """
             : """
+              WITH balance_totals AS (
+                  SELECT variant_id, warehouse_id, bin_id, status_code, SUM(on_hand_qty) AS on_hand_qty
+                  FROM erp_inventory.stock_balance
+                  WHERE tenant_id = @tenantId AND company_id = @companyId
+                  GROUP BY variant_id, warehouse_id, bin_id, status_code
+              )
               SELECT balance.variant_id, balance.warehouse_id, balance.bin_id,
                      balance.status_code, balance.on_hand_qty, variant.base_uom_id,
                      NULL::numeric AS valued_qty
-              FROM erp_inventory.stock_balance AS balance
+              FROM balance_totals AS balance
               JOIN erp_inventory.product_variant AS variant
-                ON variant.tenant_id = balance.tenant_id
+                ON variant.tenant_id = @tenantId
                AND variant.variant_id = balance.variant_id
-              WHERE balance.tenant_id = @tenantId AND balance.company_id = @companyId
               ORDER BY balance.variant_id, balance.warehouse_id, balance.bin_id, balance.status_code
               """;
 
