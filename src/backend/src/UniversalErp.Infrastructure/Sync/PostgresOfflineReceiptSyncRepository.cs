@@ -213,10 +213,20 @@ public sealed class PostgresOfflineReceiptSyncRepository(NpgsqlDataSource dataSo
             {
                 if (!reader.IsDBNull(0))
                 {
-                    using var stored = JsonDocument.Parse(reader.GetString(0));
-                    var root = stored.RootElement;
-                    productsCursor = ReadCursorValue(root, "products");
-                    inventoryCursor = ReadCursorValue(root, "inventory");
+                    try
+                    {
+                        using var stored = JsonDocument.Parse(reader.GetString(0));
+                        var root = stored.RootElement;
+                        productsCursor = ReadCursorValue(root, "products");
+                        inventoryCursor = ReadCursorValue(root, "inventory");
+                    }
+                    catch (JsonException)
+                    {
+                        // Unknown legacy cursor formats are not trusted; clients will replay
+                        // feed pages from zero rather than risk skipping an unacknowledged event.
+                        productsCursor = 0;
+                        inventoryCursor = 0;
+                    }
                 }
                 lastAcknowledgedSequence = reader.GetInt64(1);
             }
@@ -268,7 +278,7 @@ public sealed class PostgresOfflineReceiptSyncRepository(NpgsqlDataSource dataSo
 
     private static long ReadCursorValue(JsonElement root, string name)
     {
-        if (!root.TryGetProperty(name, out var value)) return 0;
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty(name, out var value)) return 0;
         var text = value.ValueKind switch
         {
             JsonValueKind.String => value.GetString(),
