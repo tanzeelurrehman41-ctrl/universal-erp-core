@@ -91,9 +91,6 @@ export function applyInventoryMovementChanges(
     }
 
     const payload = change.payload;
-    const variantId = requiredId(payload, "variantId", "VariantId");
-    const unitOfMeasureId = requiredId(payload, "unitOfMeasureId", "UnitOfMeasureId");
-
     const legs = payload.legs;
     if (Array.isArray(legs)) {
       for (const item of legs) {
@@ -112,6 +109,8 @@ export function applyInventoryMovementChanges(
       continue;
     }
 
+    const variantId = requiredId(payload, "variantId", "VariantId");
+    const unitOfMeasureId = requiredId(payload, "unitOfMeasureId", "UnitOfMeasureId");
     const sourceWarehouse = readField(payload, "sourceWarehouseId", "SourceWarehouseId");
     const destinationWarehouse = readField(payload, "destinationWarehouseId", "DestinationWarehouseId");
 
