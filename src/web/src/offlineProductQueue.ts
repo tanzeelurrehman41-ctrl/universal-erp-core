@@ -1,6 +1,6 @@
 import { decryptOfflineValue, encryptOfflineValue } from "./offlineReceiptQueue";
 import { apiUrl, type ApiWorkspaceScope } from "./auth";
-import { ensureOfflineDeviceGrant } from "./offlineReceiptQueue";
+import { ensureOfflineDeviceGrant, reserveOfflineDeviceSequence } from "./offlineReceiptQueue";
 
 export type ProductCreatePayload = {
   productCode: string;
@@ -46,6 +46,8 @@ export type OfflineProductOperation = {
   companyId?: string;
   companyName?: string;
   ownerKey?: string;
+  sharedSequence?: boolean;
+  syncAttempted?: boolean;
   serverProduct?: ProductSummary;
   message?: string;
 };
@@ -220,16 +222,21 @@ async function ensureEncryptedQueue(): Promise<void> {
 }
 
 async function nextDeviceSequence(database: IDBDatabase): Promise<number> {
-  const transaction = database.transaction(METADATA_STORE, "readwrite");
-  const complete = transactionComplete(transaction);
-  const store = transaction.objectStore(METADATA_STORE);
-  const request = store.get("product-device-sequence") as IDBRequest<StoredCounter | undefined>;
-  let sequence = 0;
-  request.onsuccess = () => {
-    sequence = (request.result?.value ?? 0) + 1;
-    store.put({ id: "product-device-sequence", value: sequence } satisfies StoredCounter);
-  };
-  await complete;
+  const read = database.transaction(METADATA_STORE, "readonly");
+  const readComplete = transactionComplete(read);
+  const current = await requestResult(
+    read.objectStore(METADATA_STORE).get("product-device-sequence") as IDBRequest<StoredCounter | undefined>,
+  );
+  await readComplete;
+
+  const sequence = await reserveOfflineDeviceSequence(current?.value ?? 0);
+  const write = database.transaction(METADATA_STORE, "readwrite");
+  const writeComplete = transactionComplete(write);
+  write.objectStore(METADATA_STORE).put({
+    id: "product-device-sequence",
+    value: sequence,
+  } satisfies StoredCounter);
+  await writeComplete;
   return sequence;
 }
 
@@ -253,6 +260,8 @@ export async function enqueueProductOperation(
     deviceSequence: await nextDeviceSequence(database),
     operationType: "product.create",
     payload,
+    sharedSequence: true,
+    syncAttempted: false,
     status: "queued",
     createdAt: new Date().toISOString(),
     ...workspace,
@@ -278,7 +287,7 @@ export async function loadProductOperations(): Promise<OfflineProductOperation[]
 
 async function updateOperation(
   operationId: string,
-  updates: Partial<Pick<OfflineProductOperation, "status" | "serverProduct" | "message">>,
+  updates: Partial<Pick<OfflineProductOperation, "status" | "serverProduct" | "message" | "deviceSequence" | "sharedSequence" | "syncAttempted">>,
 ): Promise<void> {
   await ensureEncryptedQueue();
   const database = await openDatabase();
@@ -339,11 +348,29 @@ async function syncWithAuthenticatedServer(
     return;
   }
 
-  for (let offset = 0; offset < eligible.length; offset += 50) {
-    const batch = eligible.slice(offset, offset + 50);
-    for (const operation of batch) {
-      await updateOperation(operation.operationId, { status: "syncing", message: undefined });
+  const prepared: OfflineProductOperation[] = [];
+  for (const original of eligible) {
+    let operation = original;
+    if (!operation.sharedSequence) {
+      const nextSequence = await reserveOfflineDeviceSequence(operation.deviceSequence);
+      operation = {
+        ...operation,
+        deviceSequence: nextSequence,
+        sharedSequence: true,
+      };
     }
+    await updateOperation(operation.operationId, {
+      deviceSequence: operation.deviceSequence,
+      sharedSequence: true,
+      syncAttempted: true,
+      status: "syncing",
+      message: undefined,
+    });
+    prepared.push({ ...operation, syncAttempted: true, status: "syncing", message: undefined });
+  }
+
+  for (let offset = 0; offset < prepared.length; offset += 50) {
+    const batch = prepared.slice(offset, offset + 50);
 
     try {
       const batchId = crypto.randomUUID();
