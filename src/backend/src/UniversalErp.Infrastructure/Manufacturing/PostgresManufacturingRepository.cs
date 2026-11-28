@@ -1,9 +1,11 @@
+using System.Text.Json;
 using Npgsql;
 using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Inventory;
 using UniversalErp.Application.Manufacturing;
 using UniversalErp.Domain.Tenancy;
 using UniversalErp.Infrastructure.Finance;
+using UniversalErp.Infrastructure.Sync;
 
 namespace UniversalErp.Infrastructure.Manufacturing;
 
@@ -1450,6 +1452,29 @@ public sealed class PostgresManufacturingRepository(
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
+        var issueFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "production_out",
+            legs = new[]
+            {
+                new
+                {
+                    variantId = request.ComponentVariantId,
+                    warehouseId = request.WarehouseId,
+                    binId = request.BinId,
+                    stockStatus = "available",
+                    quantityDelta = -request.Quantity,
+                    unitOfMeasureId = uomId,
+                },
+            },
+            occurredAt = DateTimeOffset.UtcNow,
+            postedAt = DateTimeOffset.UtcNow,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId,
+            "inventory_movement", movementId, 1, "upsert", issueFeedPayload, ct);
+
         // 4. Update layers and insert cost allocations
         var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
             conn, tx, Ctx.TenantId, Ctx.CompanyId, ct);
@@ -1706,6 +1731,29 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("uomid", uomId);
             await cmd.ExecuteNonQueryAsync(ct);
         }
+
+        var returnFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "return_in",
+            legs = new[]
+            {
+                new
+                {
+                    variantId = mat.ComponentVariantId,
+                    warehouseId = request.TargetWarehouseId,
+                    binId = request.TargetBinId,
+                    stockStatus = "available",
+                    quantityDelta = request.Quantity,
+                    unitOfMeasureId = uomId,
+                },
+            },
+            occurredAt = DateTimeOffset.UtcNow,
+            postedAt = DateTimeOffset.UtcNow,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId,
+            "inventory_movement", movementId, 1, "upsert", returnFeedPayload, ct);
 
         // Create new FIFO layer for returned stock
         var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
@@ -2176,6 +2224,29 @@ public sealed class PostgresManufacturingRepository(
             cmd.Parameters.AddWithValue("uomid", uomId);
             await cmd.ExecuteNonQueryAsync(ct);
         }
+
+        var completionFeedPayload = JsonSerializer.Serialize(new
+        {
+            movementId,
+            movementType = "production_in",
+            legs = new[]
+            {
+                new
+                {
+                    variantId = wo.ProductVariantId,
+                    warehouseId = wo.TargetWarehouseId,
+                    binId = wo.TargetBinId,
+                    stockStatus = "available",
+                    quantityDelta = acceptedQty,
+                    unitOfMeasureId = uomId,
+                },
+            },
+            occurredAt = DateTimeOffset.UtcNow,
+            postedAt = DateTimeOffset.UtcNow,
+        });
+        await CompanyChangeLogWriter.AppendAsync(
+            conn, tx, Ctx.TenantId, Ctx.CompanyId,
+            "inventory_movement", movementId, 1, "upsert", completionFeedPayload, ct);
 
         // 3. Create Finished Goods FIFO layer
         var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
