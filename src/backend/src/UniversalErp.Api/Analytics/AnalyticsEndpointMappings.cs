@@ -38,7 +38,7 @@ public static class AnalyticsEndpointMappings
             var filter = new AnalyticsDateRangeFilter(startDate, endDate, warehouseId, departmentId, productId);
             var dash = await service.GetExecutiveDashboardAsync(ctx.TenantId, ctx.CompanyId, filter, hasSalaryView, httpContext.RequestAborted);
             return Results.Ok(dash);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.dashboard.view");
 
         // 2. Sales & Revenue
         group.MapGet("/sales", async (
@@ -53,7 +53,7 @@ public static class AnalyticsEndpointMappings
             var filter = new AnalyticsDateRangeFilter(startDate, endDate, ProductId: productId);
             var sales = await service.GetSalesRevenueAnalyticsAsync(ctx.TenantId, ctx.CompanyId, filter, httpContext.RequestAborted);
             return Results.Ok(sales);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.supply_chain.view");
 
         // 3. Purchasing & Suppliers
         group.MapGet("/purchasing", async (
@@ -67,7 +67,7 @@ public static class AnalyticsEndpointMappings
             var filter = new AnalyticsDateRangeFilter(startDate, endDate);
             var purch = await service.GetPurchasingSupplierAnalyticsAsync(ctx.TenantId, ctx.CompanyId, filter, httpContext.RequestAborted);
             return Results.Ok(purch);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.supply_chain.view");
 
         // 4. Inventory Valuation & Ageing
         group.MapGet("/inventory", async (
@@ -82,7 +82,7 @@ public static class AnalyticsEndpointMappings
             var filter = new AnalyticsDateRangeFilter(startDate, endDate, WarehouseId: warehouseId);
             var inv = await service.GetInventoryValuationAgeingAsync(ctx.TenantId, ctx.CompanyId, filter, httpContext.RequestAborted);
             return Results.Ok(inv);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.supply_chain.view");
 
         // 5. Manufacturing Efficiency & WIP
         group.MapGet("/manufacturing", async (
@@ -96,7 +96,7 @@ public static class AnalyticsEndpointMappings
             var filter = new AnalyticsDateRangeFilter(startDate, endDate);
             var mfg = await service.GetManufacturingEfficiencyAsync(ctx.TenantId, ctx.CompanyId, filter, httpContext.RequestAborted);
             return Results.Ok(mfg);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.supply_chain.view");
 
         // 6. Warehouse Logistics
         group.MapGet("/warehouse", async (
@@ -109,7 +109,7 @@ public static class AnalyticsEndpointMappings
             var filter = new AnalyticsDateRangeFilter(WarehouseId: warehouseId);
             var wh = await service.GetWarehouseLogisticsAnalyticsAsync(ctx.TenantId, ctx.CompanyId, filter, httpContext.RequestAborted);
             return Results.Ok(wh);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.supply_chain.view");
 
         // 7. Finance, P&L & Cash Flow
         group.MapGet("/finance", async (
@@ -123,7 +123,7 @@ public static class AnalyticsEndpointMappings
             var filter = new AnalyticsDateRangeFilter(startDate, endDate);
             var fin = await service.GetFinanceProfitabilityAnalyticsAsync(ctx.TenantId, ctx.CompanyId, filter, httpContext.RequestAborted);
             return Results.Ok(fin);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.financial.view");
 
         // 8. Workforce Cost & Payroll
         group.MapGet("/workforce", async (
@@ -139,7 +139,7 @@ public static class AnalyticsEndpointMappings
             var filter = new AnalyticsDateRangeFilter(startDate, endDate, DepartmentId: departmentId);
             var wf = await service.GetWorkforceCostAnalyticsAsync(ctx.TenantId, ctx.CompanyId, filter, hasSalaryView, httpContext.RequestAborted);
             return Results.Ok(wf);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.workforce.view");
 
         // 9. Platform Reconciliation (GL & FIFO layers)
         group.MapGet("/reconciliation", async (
@@ -150,7 +150,7 @@ public static class AnalyticsEndpointMappings
             var ctx = ResolveContext(httpContext, ctxAccessor);
             var rec = await service.GetPlatformReconciliationReportAsync(ctx.TenantId, ctx.CompanyId, httpContext.RequestAborted);
             return Results.Ok(rec);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.financial.view", "analytics.supply_chain.view");
 
         // 10. KPI Definitions
         group.MapGet("/kpis", async (
@@ -162,7 +162,7 @@ public static class AnalyticsEndpointMappings
             var ctx = ResolveContext(httpContext, ctxAccessor);
             var list = await service.GetKpiDefinitionsAsync(ctx.TenantId, ctx.CompanyId, category, httpContext.RequestAborted);
             return Results.Ok(list);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.dashboard.view");
 
         group.MapPost("/kpis", async (
             [FromBody] CreateKpiDefinitionRequest req,
@@ -173,7 +173,7 @@ public static class AnalyticsEndpointMappings
             var ctx = ResolveContext(httpContext, ctxAccessor);
             var kpi = await service.CreateKpiDefinitionAsync(ctx.TenantId, ctx.CompanyId, req, httpContext.RequestAborted);
             return Results.Created($"/api/v1/analytics/kpis/{kpi.Id}", kpi);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.kpi.manage");
 
         // 11. KPI Snapshots
         group.MapGet("/kpis/snapshots", async (
@@ -186,7 +186,7 @@ public static class AnalyticsEndpointMappings
             var ctx = ResolveContext(httpContext, ctxAccessor);
             var list = await service.GetKpiSnapshotsAsync(ctx.TenantId, ctx.CompanyId, kpiCode, fromDate, httpContext.RequestAborted);
             return Results.Ok(list);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.dashboard.view");
 
         group.MapPost("/kpis/snapshots", async (
             [FromBody] CreateKpiSnapshotRequest req,
@@ -197,7 +197,7 @@ public static class AnalyticsEndpointMappings
             var ctx = ResolveContext(httpContext, ctxAccessor);
             var snap = await service.RecordKpiSnapshotAsync(ctx.TenantId, ctx.CompanyId, req, httpContext.RequestAborted);
             return Results.Created($"/api/v1/analytics/kpis/snapshots/{snap.Id}", snap);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.kpi.manage");
 
         // 12. Data Export (CSV, TSV, JSON)
         group.MapPost("/export", async (
@@ -207,12 +207,63 @@ public static class AnalyticsEndpointMappings
             HttpContext httpContext) =>
         {
             var ctx = ResolveContext(httpContext, ctxAccessor);
+            var dataPermissions = AnalyticsExportPermissions.GetRequiredPermissions(req.ReportType);
+            if (dataPermissions.Count == 0)
+            {
+                return Results.BadRequest(new { code = "UNSUPPORTED_ANALYTICS_EXPORT" });
+            }
+
+            foreach (var permission in dataPermissions)
+            {
+                if (!await CheckAnalyticsPermissionAsync(httpContext, permission, isDevelopment))
+                {
+                    return Results.Forbid();
+                }
+            }
+
             bool hasSalaryView = await CheckSalaryViewPermissionAsync(httpContext, isDevelopment);
             var exp = await service.ExportAnalyticsDataAsync(ctx.TenantId, ctx.CompanyId, req, hasSalaryView, httpContext.RequestAborted);
             return Results.Ok(exp);
-        });
+        }).RequireAnalyticsAuthorization(isDevelopment, "analytics.export");
 
         return endpoints;
+    }
+
+    private static RouteHandlerBuilder RequireAnalyticsAuthorization(
+        this RouteHandlerBuilder endpoint,
+        bool isDevelopment,
+        params string[] requiredPermissions)
+    {
+        if (isDevelopment)
+        {
+            return endpoint;
+        }
+
+        foreach (var permissionCode in requiredPermissions)
+        {
+            endpoint.RequireAuthorization(permissionCode);
+        }
+
+        return endpoint;
+    }
+    private static async Task<bool> CheckAnalyticsPermissionAsync(
+        HttpContext httpContext,
+        string permissionCode,
+        bool isDevelopment)
+    {
+        if (isDevelopment)
+        {
+            return true;
+        }
+
+        var authService = httpContext.RequestServices.GetService<IAuthorizationService>();
+        if (authService is null)
+        {
+            return false;
+        }
+
+        var authResult = await authService.AuthorizeAsync(httpContext.User, permissionCode);
+        return authResult.Succeeded;
     }
 
     private static async Task<bool> CheckSalaryViewPermissionAsync(HttpContext httpContext, bool isDevelopment)

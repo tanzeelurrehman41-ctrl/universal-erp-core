@@ -226,45 +226,55 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
   }, [enabled, workspace?.companyId, canViewConfidentialSalary]);
 
   async function loadAllAnalytics() {
+    if (!enabled || !workspace?.companyId) return;
+
     setIsLoading(true);
     setError(null);
+    setDashboard(null);
+    setReconciliation(null);
+    setSales(null);
+    setPurchasing(null);
+    setInventory(null);
+    setWorkforce(null);
+
+    const filters = new URLSearchParams();
+    if (startDate) filters.set("startDate", startDate);
+    if (endDate) filters.set("endDate", endDate);
+    const suffix = filters.toString();
+    const withFilters = (path: string) => suffix ? `${path}?${suffix}` : path;
+    const failures: string[] = [];
+
+    async function fetchReport<T>(label: string, path: string): Promise<T | null> {
+      try {
+        const response = await apiFetch(path);
+        if (!response.ok) {
+          failures.push(response.status === 403 ? `${label}: permission denied` : `${label}: HTTP ${response.status}`);
+          return null;
+        }
+        return await response.json() as T;
+      } catch {
+        failures.push(`${label}: request failed`);
+        return null;
+      }
+    }
+
     try {
-      // 1. Executive Dashboard
-      const dashRes = await apiFetch(`/api/v1/analytics/dashboard?includeSalary=${canViewConfidentialSalary}`);
-      if (dashRes.ok) {
-        setDashboard(await dashRes.json());
-      } else {
-        // Fallback default dev state
-        setDashboard(getMockDashboard());
-      }
+      const [dash, rec, salesReport, purchasingReport, inventoryReport, workforceReport] = await Promise.all([
+        fetchReport<ExecutiveDashboard>("Executive dashboard", `${withFilters("/api/v1/analytics/dashboard")}${suffix ? "&" : "?"}includeSalary=${canViewConfidentialSalary}`),
+        fetchReport<PlatformReconciliation>("Reconciliation", "/api/v1/analytics/reconciliation"),
+        fetchReport<SalesAnalytics>("Sales", withFilters("/api/v1/analytics/sales")),
+        fetchReport<PurchasingAnalytics>("Purchasing", withFilters("/api/v1/analytics/purchasing")),
+        fetchReport<InventoryAgeingAnalytics>("Inventory", withFilters("/api/v1/analytics/inventory")),
+        fetchReport<WorkforceCostAnalytics>("Workforce", `${withFilters("/api/v1/analytics/workforce")}${suffix ? "&" : "?"}includeSalary=${canViewConfidentialSalary}`),
+      ]);
 
-      // 2. Platform Reconciliation
-      const recRes = await apiFetch("/api/v1/analytics/reconciliation");
-      if (recRes.ok) {
-        setReconciliation(await recRes.json());
-      } else {
-        setReconciliation(getMockReconciliation());
-      }
-
-      // 3. Sales Analytics
-      const salesRes = await apiFetch("/api/v1/analytics/sales");
-      if (salesRes.ok) setSales(await salesRes.json());
-
-      // 4. Purchasing Analytics
-      const purchRes = await apiFetch("/api/v1/analytics/purchasing");
-      if (purchRes.ok) setPurchasing(await purchRes.json());
-
-      // 5. Inventory Valuation & FIFO Ageing
-      const invRes = await apiFetch("/api/v1/analytics/inventory-ageing");
-      if (invRes.ok) setInventory(await invRes.json());
-
-      // 6. Workforce Analytics
-      const wfRes = await apiFetch(`/api/v1/analytics/workforce?includeSalary=${canViewConfidentialSalary}`);
-      if (wfRes.ok) setWorkforce(await wfRes.json());
-    } catch (err: any) {
-      console.warn("Analytics API fetch fallback to cached operational baseline", err);
-      setDashboard(getMockDashboard());
-      setReconciliation(getMockReconciliation());
+      setDashboard(dash);
+      setReconciliation(rec);
+      setSales(salesReport);
+      setPurchasing(purchasingReport);
+      setInventory(inventoryReport);
+      setWorkforce(workforceReport);
+      if (failures.length > 0) setError(`Some reports are unavailable: ${failures.join("; ")}.`);
     } finally {
       setIsLoading(false);
     }
@@ -283,14 +293,15 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
       const headers = ["Reconciliation Area", "Status", "Metric 1", "Metric 2", "Variance (PKR)"];
       const rows = [
         ["General Ledger Double-Entry", reconciliation.glReconciliation.isBalanced ? "BALANCED" : "DISCREPANCY", `Debits: ${reconciliation.glReconciliation.totalDebits}`, `Credits: ${reconciliation.glReconciliation.totalCredits}`, reconciliation.glReconciliation.discrepancy],
-        ["Model A FIFO Layer Valuation", reconciliation.fifoReconciliation.isReconciled ? "RECONCILED" : "VARIANCE", `FIFO: ${reconciliation.fifoReconciliation.fifoActiveLayersValuationPkr}`, `GL 1200: ${reconciliation.fifoReconciliation.glAccount1200ValuationPkr}`, reconciliation.fifoReconciliation.variancePkr]
+        ["FIFO Layer Valuation", reconciliation.fifoReconciliation.isReconciled ? "RECONCILED" : "VARIANCE", `FIFO: ${reconciliation.fifoReconciliation.fifoActiveLayersValuationPkr}`, `GL 1200: ${reconciliation.fifoReconciliation.glAccount1200ValuationPkr}`, reconciliation.fifoReconciliation.variancePkr]
       ];
       downloadCsv(`${reportType}_audit_report.csv`, buildCsvContent(headers, rows));
-    } else {
-      // Default Executive Summary
+    } else if (reportType === "executive" && dashboard) {
       const headers = ["Metric Code", "KPI Name", "Actual Value", "Target Value", "Variance %", "Status"];
-      const rows = (dashboard?.keyPerformanceIndicators || []).map(k => [k.code, k.name, k.actualValue, k.targetValue, k.variancePercentage, k.status]);
+      const rows = dashboard.keyPerformanceIndicators.map(k => [k.code, k.name, k.actualValue, k.targetValue, k.variancePercentage, k.status]);
       downloadCsv("executive_kpi_summary.csv", buildCsvContent(headers, rows));
+    } else {
+      setError("The selected report is unavailable. Refresh analytics and confirm that your role has the required permission.");
     }
   }
 
@@ -305,12 +316,14 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
     document.body.removeChild(link);
   }
 
-  const health: PlatformHealthEvaluation = evaluatePlatformHealth(
-    reconciliation?.glReconciliation.isBalanced ?? true,
-    reconciliation?.glReconciliation.discrepancy ?? 0,
-    reconciliation?.fifoReconciliation.isReconciled ?? true,
-    reconciliation?.fifoReconciliation.variancePkr ?? 0
-  );
+  const health: PlatformHealthEvaluation | null = reconciliation
+    ? evaluatePlatformHealth(
+        reconciliation.glReconciliation.isBalanced,
+        reconciliation.glReconciliation.discrepancy,
+        reconciliation.fifoReconciliation.isReconciled,
+        reconciliation.fifoReconciliation.variancePkr
+      )
+    : null;
 
   return (
     <div style={{ padding: "20px", maxWidth: "1400px", margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
@@ -330,18 +343,18 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
           display: "flex",
           alignItems: "center",
           gap: "12px",
-          backgroundColor: health.isHealthy ? "#ECFDF5" : "#FEF2F2",
-          border: `1px solid ${health.isHealthy ? "#10B981" : "#EF4444"}`,
+          backgroundColor: health ? (health.isHealthy ? "#ECFDF5" : "#FEF2F2") : "#F3F4F6",
+          border: `1px solid ${health ? (health.isHealthy ? "#10B981" : "#EF4444") : "#D1D5DB"}`,
           padding: "10px 16px",
           borderRadius: "8px"
         }}>
-          <span style={{ fontSize: "20px" }}>{health.isHealthy ? "🛡️" : "⚠️"}</span>
+          <span style={{ fontSize: "20px" }}>{health ? (health.isHealthy ? "🛡️" : "⚠️") : "ℹ️"}</span>
           <div>
-            <div style={{ fontSize: "13px", fontWeight: "bold", color: health.isHealthy ? "#065F46" : "#991B1B" }}>
-              GL & Model A FIFO Audit: {health.glStatus} / {health.fifoStatus}
+            <div style={{ fontSize: "13px", fontWeight: "bold", color: health ? (health.isHealthy ? "#065F46" : "#991B1B") : "#374151" }}>
+              {health ? `GL & FIFO Audit: ${health.glStatus} / ${health.fifoStatus}` : "GL & FIFO Audit: Not available"}
             </div>
-            <div style={{ fontSize: "11px", color: health.isHealthy ? "#047857" : "#B91C1C" }}>
-              Active FIFO Stock: 50 EA | Valuation: PKR 2,250 | Variance: PKR 0.00
+            <div style={{ fontSize: "11px", color: "#4B5563" }}>
+              {reconciliation ? `Active layers: ${reconciliation.fifoReconciliation.totalActiveLayers} | Quantity: ${reconciliation.fifoReconciliation.totalActiveQuantity}` : "No live reconciliation result has been loaded."}
             </div>
           </div>
         </div>
@@ -409,6 +422,12 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
         </div>
       </div>
 
+      {error && (
+        <div role="alert" style={{ marginBottom: "16px", padding: "12px 16px", borderRadius: "8px", border: "1px solid #D97706", backgroundColor: "#FFFBEB", color: "#92400E", fontSize: "13px" }}>
+          {error}
+        </div>
+      )}
+
       {/* Navigation Tabs */}
       <div style={{ display: "flex", borderBottom: "2px solid #E5E7EB", marginBottom: "20px", gap: "4px", overflowX: "auto" }}>
         {[
@@ -452,36 +471,36 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "16px", marginBottom: "24px" }}>
             <MetricCard
               title="Total Revenue"
-              value={`PKR ${(dashboard?.financials.totalRevenuePkr || 1250000).toLocaleString()}`}
-              subtitle="Gross margin: 38.0%"
+              value={dashboard ? `PKR ${dashboard.financials.totalRevenuePkr.toLocaleString()}` : "—"}
+              subtitle={dashboard ? `Gross margin: ${dashboard.financials.grossProfitMarginPercentage}%` : "No live dashboard data"}
               trend="up"
               status="on_track"
             />
             <MetricCard
               title="Operating Cash Flow"
-              value={`PKR ${(dashboard?.financials.operatingCashFlowPkr || 340000).toLocaleString()}`}
-              subtitle="Cash position stable"
+              value={dashboard ? `PKR ${dashboard.financials.operatingCashFlowPkr.toLocaleString()}` : "—"}
+              subtitle={dashboard ? "Current company reporting period" : "No live dashboard data"}
               trend="up"
               status="on_track"
             />
             <MetricCard
               title="FIFO Inventory Valuation"
-              value={`PKR ${(dashboard?.supplyChain.fifoValuationPkr || 2250).toLocaleString()}`}
-              subtitle="Model A Baseline Reconciled"
+              value={dashboard ? `PKR ${dashboard.supplyChain.fifoValuationPkr.toLocaleString()}` : "—"}
+              subtitle={dashboard ? (dashboard.supplyChain.isFifoReconciled ? "FIFO valuation reconciled" : "FIFO valuation variance detected") : "No live dashboard data"}
               trend="flat"
               status="on_track"
             />
             <MetricCard
               title="Work Orders Completion"
-              value={`${dashboard?.manufacturing.workOrderCompletionRatePercentage || 88.5}%`}
-              subtitle="WIP: PKR 75,000"
+              value={dashboard ? `${dashboard.manufacturing.workOrderCompletionRatePercentage}%` : "—"}
+              subtitle={dashboard ? `WIP: PKR ${dashboard.manufacturing.workInProgressValuationPkr.toLocaleString()}` : "No live dashboard data"}
               trend="up"
               status="on_track"
             />
             <MetricCard
               title="Active Headcount"
-              value={`${dashboard?.workforce.totalActiveEmployees || 1} staff`}
-              subtitle={`Gross cost: ${canViewConfidentialSalary ? 'PKR 175,000' : '••••••••'}`}
+              value={dashboard ? `${dashboard.workforce.totalActiveEmployees} staff` : "—"}
+              subtitle={dashboard ? "Active workforce" : "No live dashboard data"}
               trend="flat"
               status="on_track"
             />
@@ -505,7 +524,7 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                 </tr>
               </thead>
               <tbody>
-                {(dashboard?.keyPerformanceIndicators || getDefaultKpis()).map(kpi => (
+                {(dashboard?.keyPerformanceIndicators ?? []).map(kpi => (
                   <tr key={kpi.code} style={{ borderBottom: "1px solid #F3F4F6" }}>
                     <td style={{ padding: "10px", fontWeight: "600" }}><code>{kpi.code}</code></td>
                     <td style={{ padding: "10px" }}>{kpi.name}</td>
@@ -529,6 +548,9 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                     </td>
                   </tr>
                 ))}
+                {(!dashboard || dashboard.keyPerformanceIndicators.length === 0) && (
+                  <tr><td colSpan={7} style={{ padding: "16px", color: "#6B7280" }}>No KPI data is available for this company.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -551,10 +573,7 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                 </tr>
               </thead>
               <tbody>
-                {(sales?.topCustomers || [
-                  { customerCode: "CUST-001", customerName: "Indus Engineering Ltd", totalRevenuePkr: 750000, ordersCount: 8, contributionPercentage: 60.0 },
-                  { customerCode: "CUST-002", customerName: "Apex Motors Corp", totalRevenuePkr: 500000, ordersCount: 5, contributionPercentage: 40.0 }
-                ]).map(c => (
+                {(sales?.topCustomers ?? []).map(c => (
                   <tr key={c.customerCode} style={{ borderBottom: "1px solid #F3F4F6" }}>
                     <td style={{ padding: "8px" }}>
                       <div style={{ fontWeight: "600" }}>{c.customerName}</div>
@@ -565,6 +584,9 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                     <td style={{ padding: "8px", color: "#2563EB", fontWeight: "600" }}>{c.contributionPercentage}%</td>
                   </tr>
                 ))}
+                {(!sales || sales.topCustomers.length === 0) && (
+                  <tr><td colSpan={4} style={{ padding: "16px", color: "#6B7280" }}>No sales results are available for this period.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -578,21 +600,22 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
               <div style={{ padding: "12px", backgroundColor: "#EFF6FF", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#1E40AF" }}>Total Outstanding AR</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#1E3A8A" }}>
-                  PKR {(sales?.arAging.totalOutstandingPkr || 350000).toLocaleString()}
+                  {sales ? `PKR ${sales.arAging.totalOutstandingPkr.toLocaleString()}` : "—"}
                 </div>
               </div>
               <div style={{ padding: "12px", backgroundColor: "#F0FDF4", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#166534" }}>Days Sales Outstanding (DSO)</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#14532D" }}>
-                  {sales?.arAging.daysSalesOutstanding || 38.5} days
+                  {sales ? `${sales.arAging.daysSalesOutstanding} days` : "—"}
                 </div>
               </div>
             </div>
             <div style={{ fontSize: "12px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• Current (0-30 Days): <strong>PKR {(sales?.arAging.currentPkr || 220000).toLocaleString()}</strong> (62.8%)</div>
-              <div>• 31-60 Days: <strong>PKR {(sales?.arAging.days1To30Pkr || 80000).toLocaleString()}</strong> (22.9%)</div>
-              <div>• 61-90 Days: <strong>PKR {(sales?.arAging.days31To60Pkr || 35000).toLocaleString()}</strong> (10.0%)</div>
-              <div>• Over 90 Days: <strong>PKR {(sales?.arAging.over90DaysPkr || 15000).toLocaleString()}</strong> (4.3%)</div>
+              <div>• Current: <strong>{sales ? `PKR ${sales.arAging.currentPkr.toLocaleString()}` : "—"}</strong></div>
+              <div>• 1–30 days: <strong>{sales ? `PKR ${sales.arAging.days1To30Pkr.toLocaleString()}` : "—"}</strong></div>
+              <div>• 31–60 days: <strong>{sales ? `PKR ${sales.arAging.days31To60Pkr.toLocaleString()}` : "—"}</strong></div>
+              <div>• 61–90 days: <strong>{sales ? `PKR ${sales.arAging.days61To90Pkr.toLocaleString()}` : "—"}</strong></div>
+              <div>• Over 90 days: <strong>{sales ? `PKR ${sales.arAging.over90DaysPkr.toLocaleString()}` : "—"}</strong></div>
             </div>
           </div>
         </div>
@@ -613,10 +636,7 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                 </tr>
               </thead>
               <tbody>
-                {(purchasing?.topSuppliers || [
-                  { supplierCode: "SUPP-001", supplierName: "Pakistan Steel Mills", totalSpendPkr: 450000, poCount: 6, fulfillmentPercentage: 96.0 },
-                  { supplierCode: "SUPP-002", supplierName: "National Fasteners Co", totalSpendPkr: 180000, poCount: 4, fulfillmentPercentage: 92.5 }
-                ]).map(s => (
+                {(purchasing?.topSuppliers ?? []).map(s => (
                   <tr key={s.supplierCode} style={{ borderBottom: "1px solid #F3F4F6" }}>
                     <td style={{ padding: "8px" }}>
                       <div style={{ fontWeight: "600" }}>{s.supplierName}</div>
@@ -627,6 +647,9 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
                     <td style={{ padding: "8px", color: "#059669", fontWeight: "600" }}>{s.fulfillmentPercentage}%</td>
                   </tr>
                 ))}
+                {(!purchasing || purchasing.topSuppliers.length === 0) && (
+                  <tr><td colSpan={4} style={{ padding: "16px", color: "#6B7280" }}>No purchasing results are available for this period.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -639,20 +662,20 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
               <div style={{ padding: "12px", backgroundColor: "#FEF3C7", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#92400E" }}>Total Accounts Payable</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#78350F" }}>
-                  PKR {(purchasing?.apAging.totalPayablePkr || 280000).toLocaleString()}
+                  {purchasing ? `PKR ${purchasing.apAging.totalPayablePkr.toLocaleString()}` : "—"}
                 </div>
               </div>
               <div style={{ padding: "12px", backgroundColor: "#F0FDF4", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#166534" }}>Days Payable Outstanding (DPO)</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#14532D" }}>
-                  {purchasing?.apAging.daysPayableOutstanding || 42.0} days
+                  {purchasing ? `${purchasing.apAging.daysPayableOutstanding} days` : "—"}
                 </div>
               </div>
             </div>
             <div style={{ fontSize: "12px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• On-Time Delivery Rate: <strong>91.5%</strong></div>
-              <div>• Purchase Price Variance (PPV): <strong>PKR 12,500</strong> (Favorable)</div>
-              <div>• PO Fulfillment Rate: <strong>94.2%</strong></div>
+              <div>• On-Time Delivery Rate: <strong>{purchasing ? `${purchasing.onTimeDeliveryPercentage}%` : "—"}</strong></div>
+              <div>• Purchase Price Variance: <strong>{purchasing ? `PKR ${purchasing.purchasePriceVariancePkr.toLocaleString()}` : "—"}</strong></div>
+              <div>• PO Fulfillment Rate: <strong>{purchasing ? `${purchasing.poFulfillmentRatePercentage}%` : "—"}</strong></div>
             </div>
           </div>
         </div>
@@ -661,78 +684,50 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
       {/* ── TAB 4: FIFO INVENTORY VALUATION ────────────────────────────────────── */}
       {activeTab === "inventory" && (
         <div>
-          {/* Model A Reconciliation Card */}
-          <div style={{
-            backgroundColor: "#F0FDF4",
-            border: "1px solid #10B981",
-            borderRadius: "8px",
-            padding: "20px",
-            marginBottom: "20px"
-          }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <h3 style={{ margin: "0 0 6px", color: "#065F46", fontSize: "16px" }}>
-                  ✅ Model A Production FIFO Reconciliation
-                </h3>
-                <p style={{ margin: 0, fontSize: "13px", color: "#047857" }}>
-                  Physical inventory layers in <code>erp_inventory.inventory_cost_layer</code> match General Ledger Account 1200 with zero variance.
-                </p>
-              </div>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: "20px", fontWeight: "bold", color: "#065F46" }}>
-                  PKR {(inventory?.totalFifoLayerValuationPkr || 2250).toLocaleString()}
+          <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px", marginBottom: "20px" }}>
+            <h3 style={{ margin: "0 0 6px", color: "#111827", fontSize: "16px" }}>Inventory Valuation & Ageing</h3>
+            {inventory ? (
+              <>
+                <div style={{ fontSize: "20px", fontWeight: "bold", marginTop: "12px" }}>
+                  PKR {inventory.totalFifoLayerValuationPkr.toLocaleString()}
                 </div>
-                <div style={{ fontSize: "12px", color: "#047857" }}>Variance: PKR 0.00 (100% Reconciled)</div>
-              </div>
-            </div>
+                <div style={{ fontSize: "13px", color: inventory.isReconciled ? "#047857" : "#B91C1C" }}>
+                  {inventory.isReconciled ? "FIFO valuation reconciled" : "Valuation variance detected"}
+                  {" · "}Variance PKR {inventory.valuationVariancePkr.toLocaleString()}
+                </div>
+              </>
+            ) : (
+              <p style={{ color: "#6B7280", marginBottom: 0 }}>Inventory analytics are unavailable. Check access and refresh the report.</p>
+            )}
           </div>
 
-          {/* Ageing & Slow-Moving SKUs */}
           <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
-            <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Active Cost Layers & Stock Valuation</h3>
+            <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Slow-Moving Inventory</h3>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
               <thead>
                 <tr style={{ backgroundColor: "#F9FAFB", borderBottom: "1px solid #E5E7EB", textAlign: "left" }}>
-                  <th style={{ padding: "8px" }}>Layer SKU</th>
-                  <th style={{ padding: "8px" }}>Description</th>
-                  <th style={{ padding: "8px" }}>Quantity On Hand</th>
-                  <th style={{ padding: "8px" }}>Unit Cost</th>
-                  <th style={{ padding: "8px" }}>Total Valuation</th>
+                  <th style={{ padding: "8px" }}>SKU</th>
+                  <th style={{ padding: "8px" }}>Product</th>
+                  <th style={{ padding: "8px" }}>Quantity</th>
+                  <th style={{ padding: "8px" }}>Valuation</th>
+                  <th style={{ padding: "8px" }}>Days Since Movement</th>
                   <th style={{ padding: "8px" }}>Status</th>
                 </tr>
               </thead>
               <tbody>
-                <tr style={{ borderBottom: "1px solid #F3F4F6" }}>
-                  <td style={{ padding: "8px" }}><code>GRN-2024-01</code> (PICK-01)</td>
-                  <td style={{ padding: "8px" }}>Purchasing Receipt Layer 1</td>
-                  <td style={{ padding: "8px", fontWeight: "600" }}>18 EA</td>
-                  <td style={{ padding: "8px" }}>PKR 45.00</td>
-                  <td style={{ padding: "8px", fontWeight: "600", color: "#059669" }}>PKR 810.00</td>
-                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>AVAILABLE</span></td>
-                </tr>
-                <tr style={{ borderBottom: "1px solid #F3F4F6" }}>
-                  <td style={{ padding: "8px" }}><code>GRN-2024-03</code> (RECEIVE-01)</td>
-                  <td style={{ padding: "8px" }}>Purchasing Receipt Layer 2</td>
-                  <td style={{ padding: "8px", fontWeight: "600" }}>29 EA</td>
-                  <td style={{ padding: "8px" }}>PKR 45.00</td>
-                  <td style={{ padding: "8px", fontWeight: "600", color: "#059669" }}>PKR 1,305.00</td>
-                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>AVAILABLE</span></td>
-                </tr>
-                <tr style={{ borderBottom: "1px solid #F3F4F6" }}>
-                  <td style={{ padding: "8px" }}><code>PROP-CAP-001</code> (PICK-01)</td>
-                  <td style={{ padding: "8px" }}>Opening Equity Capitalization</td>
-                  <td style={{ padding: "8px", fontWeight: "600" }}>3 EA</td>
-                  <td style={{ padding: "8px" }}>PKR 45.00</td>
-                  <td style={{ padding: "8px", fontWeight: "600", color: "#059669" }}>PKR 135.00</td>
-                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>AVAILABLE</span></td>
-                </tr>
-                <tr style={{ backgroundColor: "#F9FAFB", fontWeight: "bold" }}>
-                  <td style={{ padding: "8px" }} colSpan={2}>Canonical Model A Total Physical Valuation</td>
-                  <td style={{ padding: "8px" }}>50 EA</td>
-                  <td style={{ padding: "8px" }}>PKR 45.00</td>
-                  <td style={{ padding: "8px", color: "#059669" }}>PKR 2,250.00</td>
-                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>RECONCILED</span></td>
-                </tr>
+                {(inventory?.slowMovingItems ?? []).map(item => (
+                  <tr key={item.variantId} style={{ borderBottom: "1px solid #F3F4F6" }}>
+                    <td style={{ padding: "8px" }}><code>{item.sku}</code></td>
+                    <td style={{ padding: "8px" }}>{item.productName}</td>
+                    <td style={{ padding: "8px" }}>{item.quantityOnHand.toLocaleString()}</td>
+                    <td style={{ padding: "8px" }}>PKR {item.totalValuationPkr.toLocaleString()}</td>
+                    <td style={{ padding: "8px" }}>{item.daysSinceLastMovement}</td>
+                    <td style={{ padding: "8px" }}>{item.status}</td>
+                  </tr>
+                ))}
+                {(!inventory || inventory.slowMovingItems.length === 0) && (
+                  <tr><td colSpan={6} style={{ padding: "16px", color: "#6B7280" }}>No slow-moving inventory rows were returned.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -747,20 +742,17 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "16px" }}>
               <div style={{ padding: "12px", backgroundColor: "#F3F4F6", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#4B5563" }}>Total Work Orders</div>
-                <div style={{ fontSize: "18px", fontWeight: "bold" }}>{dashboard?.manufacturing.totalWorkOrders || 12}</div>
+                <div style={{ fontSize: "18px", fontWeight: "bold" }}>{dashboard ? dashboard.manufacturing.totalWorkOrders : "—"}</div>
               </div>
               <div style={{ padding: "12px", backgroundColor: "#EFF6FF", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#1E40AF" }}>Completion Rate</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#1E3A8A" }}>
-                  {dashboard?.manufacturing.workOrderCompletionRatePercentage || 88.5}%
+                  {dashboard ? `${dashboard.manufacturing.workOrderCompletionRatePercentage}%` : "—"}
                 </div>
               </div>
             </div>
             <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• Work In Progress (WIP) Valuation: <strong>PKR 75,000</strong></div>
-              <div>• Material Cost Component: <strong>65%</strong></div>
-              <div>• Direct Labor Component: <strong>25%</strong></div>
-              <div>• Overhead Allocation: <strong>10%</strong></div>
+              <div>• Work In Progress (WIP) Valuation: <strong>{dashboard ? `PKR ${dashboard.manufacturing.workInProgressValuationPkr.toLocaleString()}` : "—"}</strong></div>
             </div>
           </div>
 
@@ -770,20 +762,19 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
               <div style={{ padding: "12px", backgroundColor: "#FEF2F2", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#991B1B" }}>Total Scrap Cost</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#7F1D1D" }}>
-                  PKR {(dashboard?.manufacturing.totalScrapCostPkr || 4200).toLocaleString()}
+                  {dashboard ? `PKR ${dashboard.manufacturing.totalScrapCostPkr.toLocaleString()}` : "—"}
                 </div>
               </div>
               <div style={{ padding: "12px", backgroundColor: "#F0FDF4", borderRadius: "6px" }}>
                 <div style={{ fontSize: "12px", color: "#166534" }}>Scrap Rate %</div>
                 <div style={{ fontSize: "18px", fontWeight: "bold", color: "#14532D" }}>
-                  {dashboard?.manufacturing.scrapRatePercentage || 1.8}% (Target &lt; 2.5%)
+                  {dashboard ? `${dashboard.manufacturing.scrapRatePercentage}%` : "—"}
                 </div>
               </div>
             </div>
             <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• Quality Inspections Conducted: <strong>48 runs</strong></div>
-              <div>• First-Pass Yield (FPY): <strong>96.4%</strong></div>
-              <div>• Scrap GL Account: <strong>5020 (Cost of Goods Sold - Scrap)</strong></div>
+              <div>• Work orders completed: <strong>{dashboard ? dashboard.manufacturing.completedWorkOrders : "—"}</strong></div>
+              <div>• Total work orders: <strong>{dashboard ? dashboard.manufacturing.totalWorkOrders : "—"}</strong></div>
             </div>
           </div>
         </div>
@@ -792,118 +783,99 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
       {/* ── TAB 6: WORKFORCE & PAYROLL ─────────────────────────────────────────── */}
       {activeTab === "workforce" && (
         <div>
-          {/* Salary confidentiality warning if masked */}
           {!canViewConfidentialSalary && (
-            <div style={{
-              backgroundColor: "#FFFBEB",
-              border: "1px solid #F59E0B",
-              padding: "12px 16px",
-              borderRadius: "8px",
-              marginBottom: "16px",
-              fontSize: "13px",
-              color: "#92400E"
-            }}>
-              🔒 <strong>Field-Level Confidentiality Active:</strong> Individual employee gross/net salaries and bank details are obscured. Check the box above if you hold <code>payroll.salary.view</code> authorization.
+            <div style={{ backgroundColor: "#FFFBEB", border: "1px solid #F59E0B", padding: "12px 16px", borderRadius: "8px", marginBottom: "16px", fontSize: "13px", color: "#92400E" }}>
+              🔒 Salary fields are masked unless the signed-in user has <code>payroll.salary.view</code>. The server remains authoritative for this permission.
             </div>
           )}
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
-            <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
-              <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Payroll Summary & Statutory Burden</h3>
-              <div style={{ fontSize: "13px", color: "#374151", lineHeight: "2" }}>
-                <div>• Total Active Headcount: <strong>{workforce?.totalActiveHeadcount || 1} employees</strong></div>
-                <div>• Monthly Gross Payroll: <strong>{maskSalary(workforce?.monthlyGrossPayrollPkr || 175000, canViewConfidentialSalary)}</strong></div>
-                <div>• Monthly Net Payable: <strong>{maskSalary(workforce?.monthlyNetPayrollPkr || 148750, canViewConfidentialSalary)}</strong></div>
-                <div>• Employer EOBI Contribution (5%): <strong>{canViewConfidentialSalary ? 'PKR 1,850' : '••••••••'}</strong></div>
-                <div>• Employer PF Match (8.33%): <strong>{canViewConfidentialSalary ? 'PKR 12,495' : '••••••••'}</strong></div>
-                <div>• Total Overtime Expenditure: <strong>{canViewConfidentialSalary ? 'PKR 0.00' : '••••••••'}</strong></div>
+          {workforce ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+              <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
+                <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Workforce & Payroll Summary</h3>
+                <div style={{ fontSize: "13px", color: "#374151", lineHeight: "2" }}>
+                  <div>• Active Headcount: <strong>{workforce.totalActiveHeadcount}</strong></div>
+                  <div>• Monthly Gross Payroll: <strong>{maskSalary(workforce.monthlyGrossPayrollPkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Monthly Net Payable: <strong>{maskSalary(workforce.monthlyNetPayrollPkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Employer EOBI Cost: <strong>{maskSalary(workforce.eobiEmployerCostPkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Employer PF Cost: <strong>{maskSalary(workforce.pfEmployerCostPkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Total Employer Statutory Cost: <strong>{maskSalary(workforce.totalEmployerStatutoryCostPkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Overtime Expenditure: <strong>{maskSalary(workforce.totalOvertimeExpenditurePkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Staff Loans Outstanding: <strong>{maskSalary(workforce.totalStaffLoansOutstandingPkr, canViewConfidentialSalary)}</strong></div>
+                </div>
+              </div>
+              <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
+                <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Departmental Headcount & Cost</h3>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                  <thead>
+                    <tr style={{ backgroundColor: "#F9FAFB", borderBottom: "1px solid #E5E7EB", textAlign: "left" }}>
+                      <th style={{ padding: "8px" }}>Department</th>
+                      <th style={{ padding: "8px" }}>Headcount</th>
+                      <th style={{ padding: "8px" }}>Cost</th>
+                      <th style={{ padding: "8px" }}>Share %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {workforce.departmentBreakdown.map(d => (
+                      <tr key={d.departmentCode} style={{ borderBottom: "1px solid #F3F4F6" }}>
+                        <td style={{ padding: "8px", fontWeight: "600" }}>{d.departmentName} ({d.departmentCode})</td>
+                        <td style={{ padding: "8px" }}>{d.headcount}</td>
+                        <td style={{ padding: "8px", fontWeight: "600" }}>{maskSalary(d.totalSalaryCostPkr, canViewConfidentialSalary)}</td>
+                        <td style={{ padding: "8px", color: "#2563EB", fontWeight: "600" }}>{d.costPercentage}%</td>
+                      </tr>
+                    ))}
+                    {workforce.departmentBreakdown.length === 0 && (
+                      <tr><td colSpan={4} style={{ padding: "16px", color: "#6B7280" }}>No departmental workforce results were returned.</td></tr>
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
-
-            <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
-              <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Departmental Headcount & Cost</h3>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-                <thead>
-                  <tr style={{ backgroundColor: "#F9FAFB", borderBottom: "1px solid #E5E7EB", textAlign: "left" }}>
-                    <th style={{ padding: "8px" }}>Department</th>
-                    <th style={{ padding: "8px" }}>Headcount</th>
-                    <th style={{ padding: "8px" }}>Cost (PKR)</th>
-                    <th style={{ padding: "8px" }}>Share %</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(workforce?.departmentBreakdown || [
-                    { departmentCode: "ENG", departmentName: "Engineering", headcount: 1, totalSalaryCostPkr: 175000, costPercentage: 100 }
-                  ]).map(d => (
-                    <tr key={d.departmentCode} style={{ borderBottom: "1px solid #F3F4F6" }}>
-                      <td style={{ padding: "8px", fontWeight: "600" }}>{d.departmentName} ({d.departmentCode})</td>
-                      <td style={{ padding: "8px" }}>{d.headcount}</td>
-                      <td style={{ padding: "8px", fontWeight: "600" }}>{maskSalary(d.totalSalaryCostPkr, canViewConfidentialSalary)}</td>
-                      <td style={{ padding: "8px", color: "#2563EB", fontWeight: "600" }}>{d.costPercentage}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          ) : (
+            <p style={{ color: "#6B7280" }}>Workforce analytics are unavailable. Check access and refresh the report.</p>
+          )}
         </div>
       )}
 
       {/* ── TAB 7: GL & FIFO AUDIT HEALTH ─────────────────────────────────────── */}
       {activeTab === "reconciliation" && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
-          {/* General Ledger Balanced Double-Entry Check */}
-          <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
-            <h3 style={{ margin: "0 0 12px", fontSize: "16px", color: "#111827" }}>
-              1. General Ledger Double-Entry Audit
-            </h3>
-            <div style={{
-              backgroundColor: reconciliation?.glReconciliation.isBalanced ? "#F0FDF4" : "#FEF2F2",
-              padding: "12px",
-              borderRadius: "6px",
-              border: `1px solid ${reconciliation?.glReconciliation.isBalanced ? "#10B981" : "#EF4444"}`,
-              marginBottom: "16px"
-            }}>
-              <div style={{ fontWeight: "bold", color: reconciliation?.glReconciliation.isBalanced ? "#065F46" : "#991B1B" }}>
-                Status: {reconciliation?.glReconciliation.isBalanced ? "BALANCED (Σ Debits ≡ Σ Credits)" : "UNBALANCED"}
+        reconciliation ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+            <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
+              <h3 style={{ margin: "0 0 12px", fontSize: "16px", color: "#111827" }}>General Ledger Double-Entry Audit</h3>
+              <div style={{ backgroundColor: reconciliation.glReconciliation.isBalanced ? "#F0FDF4" : "#FEF2F2", padding: "12px", borderRadius: "6px", border: `1px solid ${reconciliation.glReconciliation.isBalanced ? "#10B981" : "#EF4444"}`, marginBottom: "16px" }}>
+                <div style={{ fontWeight: "bold", color: reconciliation.glReconciliation.isBalanced ? "#065F46" : "#991B1B" }}>
+                  Status: {reconciliation.glReconciliation.isBalanced ? "BALANCED (Σ Debits ≡ Σ Credits)" : "UNBALANCED"}
+                </div>
+                <div style={{ fontSize: "12px", color: "#4B5563", marginTop: "4px" }}>
+                  Total Debits: <strong>PKR {reconciliation.glReconciliation.totalDebits.toLocaleString()}</strong> | Credits: <strong>PKR {reconciliation.glReconciliation.totalCredits.toLocaleString()}</strong>
+                </div>
               </div>
-              <div style={{ fontSize: "12px", color: "#4B5563", marginTop: "4px" }}>
-                Total Debits: <strong>PKR {(reconciliation?.glReconciliation.totalDebits || 2250).toLocaleString()}</strong> | Credits: <strong>PKR {(reconciliation?.glReconciliation.totalCredits || 2250).toLocaleString()}</strong>
+              <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
+                <div>• Posted Journals: <strong>{reconciliation.glReconciliation.totalPostedJournals}</strong></div>
+                <div>• Journal Lines: <strong>{reconciliation.glReconciliation.totalJournalLines}</strong></div>
+                <div>• Discrepancy: <strong>PKR {reconciliation.glReconciliation.discrepancy.toLocaleString()}</strong></div>
               </div>
             </div>
-            <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• Total Posted Journals: <strong>{reconciliation?.glReconciliation.totalPostedJournals || 1}</strong></div>
-              <div>• Total Journal Lines: <strong>{reconciliation?.glReconciliation.totalJournalLines || 2}</strong></div>
-              <div>• Discrepancy Amount: <strong>PKR {(reconciliation?.glReconciliation.discrepancy || 0).toLocaleString()}</strong></div>
+            <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
+              <h3 style={{ margin: "0 0 12px", fontSize: "16px", color: "#111827" }}>FIFO Cost Layer Valuation Check</h3>
+              <div style={{ backgroundColor: reconciliation.fifoReconciliation.isReconciled ? "#F0FDF4" : "#FEF2F2", padding: "12px", borderRadius: "6px", border: `1px solid ${reconciliation.fifoReconciliation.isReconciled ? "#10B981" : "#EF4444"}`, marginBottom: "16px" }}>
+                <div style={{ fontWeight: "bold", color: reconciliation.fifoReconciliation.isReconciled ? "#065F46" : "#991B1B" }}>
+                  Status: {reconciliation.fifoReconciliation.isReconciled ? "RECONCILED" : "VARIANCE DETECTED"}
+                </div>
+                <div style={{ fontSize: "12px", color: "#4B5563", marginTop: "4px" }}>
+                  FIFO Layers: <strong>PKR {reconciliation.fifoReconciliation.fifoActiveLayersValuationPkr.toLocaleString()}</strong> | GL 1200: <strong>PKR {reconciliation.fifoReconciliation.glAccount1200ValuationPkr.toLocaleString()}</strong>
+                </div>
+              </div>
+              <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
+                <div>• Active FIFO Layers: <strong>{reconciliation.fifoReconciliation.totalActiveLayers}</strong></div>
+                <div>• Total Valued Quantity: <strong>{reconciliation.fifoReconciliation.totalActiveQuantity}</strong></div>
+                <div>• Variance: <strong>PKR {reconciliation.fifoReconciliation.variancePkr.toLocaleString()}</strong></div>
+              </div>
             </div>
           </div>
-
-          {/* Model A FIFO Layer Valuation vs GL Account 1200 */}
-          <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
-            <h3 style={{ margin: "0 0 12px", fontSize: "16px", color: "#111827" }}>
-              2. Model A FIFO Cost Layer Valuation Check
-            </h3>
-            <div style={{
-              backgroundColor: reconciliation?.fifoReconciliation.isReconciled ? "#F0FDF4" : "#FEF2F2",
-              padding: "12px",
-              borderRadius: "6px",
-              border: `1px solid ${reconciliation?.fifoReconciliation.isReconciled ? "#10B981" : "#EF4444"}`,
-              marginBottom: "16px"
-            }}>
-              <div style={{ fontWeight: "bold", color: reconciliation?.fifoReconciliation.isReconciled ? "#065F46" : "#991B1B" }}>
-                Status: {reconciliation?.fifoReconciliation.isReconciled ? "RECONCILED (Zero Variance)" : "VARIANCE DETECTED"}
-              </div>
-              <div style={{ fontSize: "12px", color: "#4B5563", marginTop: "4px" }}>
-                FIFO Active Layers: <strong>PKR {(reconciliation?.fifoReconciliation.fifoActiveLayersValuationPkr || 2250).toLocaleString()}</strong> | GL 1200: <strong>PKR {(reconciliation?.fifoReconciliation.glAccount1200ValuationPkr || 2250).toLocaleString()}</strong>
-              </div>
-            </div>
-            <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• Active FIFO Layers: <strong>{reconciliation?.fifoReconciliation.totalActiveLayers || 1}</strong></div>
-              <div>• Total Valued Quantity: <strong>{reconciliation?.fifoReconciliation.totalActiveQuantity || 50} EA</strong></div>
-              <div>• Final Variance: <strong>PKR 0.00</strong></div>
-            </div>
-          </div>
-        </div>
+        ) : (
+          <p style={{ color: "#6B7280" }}>Reconciliation analytics are unavailable. Check access and refresh the report.</p>
+        )
       )}
 
       {/* ── TAB 8: EXPORT DATA CENTER ─────────────────────────────────────────── */}
@@ -913,7 +885,7 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
             Analytical Data Export & Reporting Center
           </h3>
           <p style={{ margin: "0 0 20px", fontSize: "13px", color: "#6B7280" }}>
-            Download authoritative CSV datasets for executive presentation, FBR tax reporting, and operational auditing.
+            Download the analytical datasets available to your signed-in role. Tax and statutory filings require separate qualified review.
           </p>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px" }}>
@@ -1009,85 +981,4 @@ function ExportCard({ title, desc, onExport }: { title: string; desc: string; on
       </button>
     </div>
   );
-}
-
-function getDefaultKpis() {
-  return [
-    { code: "KPI-REV", name: "Monthly Sales Revenue", category: "financial", unit: "PKR", actualValue: 1250000, targetValue: 1000000, variance: 250000, variancePercentage: 25.0, status: "on_track", trendDirection: "up" },
-    { code: "KPI-GM", name: "Gross Margin", category: "financial", unit: "%", actualValue: 38.0, targetValue: 35.0, variance: 3.0, variancePercentage: 8.57, status: "on_track", trendDirection: "up" },
-    { code: "KPI-DSO", name: "Days Sales Outstanding", category: "financial", unit: "days", actualValue: 38.5, targetValue: 45.0, variance: -6.5, variancePercentage: -14.4, status: "on_track", trendDirection: "down" },
-    { code: "KPI-FIFO-VAR", name: "FIFO Valuation Variance", category: "supply_chain", unit: "PKR", actualValue: 0.0, targetValue: 0.0, variance: 0.0, variancePercentage: 0.0, status: "on_track", trendDirection: "flat" },
-    { code: "KPI-SCRAP", name: "Manufacturing Scrap Rate", category: "manufacturing", unit: "%", actualValue: 1.8, targetValue: 2.5, variance: -0.7, variancePercentage: -28.0, status: "on_track", trendDirection: "down" }
-  ];
-}
-
-function getMockDashboard(): ExecutiveDashboard {
-  return {
-    asOfDate: "2026-11-15",
-    financials: {
-      totalRevenuePkr: 1250000,
-      costOfGoodsSoldPkr: 775000,
-      grossProfitPkr: 475000,
-      grossProfitMarginPercentage: 38.0,
-      operatingExpensesPkr: 220000,
-      netIncomePkr: 255000,
-      netProfitMarginPercentage: 20.4,
-      operatingCashFlowPkr: 340000,
-      accountsReceivablePkr: 350000,
-      accountsPayablePkr: 280000,
-      isGeneralLedgerBalanced: true
-    },
-    supplyChain: {
-      totalInventoryValuationPkr: 2250,
-      fifoValuationPkr: 2250,
-      isFifoReconciled: true,
-      activeSkuCount: 1,
-      openSalesOrdersValuePkr: 180000,
-      openSalesOrdersCount: 2,
-      openPurchaseOrdersValuePkr: 95000,
-      openPurchaseOrdersCount: 1,
-      inventoryTurnoverRatio: 6.2,
-      averageBinUtilizationPercentage: 74.2
-    },
-    manufacturing: {
-      totalWorkOrders: 12,
-      completedWorkOrders: 10,
-      workOrderCompletionRatePercentage: 88.5,
-      workInProgressValuationPkr: 75000,
-      totalScrapCostPkr: 4200,
-      scrapRatePercentage: 1.8
-    },
-    workforce: {
-      totalActiveEmployees: 1,
-      monthlyGrossPayrollPkr: 175000,
-      monthlyNetPayrollPkr: 148750,
-      employerStatutoryCostPkr: 14345,
-      averageCostPerEmployeePkr: 175000,
-      overtimeExpenditurePkr: 0
-    },
-    keyPerformanceIndicators: getDefaultKpis()
-  };
-}
-
-function getMockReconciliation(): PlatformReconciliation {
-  return {
-    reconciledAt: new Date().toISOString(),
-    allReconciled: true,
-    glReconciliation: {
-      isBalanced: true,
-      totalDebits: 2250,
-      totalCredits: 2250,
-      discrepancy: 0,
-      totalPostedJournals: 1,
-      totalJournalLines: 2
-    },
-    fifoReconciliation: {
-      isReconciled: true,
-      fifoActiveLayersValuationPkr: 2250,
-      glAccount1200ValuationPkr: 2250,
-      variancePkr: 0,
-      totalActiveLayers: 1,
-      totalActiveQuantity: 50
-    }
-  };
 }
