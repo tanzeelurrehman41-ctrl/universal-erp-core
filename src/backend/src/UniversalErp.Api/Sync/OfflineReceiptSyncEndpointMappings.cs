@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Security.Claims;
 using System.Text;
@@ -58,6 +59,32 @@ public static class OfflineReceiptSyncEndpointMappings
                 : Results.Ok(grant);
         });
 
+        var acknowledgeCursors = sync.MapPost("/cursors:ack", async (
+            OfflineDeviceCursorAcknowledgement acknowledgement,
+            ITenantContextAccessor tenantContextAccessor,
+            IOfflineReceiptSyncRepository repository,
+            CancellationToken cancellationToken) =>
+        {
+            if (acknowledgement.DeviceId == Guid.Empty ||
+                acknowledgement.GrantId == Guid.Empty ||
+                string.IsNullOrWhiteSpace(acknowledgement.GrantToken) ||
+                acknowledgement.GrantToken.Length > 256 ||
+                !IsValidCursor(acknowledgement.ProductsCursor) ||
+                !IsValidCursor(acknowledgement.InventoryCursor) ||
+                acknowledgement.LastAcknowledgedSequence < 0)
+            {
+                return Results.BadRequest(new { code = "INVALID_DEVICE_CURSOR_ACKNOWLEDGEMENT" });
+            }
+
+            var state = await repository.AcknowledgeDeviceCursorsAsync(
+                tenantContextAccessor.Current,
+                acknowledgement,
+                cancellationToken);
+            return state is null
+                ? Results.Json(new { code = "OFFLINE_DEVICE_OR_GRANT_INVALID" }, statusCode: StatusCodes.Status403Forbidden)
+                : Results.Ok(state);
+        });
+
         var postOperations = sync.MapPost("/receipts:batch", async (
             OfflineReceiptBatchRequest batch,
             ITenantContextAccessor tenantContextAccessor,
@@ -109,10 +136,16 @@ public static class OfflineReceiptSyncEndpointMappings
         if (!isDevelopment)
         {
             registerDevice.RequireAuthorization();
+            acknowledgeCursors.RequireAuthorization();
             postOperations.RequireAuthorization("inventory.receipt.post");
         }
         return endpoints;
     }
+
+    private static bool IsValidCursor(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var cursor) &&
+        cursor >= 0;
 
     private static string ComputePayloadHash(OfflineReceiptOperation operation)
     {
