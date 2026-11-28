@@ -683,78 +683,50 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
       {/* ── TAB 4: FIFO INVENTORY VALUATION ────────────────────────────────────── */}
       {activeTab === "inventory" && (
         <div>
-          {/* Model A Reconciliation Card */}
-          <div style={{
-            backgroundColor: "#F0FDF4",
-            border: "1px solid #10B981",
-            borderRadius: "8px",
-            padding: "20px",
-            marginBottom: "20px"
-          }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <h3 style={{ margin: "0 0 6px", color: "#065F46", fontSize: "16px" }}>
-                  ✅ Model A Production FIFO Reconciliation
-                </h3>
-                <p style={{ margin: 0, fontSize: "13px", color: "#047857" }}>
-                  Physical inventory layers in <code>erp_inventory.inventory_cost_layer</code> match General Ledger Account 1200 with zero variance.
-                </p>
-              </div>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: "20px", fontWeight: "bold", color: "#065F46" }}>
-                  PKR {(inventory?.totalFifoLayerValuationPkr || 2250).toLocaleString()}
+          <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px", marginBottom: "20px" }}>
+            <h3 style={{ margin: "0 0 6px", color: "#111827", fontSize: "16px" }}>Inventory Valuation & Ageing</h3>
+            {inventory ? (
+              <>
+                <div style={{ fontSize: "20px", fontWeight: "bold", marginTop: "12px" }}>
+                  PKR {inventory.totalFifoLayerValuationPkr.toLocaleString()}
                 </div>
-                <div style={{ fontSize: "12px", color: "#047857" }}>Variance: PKR 0.00 (100% Reconciled)</div>
-              </div>
-            </div>
+                <div style={{ fontSize: "13px", color: inventory.isReconciled ? "#047857" : "#B91C1C" }}>
+                  {inventory.isReconciled ? "FIFO valuation reconciled" : "Valuation variance detected"}
+                  {" · "}Variance PKR {inventory.valuationVariancePkr.toLocaleString()}
+                </div>
+              </>
+            ) : (
+              <p style={{ color: "#6B7280", marginBottom: 0 }}>Inventory analytics are unavailable. Check access and refresh the report.</p>
+            )}
           </div>
 
-          {/* Ageing & Slow-Moving SKUs */}
           <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
-            <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Active Cost Layers & Stock Valuation</h3>
+            <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Slow-Moving Inventory</h3>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
               <thead>
                 <tr style={{ backgroundColor: "#F9FAFB", borderBottom: "1px solid #E5E7EB", textAlign: "left" }}>
-                  <th style={{ padding: "8px" }}>Layer SKU</th>
-                  <th style={{ padding: "8px" }}>Description</th>
-                  <th style={{ padding: "8px" }}>Quantity On Hand</th>
-                  <th style={{ padding: "8px" }}>Unit Cost</th>
-                  <th style={{ padding: "8px" }}>Total Valuation</th>
+                  <th style={{ padding: "8px" }}>SKU</th>
+                  <th style={{ padding: "8px" }}>Product</th>
+                  <th style={{ padding: "8px" }}>Quantity</th>
+                  <th style={{ padding: "8px" }}>Valuation</th>
+                  <th style={{ padding: "8px" }}>Days Since Movement</th>
                   <th style={{ padding: "8px" }}>Status</th>
                 </tr>
               </thead>
               <tbody>
-                <tr style={{ borderBottom: "1px solid #F3F4F6" }}>
-                  <td style={{ padding: "8px" }}><code>GRN-2024-01</code> (PICK-01)</td>
-                  <td style={{ padding: "8px" }}>Purchasing Receipt Layer 1</td>
-                  <td style={{ padding: "8px", fontWeight: "600" }}>18 EA</td>
-                  <td style={{ padding: "8px" }}>PKR 45.00</td>
-                  <td style={{ padding: "8px", fontWeight: "600", color: "#059669" }}>PKR 810.00</td>
-                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>AVAILABLE</span></td>
-                </tr>
-                <tr style={{ borderBottom: "1px solid #F3F4F6" }}>
-                  <td style={{ padding: "8px" }}><code>GRN-2024-03</code> (RECEIVE-01)</td>
-                  <td style={{ padding: "8px" }}>Purchasing Receipt Layer 2</td>
-                  <td style={{ padding: "8px", fontWeight: "600" }}>29 EA</td>
-                  <td style={{ padding: "8px" }}>PKR 45.00</td>
-                  <td style={{ padding: "8px", fontWeight: "600", color: "#059669" }}>PKR 1,305.00</td>
-                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>AVAILABLE</span></td>
-                </tr>
-                <tr style={{ borderBottom: "1px solid #F3F4F6" }}>
-                  <td style={{ padding: "8px" }}><code>PROP-CAP-001</code> (PICK-01)</td>
-                  <td style={{ padding: "8px" }}>Opening Equity Capitalization</td>
-                  <td style={{ padding: "8px", fontWeight: "600" }}>3 EA</td>
-                  <td style={{ padding: "8px" }}>PKR 45.00</td>
-                  <td style={{ padding: "8px", fontWeight: "600", color: "#059669" }}>PKR 135.00</td>
-                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>AVAILABLE</span></td>
-                </tr>
-                <tr style={{ backgroundColor: "#F9FAFB", fontWeight: "bold" }}>
-                  <td style={{ padding: "8px" }} colSpan={2}>Canonical Model A Total Physical Valuation</td>
-                  <td style={{ padding: "8px" }}>50 EA</td>
-                  <td style={{ padding: "8px" }}>PKR 45.00</td>
-                  <td style={{ padding: "8px", color: "#059669" }}>PKR 2,250.00</td>
-                  <td style={{ padding: "8px" }}><span style={{ backgroundColor: "#D1FAE5", color: "#065F46", padding: "2px 8px", borderRadius: "10px", fontSize: "11px" }}>RECONCILED</span></td>
-                </tr>
+                {(inventory?.slowMovingItems ?? []).map(item => (
+                  <tr key={item.variantId} style={{ borderBottom: "1px solid #F3F4F6" }}>
+                    <td style={{ padding: "8px" }}><code>{item.sku}</code></td>
+                    <td style={{ padding: "8px" }}>{item.productName}</td>
+                    <td style={{ padding: "8px" }}>{item.quantityOnHand.toLocaleString()}</td>
+                    <td style={{ padding: "8px" }}>PKR {item.totalValuationPkr.toLocaleString()}</td>
+                    <td style={{ padding: "8px" }}>{item.daysSinceLastMovement}</td>
+                    <td style={{ padding: "8px" }}>{item.status}</td>
+                  </tr>
+                ))}
+                {(!inventory || inventory.slowMovingItems.length === 0) && (
+                  <tr><td colSpan={6} style={{ padding: "16px", color: "#6B7280" }}>No slow-moving inventory rows were returned.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
