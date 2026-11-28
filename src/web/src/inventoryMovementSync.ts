@@ -49,12 +49,13 @@ function applyDelta(
   binId: string,
   unitOfMeasureId: string,
   delta: number,
+  stockStatus = "available",
 ): void {
   const existing = balances.find((balance) =>
     balance.variantId === variantId &&
     balance.warehouseId === warehouseId &&
     balance.binId === binId &&
-    balance.stockStatus === "available",
+    balance.stockStatus === stockStatus,
   );
 
   if (existing) {
@@ -68,7 +69,7 @@ function applyDelta(
     variantId,
     warehouseId,
     binId,
-    stockStatus: "available",
+    stockStatus,
     onHandQuantity: delta,
     unitOfMeasureId,
   });
@@ -92,6 +93,24 @@ export function applyInventoryMovementChanges(
     const payload = change.payload;
     const variantId = requiredId(payload, "variantId", "VariantId");
     const unitOfMeasureId = requiredId(payload, "unitOfMeasureId", "UnitOfMeasureId");
+
+    const legs = payload.legs;
+    if (Array.isArray(legs)) {
+      for (const item of legs) {
+        if (!isRecord(item)) throw new Error("Inventory movement contains an invalid leg.");
+        const legVariantId = requiredId(item, "variantId", "VariantId");
+        const warehouseId = requiredId(item, "warehouseId", "WarehouseId");
+        const binId = requiredId(item, "binId", "BinId");
+        const legUomId = requiredId(item, "unitOfMeasureId", "UnitOfMeasureId");
+        const delta = requiredNumber(item, "quantityDelta", "QuantityDelta");
+        const stockStatusValue = readField(item, "stockStatus", "StockStatus");
+        const stockStatus = typeof stockStatusValue === "string" && stockStatusValue.length > 0
+          ? stockStatusValue
+          : "available";
+        applyDelta(next, legVariantId, warehouseId, binId, legUomId, delta, stockStatus);
+      }
+      continue;
+    }
 
     const sourceWarehouse = readField(payload, "sourceWarehouseId", "SourceWarehouseId");
     const destinationWarehouse = readField(payload, "destinationWarehouseId", "DestinationWarehouseId");
