@@ -782,118 +782,99 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
       {/* ── TAB 6: WORKFORCE & PAYROLL ─────────────────────────────────────────── */}
       {activeTab === "workforce" && (
         <div>
-          {/* Salary confidentiality warning if masked */}
           {!canViewConfidentialSalary && (
-            <div style={{
-              backgroundColor: "#FFFBEB",
-              border: "1px solid #F59E0B",
-              padding: "12px 16px",
-              borderRadius: "8px",
-              marginBottom: "16px",
-              fontSize: "13px",
-              color: "#92400E"
-            }}>
-              🔒 <strong>Field-Level Confidentiality Active:</strong> Individual employee gross/net salaries and bank details are obscured. Check the box above if you hold <code>payroll.salary.view</code> authorization.
+            <div style={{ backgroundColor: "#FFFBEB", border: "1px solid #F59E0B", padding: "12px 16px", borderRadius: "8px", marginBottom: "16px", fontSize: "13px", color: "#92400E" }}>
+              🔒 Salary fields are masked unless the signed-in user has <code>payroll.salary.view</code>. The server remains authoritative for this permission.
             </div>
           )}
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
-            <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
-              <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Payroll Summary & Statutory Burden</h3>
-              <div style={{ fontSize: "13px", color: "#374151", lineHeight: "2" }}>
-                <div>• Total Active Headcount: <strong>{workforce?.totalActiveHeadcount || 1} employees</strong></div>
-                <div>• Monthly Gross Payroll: <strong>{maskSalary(workforce?.monthlyGrossPayrollPkr || 175000, canViewConfidentialSalary)}</strong></div>
-                <div>• Monthly Net Payable: <strong>{maskSalary(workforce?.monthlyNetPayrollPkr || 148750, canViewConfidentialSalary)}</strong></div>
-                <div>• Employer EOBI Contribution (5%): <strong>{canViewConfidentialSalary ? 'PKR 1,850' : '••••••••'}</strong></div>
-                <div>• Employer PF Match (8.33%): <strong>{canViewConfidentialSalary ? 'PKR 12,495' : '••••••••'}</strong></div>
-                <div>• Total Overtime Expenditure: <strong>{canViewConfidentialSalary ? 'PKR 0.00' : '••••••••'}</strong></div>
+          {workforce ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+              <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
+                <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Workforce & Payroll Summary</h3>
+                <div style={{ fontSize: "13px", color: "#374151", lineHeight: "2" }}>
+                  <div>• Active Headcount: <strong>{workforce.totalActiveHeadcount}</strong></div>
+                  <div>• Monthly Gross Payroll: <strong>{maskSalary(workforce.monthlyGrossPayrollPkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Monthly Net Payable: <strong>{maskSalary(workforce.monthlyNetPayrollPkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Employer EOBI Cost: <strong>{maskSalary(workforce.eobiEmployerCostPkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Employer PF Cost: <strong>{maskSalary(workforce.pfEmployerCostPkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Total Employer Statutory Cost: <strong>{maskSalary(workforce.totalEmployerStatutoryCostPkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Overtime Expenditure: <strong>{maskSalary(workforce.totalOvertimeExpenditurePkr, canViewConfidentialSalary)}</strong></div>
+                  <div>• Staff Loans Outstanding: <strong>{maskSalary(workforce.totalStaffLoansOutstandingPkr, canViewConfidentialSalary)}</strong></div>
+                </div>
+              </div>
+              <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
+                <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Departmental Headcount & Cost</h3>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                  <thead>
+                    <tr style={{ backgroundColor: "#F9FAFB", borderBottom: "1px solid #E5E7EB", textAlign: "left" }}>
+                      <th style={{ padding: "8px" }}>Department</th>
+                      <th style={{ padding: "8px" }}>Headcount</th>
+                      <th style={{ padding: "8px" }}>Cost</th>
+                      <th style={{ padding: "8px" }}>Share %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {workforce.departmentBreakdown.map(d => (
+                      <tr key={d.departmentCode} style={{ borderBottom: "1px solid #F3F4F6" }}>
+                        <td style={{ padding: "8px", fontWeight: "600" }}>{d.departmentName} ({d.departmentCode})</td>
+                        <td style={{ padding: "8px" }}>{d.headcount}</td>
+                        <td style={{ padding: "8px", fontWeight: "600" }}>{maskSalary(d.totalSalaryCostPkr, canViewConfidentialSalary)}</td>
+                        <td style={{ padding: "8px", color: "#2563EB", fontWeight: "600" }}>{d.costPercentage}%</td>
+                      </tr>
+                    ))}
+                    {workforce.departmentBreakdown.length === 0 && (
+                      <tr><td colSpan={4} style={{ padding: "16px", color: "#6B7280" }}>No departmental workforce results were returned.</td></tr>
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
-
-            <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
-              <h3 style={{ margin: "0 0 16px", fontSize: "16px", color: "#111827" }}>Departmental Headcount & Cost</h3>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-                <thead>
-                  <tr style={{ backgroundColor: "#F9FAFB", borderBottom: "1px solid #E5E7EB", textAlign: "left" }}>
-                    <th style={{ padding: "8px" }}>Department</th>
-                    <th style={{ padding: "8px" }}>Headcount</th>
-                    <th style={{ padding: "8px" }}>Cost (PKR)</th>
-                    <th style={{ padding: "8px" }}>Share %</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(workforce?.departmentBreakdown || [
-                    { departmentCode: "ENG", departmentName: "Engineering", headcount: 1, totalSalaryCostPkr: 175000, costPercentage: 100 }
-                  ]).map(d => (
-                    <tr key={d.departmentCode} style={{ borderBottom: "1px solid #F3F4F6" }}>
-                      <td style={{ padding: "8px", fontWeight: "600" }}>{d.departmentName} ({d.departmentCode})</td>
-                      <td style={{ padding: "8px" }}>{d.headcount}</td>
-                      <td style={{ padding: "8px", fontWeight: "600" }}>{maskSalary(d.totalSalaryCostPkr, canViewConfidentialSalary)}</td>
-                      <td style={{ padding: "8px", color: "#2563EB", fontWeight: "600" }}>{d.costPercentage}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          ) : (
+            <p style={{ color: "#6B7280" }}>Workforce analytics are unavailable. Check access and refresh the report.</p>
+          )}
         </div>
       )}
 
       {/* ── TAB 7: GL & FIFO AUDIT HEALTH ─────────────────────────────────────── */}
       {activeTab === "reconciliation" && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
-          {/* General Ledger Balanced Double-Entry Check */}
-          <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
-            <h3 style={{ margin: "0 0 12px", fontSize: "16px", color: "#111827" }}>
-              1. General Ledger Double-Entry Audit
-            </h3>
-            <div style={{
-              backgroundColor: reconciliation?.glReconciliation.isBalanced ? "#F0FDF4" : "#FEF2F2",
-              padding: "12px",
-              borderRadius: "6px",
-              border: `1px solid ${reconciliation?.glReconciliation.isBalanced ? "#10B981" : "#EF4444"}`,
-              marginBottom: "16px"
-            }}>
-              <div style={{ fontWeight: "bold", color: reconciliation?.glReconciliation.isBalanced ? "#065F46" : "#991B1B" }}>
-                Status: {reconciliation?.glReconciliation.isBalanced ? "BALANCED (Σ Debits ≡ Σ Credits)" : "UNBALANCED"}
+        reconciliation ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+            <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
+              <h3 style={{ margin: "0 0 12px", fontSize: "16px", color: "#111827" }}>General Ledger Double-Entry Audit</h3>
+              <div style={{ backgroundColor: reconciliation.glReconciliation.isBalanced ? "#F0FDF4" : "#FEF2F2", padding: "12px", borderRadius: "6px", border: `1px solid ${reconciliation.glReconciliation.isBalanced ? "#10B981" : "#EF4444"}`, marginBottom: "16px" }}>
+                <div style={{ fontWeight: "bold", color: reconciliation.glReconciliation.isBalanced ? "#065F46" : "#991B1B" }}>
+                  Status: {reconciliation.glReconciliation.isBalanced ? "BALANCED (Σ Debits ≡ Σ Credits)" : "UNBALANCED"}
+                </div>
+                <div style={{ fontSize: "12px", color: "#4B5563", marginTop: "4px" }}>
+                  Total Debits: <strong>PKR {reconciliation.glReconciliation.totalDebits.toLocaleString()}</strong> | Credits: <strong>PKR {reconciliation.glReconciliation.totalCredits.toLocaleString()}</strong>
+                </div>
               </div>
-              <div style={{ fontSize: "12px", color: "#4B5563", marginTop: "4px" }}>
-                Total Debits: <strong>PKR {(reconciliation?.glReconciliation.totalDebits || 2250).toLocaleString()}</strong> | Credits: <strong>PKR {(reconciliation?.glReconciliation.totalCredits || 2250).toLocaleString()}</strong>
+              <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
+                <div>• Posted Journals: <strong>{reconciliation.glReconciliation.totalPostedJournals}</strong></div>
+                <div>• Journal Lines: <strong>{reconciliation.glReconciliation.totalJournalLines}</strong></div>
+                <div>• Discrepancy: <strong>PKR {reconciliation.glReconciliation.discrepancy.toLocaleString()}</strong></div>
               </div>
             </div>
-            <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• Total Posted Journals: <strong>{reconciliation?.glReconciliation.totalPostedJournals || 1}</strong></div>
-              <div>• Total Journal Lines: <strong>{reconciliation?.glReconciliation.totalJournalLines || 2}</strong></div>
-              <div>• Discrepancy Amount: <strong>PKR {(reconciliation?.glReconciliation.discrepancy || 0).toLocaleString()}</strong></div>
+            <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
+              <h3 style={{ margin: "0 0 12px", fontSize: "16px", color: "#111827" }}>FIFO Cost Layer Valuation Check</h3>
+              <div style={{ backgroundColor: reconciliation.fifoReconciliation.isReconciled ? "#F0FDF4" : "#FEF2F2", padding: "12px", borderRadius: "6px", border: `1px solid ${reconciliation.fifoReconciliation.isReconciled ? "#10B981" : "#EF4444"}`, marginBottom: "16px" }}>
+                <div style={{ fontWeight: "bold", color: reconciliation.fifoReconciliation.isReconciled ? "#065F46" : "#991B1B" }}>
+                  Status: {reconciliation.fifoReconciliation.isReconciled ? "RECONCILED" : "VARIANCE DETECTED"}
+                </div>
+                <div style={{ fontSize: "12px", color: "#4B5563", marginTop: "4px" }}>
+                  FIFO Layers: <strong>PKR {reconciliation.fifoReconciliation.fifoActiveLayersValuationPkr.toLocaleString()}</strong> | GL 1200: <strong>PKR {reconciliation.fifoReconciliation.glAccount1200ValuationPkr.toLocaleString()}</strong>
+                </div>
+              </div>
+              <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
+                <div>• Active FIFO Layers: <strong>{reconciliation.fifoReconciliation.totalActiveLayers}</strong></div>
+                <div>• Total Valued Quantity: <strong>{reconciliation.fifoReconciliation.totalActiveQuantity}</strong></div>
+                <div>• Variance: <strong>PKR {reconciliation.fifoReconciliation.variancePkr.toLocaleString()}</strong></div>
+              </div>
             </div>
           </div>
-
-          {/* Model A FIFO Layer Valuation vs GL Account 1200 */}
-          <div style={{ backgroundColor: "#FFF", border: "1px solid #E5E7EB", borderRadius: "8px", padding: "20px" }}>
-            <h3 style={{ margin: "0 0 12px", fontSize: "16px", color: "#111827" }}>
-              2. Model A FIFO Cost Layer Valuation Check
-            </h3>
-            <div style={{
-              backgroundColor: reconciliation?.fifoReconciliation.isReconciled ? "#F0FDF4" : "#FEF2F2",
-              padding: "12px",
-              borderRadius: "6px",
-              border: `1px solid ${reconciliation?.fifoReconciliation.isReconciled ? "#10B981" : "#EF4444"}`,
-              marginBottom: "16px"
-            }}>
-              <div style={{ fontWeight: "bold", color: reconciliation?.fifoReconciliation.isReconciled ? "#065F46" : "#991B1B" }}>
-                Status: {reconciliation?.fifoReconciliation.isReconciled ? "RECONCILED (Zero Variance)" : "VARIANCE DETECTED"}
-              </div>
-              <div style={{ fontSize: "12px", color: "#4B5563", marginTop: "4px" }}>
-                FIFO Active Layers: <strong>PKR {(reconciliation?.fifoReconciliation.fifoActiveLayersValuationPkr || 2250).toLocaleString()}</strong> | GL 1200: <strong>PKR {(reconciliation?.fifoReconciliation.glAccount1200ValuationPkr || 2250).toLocaleString()}</strong>
-              </div>
-            </div>
-            <div style={{ fontSize: "13px", color: "#4B5563", lineHeight: "1.8" }}>
-              <div>• Active FIFO Layers: <strong>{reconciliation?.fifoReconciliation.totalActiveLayers || 1}</strong></div>
-              <div>• Total Valued Quantity: <strong>{reconciliation?.fifoReconciliation.totalActiveQuantity || 50} EA</strong></div>
-              <div>• Final Variance: <strong>PKR 0.00</strong></div>
-            </div>
-          </div>
-        </div>
+        ) : (
+          <p style={{ color: "#6B7280" }}>Reconciliation analytics are unavailable. Check access and refresh the report.</p>
+        )
       )}
 
       {/* ── TAB 8: EXPORT DATA CENTER ─────────────────────────────────────────── */}
@@ -903,7 +884,7 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
             Analytical Data Export & Reporting Center
           </h3>
           <p style={{ margin: "0 0 20px", fontSize: "13px", color: "#6B7280" }}>
-            Download authoritative CSV datasets for executive presentation, FBR tax reporting, and operational auditing.
+            Download the analytical datasets available to your signed-in role. Tax and statutory filings require separate qualified review.
           </p>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px" }}>
