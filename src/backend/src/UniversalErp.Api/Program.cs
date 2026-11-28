@@ -502,8 +502,6 @@ app.MapGet("/api/modules", () => Results.Ok(moduleCatalog));
 app.MapSyncChangeEndpoints(effectiveDevMode);
 app.MapOfflineReceiptSyncEndpoints(effectiveDevMode);
 app.MapProductSyncBatchEndpoints(effectiveDevMode);
-
-app.MapProductSyncBatchEndpoints(effectiveDevMode);
 var productApi = app.MapGroup("/api/v1");
 if (!effectiveDevMode)
 {
