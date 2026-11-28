@@ -167,6 +167,120 @@ public sealed class PostgresOfflineReceiptSyncRepository(NpgsqlDataSource dataSo
         return isAuthorized;
     }
 
+    public async Task<OfflineDeviceCursorState?> AcknowledgeDeviceCursorsAsync(
+        TenantContext context,
+        OfflineDeviceCursorAcknowledgement acknowledgement,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await OpenScopeAsync(context.TenantId, context.CompanyId, cancellationToken);
+        if (!await ValidateAuthorizationAsync(
+            db, context, acknowledgement.DeviceId, acknowledgement.GrantId,
+            acknowledgement.GrantToken, "sync.cursor.ack", cancellationToken))
+        {
+            await db.Transaction.CommitAsync(cancellationToken);
+            return null;
+        }
+
+        await using (var cursorLock = new NpgsqlCommand(
+            "SELECT pg_advisory_xact_lock(hashtext('device_cursor:' || @tenantId::text || ':' || @companyId::text || ':' || @deviceId::text))",
+            db.Connection,
+            db.Transaction))
+        {
+            cursorLock.Parameters.AddWithValue("tenantId", context.TenantId);
+            cursorLock.Parameters.AddWithValue("companyId", context.CompanyId);
+            cursorLock.Parameters.AddWithValue("deviceId", acknowledgement.DeviceId);
+            await cursorLock.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var productsCursor = 0L;
+        var inventoryCursor = 0L;
+        var lastAcknowledgedSequence = 0L;
+        await using (var read = new NpgsqlCommand(
+            """
+            SELECT download_cursor, last_acknowledged_sequence
+            FROM sync.device_cursors
+            WHERE tenant_id = @tenantId AND company_id = @companyId AND device_id = @deviceId
+            FOR UPDATE
+            """,
+            db.Connection,
+            db.Transaction))
+        {
+            read.Parameters.AddWithValue("tenantId", context.TenantId);
+            read.Parameters.AddWithValue("companyId", context.CompanyId);
+            read.Parameters.AddWithValue("deviceId", acknowledgement.DeviceId);
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(0))
+                {
+                    using var stored = JsonDocument.Parse(reader.GetString(0));
+                    var root = stored.RootElement;
+                    productsCursor = ReadCursorValue(root, "products");
+                    inventoryCursor = ReadCursorValue(root, "inventory");
+                }
+                lastAcknowledgedSequence = reader.GetInt64(1);
+            }
+            await reader.CloseAsync();
+        }
+
+        // Server checkpoints are monotonic. A stale or replayed client acknowledgement
+        // can never move either download cursor or the operation acknowledgement backwards.
+        productsCursor = Math.Max(productsCursor, long.Parse(
+            acknowledgement.ProductsCursor, System.Globalization.CultureInfo.InvariantCulture));
+        inventoryCursor = Math.Max(inventoryCursor, long.Parse(
+            acknowledgement.InventoryCursor, System.Globalization.CultureInfo.InvariantCulture));
+        lastAcknowledgedSequence = Math.Max(
+            lastAcknowledgedSequence, acknowledgement.LastAcknowledgedSequence);
+
+        var downloadCursor = JsonSerializer.Serialize(new
+        {
+            products = productsCursor.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            inventory = inventoryCursor.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        }, JsonOptions);
+        await using (var upsert = new NpgsqlCommand(
+            """
+            INSERT INTO sync.device_cursors
+                (tenant_id, company_id, device_id, download_cursor, last_acknowledged_sequence, updated_at)
+            VALUES
+                (@tenantId, @companyId, @deviceId, @downloadCursor, @lastAcknowledgedSequence, now())
+            ON CONFLICT (tenant_id, company_id, device_id) DO UPDATE
+            SET download_cursor = EXCLUDED.download_cursor,
+                last_acknowledged_sequence = EXCLUDED.last_acknowledged_sequence,
+                updated_at = now()
+            """,
+            db.Connection,
+            db.Transaction))
+        {
+            upsert.Parameters.AddWithValue("tenantId", context.TenantId);
+            upsert.Parameters.AddWithValue("companyId", context.CompanyId);
+            upsert.Parameters.AddWithValue("deviceId", acknowledgement.DeviceId);
+            upsert.Parameters.AddWithValue("downloadCursor", downloadCursor);
+            upsert.Parameters.AddWithValue("lastAcknowledgedSequence", lastAcknowledgedSequence);
+            await upsert.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await db.Transaction.CommitAsync(cancellationToken);
+        return new OfflineDeviceCursorState(
+            productsCursor.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            inventoryCursor.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            lastAcknowledgedSequence);
+    }
+
+    private static long ReadCursorValue(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value)) return 0;
+        var text = value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.GetRawText(),
+            _ => null,
+        };
+        return long.TryParse(text, System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out var parsed) && parsed >= 0
+            ? parsed
+            : 0;
+    }
+
     public async Task<OfflineInboxReservation> ReserveReceiptOperationAsync(
         TenantContext context,
         OfflineReceiptBatchRequest batch,
@@ -668,7 +782,13 @@ public sealed class PostgresOfflineReceiptSyncRepository(NpgsqlDataSource dataSo
                   AND offline_grant.revoked_at IS NULL
                   AND offline_grant.expires_at > now()
                   AND offline_grant.grant_signature = @grantHash
-                  AND offline_grant.allowed_operations ? @requiredOperation
+                  AND (
+                    offline_grant.allowed_operations ? @requiredOperation
+                    OR (@requiredOperation = 'sync.cursor.ack' AND (
+                        offline_grant.allowed_operations ? 'inventory.product.create'
+                        OR offline_grant.allowed_operations ? 'inventory.receipt.post'
+                    ))
+                  )
                 FOR SHARE OF device, company_scope, membership, offline_grant
             )
             """,
