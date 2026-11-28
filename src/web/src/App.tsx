@@ -38,6 +38,11 @@ import {
   type ProductSummary,
   type SyncAuthorization,
 } from "./offlineProductQueue";
+import {
+  loadInventoryChangeCursors,
+  loadInventorySnapshot,
+  saveInventorySnapshotAndCursors,
+} from "./offlineReceiptQueue";
 
 type ApiStatus = "checking" | "online" | "offline";
 type ModuleSummary = {
@@ -49,6 +54,45 @@ type ModuleSummary = {
 
 function workspaceKey(workspace: TenantCompanyContext): string {
   return `${workspace.tenantId}:${workspace.companyId}`;
+}
+
+type ProductFeedPage = {
+  nextCursor: string;
+  hasMore: boolean;
+  changes: Array<{
+    cursor: string;
+    entityType: string;
+    entityId: string;
+    entityVersion: number;
+    changeType: string;
+    payload: Record<string, unknown>;
+    occurredAt: string;
+  }>;
+};
+
+function productFromChange(payload: Record<string, unknown>): ProductSummary | null {
+  if (
+    typeof payload.tenantId !== "string" ||
+    typeof payload.productId !== "string" ||
+    typeof payload.productCode !== "string" ||
+    typeof payload.name !== "string" ||
+    typeof payload.productType !== "string" ||
+    typeof payload.isActive !== "boolean" ||
+    typeof payload.createdAt !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    tenantId: payload.tenantId,
+    productId: payload.productId,
+    productCode: payload.productCode,
+    name: payload.name,
+    description: typeof payload.description === "string" ? payload.description : null,
+    productType: payload.productType,
+    isActive: payload.isActive,
+    createdAt: payload.createdAt,
+  };
 }
 
 function ownerKeyForUser(user: ErpAuthUser | null): string | undefined {
@@ -260,25 +304,70 @@ export default function App() {
 
     let isMounted = true;
     let isRefreshing = false;
-    const loadProducts = async () => {
-      try {
-        const response = await apiFetch("/api/v1/products", {}, activeWorkspace);
+    const storageScope = activeWorkspace
+      ? workspaceKey(activeWorkspace) + ":" + (queueOwnerKey ?? "shared") + ":product-catalog"
+      : "development:product-catalog";
+
+    const loadOrRecoverProductSnapshot = async (): Promise<ProductSummary[]> => {
+      const cached = await loadInventorySnapshot<{ products: ProductSummary[] }>(storageScope);
+      if (cached && Array.isArray(cached.products)) return cached.products;
+
+      // If a snapshot was evicted but the cursor survived, keep the cursor and replay newer events.
+      const response = await apiFetch("/api/v1/products", {}, activeWorkspace);
+      if (!response.ok) {
+        throw new Error(response.status === 404 ? "development-only" : "load-failed");
+      }
+      const productData = await response.json() as ProductSummary[];
+      const cursors = await loadInventoryChangeCursors(storageScope);
+      await saveInventorySnapshotAndCursors(storageScope, { products: productData }, cursors);
+      return productData;
+    };
+
+    const synchronizeProductChanges = async (): Promise<void> => {
+      const cursors = await loadInventoryChangeCursors(storageScope);
+      let products = await loadOrRecoverProductSnapshot();
+      let cursor = cursors.products;
+
+      while (true) {
+        const query = new URLSearchParams({ after: cursor, limit: "200" });
+        const response = await apiFetch("/api/v1/sync/changes/products?" + query.toString(), {}, activeWorkspace);
         if (!response.ok) {
-          throw new Error(response.status === 404 ? "development-only" : "load-failed");
+          throw new Error(response.status === 403 ? "product-feed-forbidden" : "product-feed-" + response.status);
         }
-        const productData = (await response.json()) as ProductSummary[];
-        if (isMounted) {
-          setProducts(productData);
-          setCatalogMessage((current) => current === "Could not load products. Check the API connection and try again." ? "" : current);
+
+        const page = await response.json() as ProductFeedPage;
+        if (!Array.isArray(page.changes) || typeof page.nextCursor !== "string") {
+          throw new Error("The product change feed returned an invalid page.");
         }
-      } catch (error) {
-        if (isMounted) {
-          setCatalogMessage(
-            error instanceof Error && error.message === "development-only"
-              ? "The local catalog is available when the API runs in Development mode."
-              : "Could not load products. Check the API connection and try again.",
-          );
+
+        const byId = new Map(products.map((product) => [product.productId, product]));
+        for (const change of page.changes) {
+          if (change.entityType !== "product") continue;
+          if (change.changeType === "upsert") {
+            const product = productFromChange(change.payload);
+            if (product) byId.set(product.productId, product);
+          } else if (change.changeType === "delete") {
+            byId.delete(change.entityId);
+          }
         }
+
+        products = [...byId.values()];
+        const previousCursor = cursor;
+        cursor = page.nextCursor;
+        await saveInventorySnapshotAndCursors(storageScope, { products }, {
+          products: cursor,
+          inventory: cursors.inventory,
+        });
+        if (isMounted) setProducts(products);
+
+        if (!page.hasMore) break;
+        if (cursor === previousCursor && page.changes.length === 0) {
+          throw new Error("The product change feed did not advance its cursor.");
+        }
+      }
+
+      if (isMounted) {
+        setCatalogMessage((current) => current === "Could not load products. Check the API connection and try again." ? "" : current);
       }
     };
 
@@ -298,6 +387,7 @@ export default function App() {
             ownerKey: queueOwnerKey,
           };
         }
+
         const operations = await syncPendingProductOperations(authorization);
         if (!isMounted) return;
         setOfflineOperations(operations);
@@ -311,15 +401,24 @@ export default function App() {
             )),
           )
           .map((operation) => operation.serverProduct!);
-        setProducts((current) => {
-          const byId = new Map(current.map((product) => [product.productId, product]));
+
+        if (locallyConfirmed.length > 0) {
+          const cached = await loadInventorySnapshot<{ products: ProductSummary[] }>(storageScope);
+          const byId = new Map((cached?.products ?? []).map((product) => [product.productId, product]));
           for (const product of locallyConfirmed) byId.set(product.productId, product);
-          return [...byId.values()];
-        });
-        await loadProducts();
-      } catch {
+          const cursors = await loadInventoryChangeCursors(storageScope);
+          await saveInventorySnapshotAndCursors(storageScope, { products: [...byId.values()] }, cursors);
+          if (isMounted) setProducts([...byId.values()]);
+        }
+
+        await synchronizeProductChanges();
+      } catch (error) {
         if (isMounted) {
-          setCatalogMessage("Sync could not finish. Saved actions remain in this browser's queue.");
+          setCatalogMessage(error instanceof Error && error.message === "development-only"
+            ? "The local catalog is available when the API runs in Development mode."
+            : error instanceof Error && error.message === "product-feed-forbidden"
+              ? "Your role cannot view the shared product catalog."
+              : "Sync could not finish. Saved actions remain in the local queue.");
         }
       } finally {
         isRefreshing = false;
