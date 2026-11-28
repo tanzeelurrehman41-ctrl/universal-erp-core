@@ -1475,6 +1475,7 @@ public sealed partial class PostgresPurchasingRepository
         var clientTxId = Guid.NewGuid();
         var occurredAt = DateTimeOffset.UtcNow;
         var feedLegs = new List<object>();
+        int legNumber = 1;
 
         // Record inventory issue movement
         await using (var movCmd = conn.CreateCommand())
@@ -1503,43 +1504,40 @@ public sealed partial class PostgresPurchasingRepository
         {
             var l = ret.Lines[i];
 
-            // Verify stock balance
-            await using var chkCmd = conn.CreateCommand();
-            chkCmd.CommandText = """
-                SELECT on_hand_qty FROM erp_inventory.stock_balance
-                WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
-                  AND warehouse_id = @wh AND bin_id = @bin AND status_code = @status
-                FOR UPDATE;
-                """;
-            chkCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-            chkCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-            chkCmd.Parameters.AddWithValue("var", l.VariantId);
-            chkCmd.Parameters.AddWithValue("wh", l.WarehouseId);
-            chkCmd.Parameters.AddWithValue("bin", l.BinId);
-            chkCmd.Parameters.AddWithValue("status", l.FromStockStatus);
+            // Lock all lot-split balance rows and allocate this return across them exactly once.
+            var sourceRows = new List<(Guid BalanceId, Guid? LotId, decimal OnHand)>();
+            await using (var chkCmd = conn.CreateCommand())
+            {
+                chkCmd.CommandText = """
+                    SELECT balance_id, lot_id, on_hand_qty
+                    FROM erp_inventory.stock_balance
+                    WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
+                      AND warehouse_id = @wh AND bin_id = @bin AND status_code = @status
+                    ORDER BY lot_id NULLS FIRST, balance_id
+                    FOR UPDATE;
+                    """;
+                chkCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
+                chkCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                chkCmd.Parameters.AddWithValue("var", l.VariantId);
+                chkCmd.Parameters.AddWithValue("wh", l.WarehouseId);
+                chkCmd.Parameters.AddWithValue("bin", l.BinId);
+                chkCmd.Parameters.AddWithValue("status", l.FromStockStatus);
+                await using var reader = await chkCmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    sourceRows.Add((
+                        reader.GetGuid(0),
+                        reader.IsDBNull(1) ? null : reader.GetGuid(1),
+                        reader.GetDecimal(2)));
+                }
+                await reader.CloseAsync();
+            }
 
-            var onHand = (decimal)(await chkCmd.ExecuteScalarAsync(ct) ?? 0m);
+            var onHand = sourceRows.Sum(row => row.OnHand);
             if (onHand < l.ReturnQty)
             {
                 throw new InvalidOperationException($"INSUFFICIENT_STOCK_FOR_RETURN: Available {onHand}, requested return {l.ReturnQty}");
             }
-
-            // Deduct balance
-            await using var decCmd = conn.CreateCommand();
-            decCmd.CommandText = """
-                UPDATE erp_inventory.stock_balance
-                SET on_hand_qty = on_hand_qty - @qty, updated_at = now()
-                WHERE tenant_id = @tid AND company_id = @cid AND variant_id = @var
-                  AND warehouse_id = @wh AND bin_id = @bin AND status_code = @status;
-                """;
-            decCmd.Parameters.AddWithValue("tid", Ctx.TenantId);
-            decCmd.Parameters.AddWithValue("cid", Ctx.CompanyId);
-            decCmd.Parameters.AddWithValue("var", l.VariantId);
-            decCmd.Parameters.AddWithValue("wh", l.WarehouseId);
-            decCmd.Parameters.AddWithValue("bin", l.BinId);
-            decCmd.Parameters.AddWithValue("status", l.FromStockStatus);
-            decCmd.Parameters.AddWithValue("qty", l.ReturnQty);
-            await decCmd.ExecuteNonQueryAsync(ct);
 
             Guid baseUomId;
             await using (var getUom = conn.CreateCommand())
@@ -1551,37 +1549,64 @@ public sealed partial class PostgresPurchasingRepository
                     ?? throw new InvalidOperationException("PRODUCT_VARIANT_NOT_FOUND"));
             }
 
-            await using (var leg = conn.CreateCommand())
+            decimal remainingFromBalances = l.ReturnQty;
+            foreach (var row in sourceRows)
             {
-                leg.CommandText = """
-                    INSERT INTO erp_inventory.inventory_movement_leg
-                        (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
-                         bin_id, status_code, quantity_delta, base_uom_id)
-                    VALUES
-                        (@tid, @cid, @mid, @ln, @var, @wh, @bin, @status, @delta, @uom);
-                    """;
-                leg.Parameters.AddWithValue("tid", Ctx.TenantId);
-                leg.Parameters.AddWithValue("cid", Ctx.CompanyId);
-                leg.Parameters.AddWithValue("mid", movementId);
-                leg.Parameters.AddWithValue("ln", i + 1);
-                leg.Parameters.AddWithValue("var", l.VariantId);
-                leg.Parameters.AddWithValue("wh", l.WarehouseId);
-                leg.Parameters.AddWithValue("bin", l.BinId);
-                leg.Parameters.AddWithValue("status", l.FromStockStatus);
-                leg.Parameters.AddWithValue("delta", -l.ReturnQty);
-                leg.Parameters.AddWithValue("uom", baseUomId);
-                await leg.ExecuteNonQueryAsync(ct);
-            }
+                if (remainingFromBalances <= 0m) break;
+                var take = Math.Min(row.OnHand, remainingFromBalances);
+                if (take <= 0m) continue;
 
-            feedLegs.Add(new
-            {
-                variantId = l.VariantId,
-                warehouseId = l.WarehouseId,
-                binId = l.BinId,
-                stockStatus = l.FromStockStatus,
-                quantityDelta = -l.ReturnQty,
-                unitOfMeasureId = baseUomId,
-            });
+                await using (var decrement = conn.CreateCommand())
+                {
+                    decrement.CommandText = """
+                        UPDATE erp_inventory.stock_balance
+                        SET on_hand_qty = on_hand_qty - @qty, updated_at = now()
+                        WHERE tenant_id = @tid AND company_id = @cid AND balance_id = @balanceId;
+                        """;
+                    decrement.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    decrement.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    decrement.Parameters.AddWithValue("balanceId", row.BalanceId);
+                    decrement.Parameters.AddWithValue("qty", take);
+                    await decrement.ExecuteNonQueryAsync(ct);
+                }
+
+                await using (var leg = conn.CreateCommand())
+                {
+                    leg.CommandText = """
+                        INSERT INTO erp_inventory.inventory_movement_leg
+                            (tenant_id, company_id, movement_id, leg_number, variant_id, warehouse_id,
+                             bin_id, status_code, lot_id, quantity_delta, base_uom_id)
+                        VALUES
+                            (@tid, @cid, @mid, @ln, @var, @wh, @bin, @status, @lot, @delta, @uom);
+                        """;
+                    leg.Parameters.AddWithValue("tid", Ctx.TenantId);
+                    leg.Parameters.AddWithValue("cid", Ctx.CompanyId);
+                    leg.Parameters.AddWithValue("mid", movementId);
+                    leg.Parameters.AddWithValue("ln", legNumber++);
+                    leg.Parameters.AddWithValue("var", l.VariantId);
+                    leg.Parameters.AddWithValue("wh", l.WarehouseId);
+                    leg.Parameters.AddWithValue("bin", l.BinId);
+                    leg.Parameters.AddWithValue("status", l.FromStockStatus);
+                    leg.Parameters.Add("lot", NpgsqlTypes.NpgsqlDbType.Uuid).Value =
+                        (object?)row.LotId ?? DBNull.Value;
+                    leg.Parameters.AddWithValue("delta", -take);
+                    leg.Parameters.AddWithValue("uom", baseUomId);
+                    await leg.ExecuteNonQueryAsync(ct);
+                }
+
+                feedLegs.Add(new
+                {
+                    variantId = l.VariantId,
+                    warehouseId = l.WarehouseId,
+                    binId = l.BinId,
+                    stockStatus = l.FromStockStatus,
+                    quantityDelta = -take,
+                    unitOfMeasureId = baseUomId,
+                    lotId = row.LotId,
+                });
+
+                remainingFromBalances -= take;
+            }
 
             // If from available, consume oldest open FIFO layer
             if (l.FromStockStatus == "available")
