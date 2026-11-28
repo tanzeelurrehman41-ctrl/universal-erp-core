@@ -55,6 +55,7 @@ public sealed class OfflineSyncServiceTests
         public bool CompanyActive = true;
         public bool CompanyScopeActive = true;
         private readonly Dictionary<Guid, (DateTimeOffset ExpiresAt, bool Revoked)> _grantMetadata = [];
+        private readonly Dictionary<Guid, HashSet<string>> _grantOperations = [];
 
         private record InboxEntry(
             Guid DeviceId,
@@ -64,10 +65,15 @@ public sealed class OfflineSyncServiceTests
             string Outcome,
             OfflineReceiptOperationResult? StoredResult = null);
 
-        public void SeedGrant(Guid grantId, string rawToken, Guid? companyId = null)
+        public void SeedGrant(
+            Guid grantId,
+            string rawToken,
+            Guid? companyId = null,
+            IReadOnlyList<string>? allowedOperations = null)
         {
             _grants[(companyId ?? TestCtx.CompanyId, grantId, Hash(rawToken))] = true;
             _grantMetadata[grantId] = (DateTimeOffset.UtcNow.AddDays(7), Revoked: false);
+            _grantOperations[grantId] = (allowedOperations ?? ["inventory.receipt.post"]).ToHashSet(StringComparer.Ordinal);
         }
 
         public void RevokeGrant(Guid grantId)
@@ -89,17 +95,33 @@ public sealed class OfflineSyncServiceTests
 
         public Task<OfflineDeviceGrant?> RegisterDeviceAsync(
             TenantContext context, Guid clientDeviceId, string platformCode,
-            string? deviceName, CancellationToken cancellationToken)
+            string? deviceName, CancellationToken cancellationToken,
+            IReadOnlyList<string>? allowedOperations = null)
         {
             if (!DeviceActive || !CompanyActive || !CompanyScopeActive)
                 return Task.FromResult<OfflineDeviceGrant?>(null);
 
             var grantToken = "test-token";
             var grantId = Guid.NewGuid();
-            SeedGrant(grantId, grantToken, context.CompanyId);
+            var operations = allowedOperations ?? ["inventory.receipt.post"];
+            SeedGrant(grantId, grantToken, context.CompanyId, operations);
             return Task.FromResult<OfflineDeviceGrant?>(
                 new OfflineDeviceGrant(Guid.NewGuid(), grantId, grantToken,
-                    DateTimeOffset.UtcNow.AddDays(7)));
+                    DateTimeOffset.UtcNow.AddDays(7), operations));
+        }
+
+        public Task<bool> ValidateDeviceGrantAsync(
+            TenantContext context, Guid deviceId, Guid grantId, string grantToken,
+            string requiredOperation, CancellationToken cancellationToken)
+        {
+            var hash = Hash(grantToken);
+            var valid = _grants.ContainsKey((context.CompanyId, grantId, hash)) &&
+                _grantOperations.TryGetValue(grantId, out var operations) &&
+                operations.Contains(requiredOperation) &&
+                _grantMetadata.TryGetValue(grantId, out var metadata) &&
+                !metadata.Revoked && metadata.ExpiresAt > DateTimeOffset.UtcNow &&
+                DeviceActive && CompanyActive && CompanyScopeActive;
+            return Task.FromResult(valid);
         }
 
         public Task<OfflineInboxReservation> ReserveReceiptOperationAsync(
