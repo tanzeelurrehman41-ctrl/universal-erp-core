@@ -55,10 +55,23 @@ public static class SyncEndpointMappings
             return Results.Ok(page);
         });
 
+        var snapshots = endpoints.MapGroup("/api/v1/sync/snapshots");
+        var inventorySnapshot = snapshots.MapGet("/inventory", async (
+            ITenantContextAccessor tenantContextAccessor,
+            ISyncChangeFeed changeFeed,
+            CancellationToken cancellationToken) =>
+        {
+            var snapshot = await changeFeed.ReadInventorySnapshotAsync(
+                tenantContextAccessor.Current,
+                cancellationToken);
+            return Results.Ok(snapshot);
+        });
+
         if (!isDevelopment)
         {
             products.RequireAuthorization("inventory.product.view");
             inventory.RequireAuthorization("inventory.availability.view");
+            inventorySnapshot.RequireAuthorization("inventory.availability.view");
         }
 
         return endpoints;
