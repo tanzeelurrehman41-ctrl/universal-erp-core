@@ -360,7 +360,7 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
           undefined,
           workspace,
         );
-        if (!/^\\d+$/.test(baseline.cursor) || !Array.isArray(baseline.balances)) {
+        if (!/^\d+$/.test(baseline.cursor) || !Array.isArray(baseline.balances)) {
           throw new Error("The server returned an invalid inventory snapshot.");
         }
         balances = baseline.balances;
@@ -423,6 +423,7 @@ export default function InventoryWorkspace({ enabled, canQueue, persistentStorag
 
       if (!mounted) return;
       setData(snapshot);
+      setIsUsingCachedData(false);
       setProductId((current) =>
         products.some((item) => item.productId === current && item.isActive && item.productType === "stock")
           ? current
