@@ -300,7 +300,141 @@ async function updateOperation(
   }
 }
 
-async function syncWithAuthenticatedServer(\n  pending: OfflineProductOperation[],\n  authorization: SyncAuthorization,\n): Promise<void> {\n  const eligible = pending.filter((operation) =>\n    operation.tenantId === authorization.tenantId &&\n    operation.companyId === authorization.companyId &&\n    operation.ownerKey === authorization.ownerKey,\n  );\n  const inOtherWorkspace = pending.filter((operation) => !eligible.includes(operation));\n  for (const operation of inOtherWorkspace) {\n    await updateOperation(operation.operationId, {\n      message: "Saved for a different company. Switch to that company to sync this entry.",\n    });\n  }\n\n  for (let offset = 0; offset < eligible.length; offset += 50) {\n    const batch = eligible.slice(offset, offset + 50);\n    for (const operation of batch) {\n      await updateOperation(operation.operationId, { status: "syncing", message: undefined });\n    }\n\n    try {\n      const response = await fetch(apiUrl("/api/v1/sync/products:batch"), {\n        method: "POST",\n        headers: {\n          "Content-Type": "application/json",\n          Authorization: `Bearer ${authorization.accessToken}`,\n          "X-Tenant-Id": authorization.tenantId,\n          "X-Company-Id": authorization.companyId,\n        },\n        body: JSON.stringify({\n          batchId,\n          operations: batch.map((operation) => ({\n            operationId: operation.operationId,\n            deviceSequence: operation.deviceSequence,\n            operationType: operation.operationType,\n            payload: operation.payload,\n          })),\n        }),\n      });\n\n      if (!response.ok) {\n        const problem = await response.json().catch(() => ({})) as { title?: string; code?: string };\n        const message = problem.title ?? problem.code ?? `The server returned ${response.status}.`;\n        if (response.status === 401 || response.status === 403) {\n          const accessMessage = response.status === 401\n            ? "Sign in again to sync these saved entries. They remain on this device."\n            : "This account lacks product-create permission. These entries remain saved on this device."; \n          for (const operation of batch) {\n            await updateOperation(operation.operationId, { status: "queued", message: accessMessage });\n          }\n          break;\n        }\n\n        if (response.status === 429 || response.status >= 500) {\n          for (const operation of batch) {\n            await updateOperation(operation.operationId, {\n              status: "queued",\n              message: "The server is temporarily unavailable. These saved entries will be retried.",\n            });\n          }\n          break;\n        }\n\n        for (const operation of batch) {\n          await updateOperation(operation.operationId, { status: "rejected", message });\n        }\n        continue;\n      }\n\n      const result = await response.json() as {\n        batchId: string;\n        results: Array<{\n          operationId: string;\n          deviceSequence: number;\n          status: string;\n          product?: ProductSummary | null;\n          code?: string | null;\n        }>;\n      };\n      if (result.batchId !== batchId || !Array.isArray(result.results)) {\n        throw new Error("The server returned an invalid product sync receipt.");\n      }\n\n      const resultsById = new Map(result.results.map((item) => [item.operationId, item]));\n      if (resultsById.size !== result.results.length) {\n        throw new Error("The server returned duplicate product sync receipts.");\n      }\n\n      for (const operation of batch) {\n        const item = resultsById.get(operation.operationId);\n        if (!item || item.deviceSequence !== operation.deviceSequence) {\n          await updateOperation(operation.operationId, {\n            status: "queued",\n            message: "The server receipt was incomplete. This operation will retry with the same ID.",\n          });\n          continue;\n        }\n\n        if (item.status === "accepted" && item.product) {\n          await updateOperation(operation.operationId, {\n            status: "accepted",\n            serverProduct: item.product,\n            message: "Confirmed by the shared server.",\n          });\n        } else if (item.status === "conflict") {\n          await updateOperation(operation.operationId, {\n            status: "conflict",\n            message: item.code ?? "The server detected a product sync conflict.",\n          });\n        } else if (item.status === "rejected") {\n          await updateOperation(operation.operationId, {\n            status: "rejected",\n            message: item.code ?? "The server rejected this product operation.",\n          });\n        } else {\n          await updateOperation(operation.operationId, {\n            status: "queued",\n            message: "The server did not confirm this operation. It will retry with the same ID.",\n          });\n        }\n      }\n    } catch {\n      for (const operation of batch) {\n        await updateOperation(operation.operationId, {\n          status: "queued",\n          message: "Connection interrupted. This saved batch will retry with the same operation IDs.",\n        });\n      }\n      break;\n    }\n  }\n}\nasync function syncQueue(authorization?: SyncAuthorization): Promise<OfflineProductOperation[]> {
+async function syncWithAuthenticatedServer(
+  pending: OfflineProductOperation[],
+  authorization: SyncAuthorization,
+): Promise<void> {
+  const eligible = pending.filter((operation) =>
+    operation.tenantId === authorization.tenantId &&
+    operation.companyId === authorization.companyId &&
+    operation.ownerKey === authorization.ownerKey,
+  );
+  const inOtherWorkspace = pending.filter((operation) => !eligible.includes(operation));
+  for (const operation of inOtherWorkspace) {
+    await updateOperation(operation.operationId, {
+      message: "Saved for a different company. Switch to that company to sync this entry.",
+    });
+  }
+
+  for (let offset = 0; offset < eligible.length; offset += 50) {
+    const batch = eligible.slice(offset, offset + 50);
+    for (const operation of batch) {
+      await updateOperation(operation.operationId, { status: "syncing", message: undefined });
+    }
+
+    try {
+      const response = await fetch(apiUrl("/api/v1/sync/products:batch"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authorization.accessToken}`,
+          "X-Tenant-Id": authorization.tenantId,
+          "X-Company-Id": authorization.companyId,
+        },
+        body: JSON.stringify({
+          batchId,
+          operations: batch.map((operation) => ({
+            operationId: operation.operationId,
+            deviceSequence: operation.deviceSequence,
+            operationType: operation.operationType,
+            payload: operation.payload,
+          })),
+        }),
+      });
+
+      if (!response.ok) {
+        const problem = await response.json().catch(() => ({})) as { title?: string; code?: string };
+        const message = problem.title ?? problem.code ?? `The server returned ${response.status}.`;
+        if (response.status === 401 || response.status === 403) {
+          const accessMessage = response.status === 401
+            ? "Sign in again to sync these saved entries. They remain on this device."
+            : "This account lacks product-create permission. These entries remain saved on this device."; 
+          for (const operation of batch) {
+            await updateOperation(operation.operationId, { status: "queued", message: accessMessage });
+          }
+          break;
+        }
+
+        if (response.status === 429 || response.status >= 500) {
+          for (const operation of batch) {
+            await updateOperation(operation.operationId, {
+              status: "queued",
+              message: "The server is temporarily unavailable. These saved entries will be retried.",
+            });
+          }
+          break;
+        }
+
+        for (const operation of batch) {
+          await updateOperation(operation.operationId, { status: "rejected", message });
+        }
+        continue;
+      }
+
+      const result = await response.json() as {
+        batchId: string;
+        results: Array<{
+          operationId: string;
+          deviceSequence: number;
+          status: string;
+          product?: ProductSummary | null;
+          code?: string | null;
+        }>;
+      };
+      if (result.batchId !== batchId || !Array.isArray(result.results)) {
+        throw new Error("The server returned an invalid product sync receipt.");
+      }
+
+      const resultsById = new Map(result.results.map((item) => [item.operationId, item]));
+      if (resultsById.size !== result.results.length) {
+        throw new Error("The server returned duplicate product sync receipts.");
+      }
+
+      for (const operation of batch) {
+        const item = resultsById.get(operation.operationId);
+        if (!item || item.deviceSequence !== operation.deviceSequence) {
+          await updateOperation(operation.operationId, {
+            status: "queued",
+            message: "The server receipt was incomplete. This operation will retry with the same ID.",
+          });
+          continue;
+        }
+
+        if (item.status === "accepted" && item.product) {
+          await updateOperation(operation.operationId, {
+            status: "accepted",
+            serverProduct: item.product,
+            message: "Confirmed by the shared server.",
+          });
+        } else if (item.status === "conflict") {
+          await updateOperation(operation.operationId, {
+            status: "conflict",
+            message: item.code ?? "The server detected a product sync conflict.",
+          });
+        } else if (item.status === "rejected") {
+          await updateOperation(operation.operationId, {
+            status: "rejected",
+            message: item.code ?? "The server rejected this product operation.",
+          });
+        } else {
+          await updateOperation(operation.operationId, {
+            status: "queued",
+            message: "The server did not confirm this operation. It will retry with the same ID.",
+          });
+        }
+      }
+    } catch {
+      for (const operation of batch) {
+        await updateOperation(operation.operationId, {
+          status: "queued",
+          message: "Connection interrupted. This saved batch will retry with the same operation IDs.",
+        });
+      }
+      break;
+    }
+  }
+}
+async function syncQueue(authorization?: SyncAuthorization): Promise<OfflineProductOperation[]> {
   let operations = await loadProductOperations();
   const pending = operations.filter((operation) => operation.status === "queued");
 
