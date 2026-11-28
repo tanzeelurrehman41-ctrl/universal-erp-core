@@ -66,7 +66,7 @@ public sealed class SalesServiceTests
                 id, request.CustomerCode, request.Name, request.CustomerType,
                 request.ContactName, request.Email, request.Phone, request.Address,
                 request.NtnNumber, request.StrnNumber, request.CreditLimit, 0,
-                request.CurrencyCode, request.PaymentTermsDays, true));
+                request.CurrencyCode ?? "PKR", request.PaymentTermsDays, true));
             return Task.FromResult(id);
         }
 

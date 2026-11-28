@@ -14,7 +14,7 @@ public sealed record CreateCustomerRequest(
     string? StrnNumber = null,
     decimal CreditLimit = 0,
     int PaymentTermsDays = 0,
-    string CurrencyCode = "PKR");
+    string? CurrencyCode = null);
 
 public sealed record UpdateCustomerRequest(
     string Name,
@@ -157,7 +157,10 @@ public sealed record SalesInvoiceSummary(
     decimal PaidAmount,
     string? Note,
     DateTimeOffset PostedAt,
-    IReadOnlyList<SalesInvoiceLineSummary> Lines);
+    IReadOnlyList<SalesInvoiceLineSummary> Lines,
+    Guid? DispatchId = null,
+    DateOnly? DueDate = null,
+    Guid? GlJournalId = null);
 
 // ── Repository Interface ───────────────────────────────────────────────────
 
@@ -181,4 +184,73 @@ public interface ISalesRepository
     Task<IReadOnlyList<SalesInvoiceSummary>> ListInvoicesAsync(CancellationToken cancellationToken);
     Task<SalesInvoiceSummary?> GetInvoiceAsync(Guid invoiceId, CancellationToken cancellationToken);
     Task<Guid> PostInvoiceAsync(PostSalesInvoiceRequest request, Guid createdBy, CancellationToken cancellationToken);
+
+    // ── Phase 7 Enhancements ─────────────────────────────────────────────────
+    // Quotations
+    Task<IReadOnlyList<SalesQuotationSummary>> ListQuotationsAsync(CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<SalesQuotationSummary>>([]);
+    Task<SalesQuotationSummary?> GetQuotationAsync(Guid quotationId, CancellationToken ct) =>
+        Task.FromResult<SalesQuotationSummary?>(null);
+    Task<Guid> CreateQuotationAsync(CreateSalesQuotationRequest request, Guid createdBy, CancellationToken ct) =>
+        Task.FromResult(Guid.Empty);
+    Task<bool> ApproveQuotationAsync(Guid quotationId, Guid approvedBy, string? note, CancellationToken ct) =>
+        Task.FromResult(false);
+    Task<Guid> ConvertQuotationToOrderAsync(Guid quotationId, ConvertQuotationToOrderRequest request, Guid createdBy, CancellationToken ct) =>
+        Task.FromResult(Guid.Empty);
+
+    // Order Approvals & Cancellation
+    Task<bool> ApproveOrderAsync(Guid orderId, Guid approvedBy, string? note, CancellationToken ct) =>
+        Task.FromResult(false);
+    Task<bool> CancelOrderAsync(Guid orderId, string reason, Guid cancelledBy, CancellationToken ct) =>
+        Task.FromResult(false);
+
+    // Customer Credit Check
+    Task<CustomerCreditExposureSummary?> GetCustomerCreditExposureAsync(Guid customerId, CancellationToken ct) =>
+        Task.FromResult<CustomerCreditExposureSummary?>(null);
+
+    // Dispatches
+    Task<IReadOnlyList<SalesDispatchSummary>> ListDispatchesAsync(Guid? orderId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<SalesDispatchSummary>>([]);
+    Task<SalesDispatchSummary?> GetDispatchAsync(Guid dispatchId, CancellationToken ct) =>
+        Task.FromResult<SalesDispatchSummary?>(null);
+    Task<Guid> CreateDispatchAsync(CreateSalesDispatchRequest request, Guid createdBy, CancellationToken ct) =>
+        Task.FromResult(Guid.Empty);
+    Task<bool> ConfirmDispatchAsync(Guid dispatchId, Guid dispatchedBy, bool markDelivered, string? note, CancellationToken ct) =>
+        Task.FromResult(false);
+
+    // Invoice from Dispatch
+    Task<Guid> CreateInvoiceFromDispatchAsync(CreateInvoiceFromDispatchRequest request, Guid createdBy, CancellationToken ct) =>
+        Task.FromResult(Guid.Empty);
+
+    // Customer Receipts
+    Task<IReadOnlyList<CustomerReceiptSummary>> ListReceiptsAsync(Guid? customerId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<CustomerReceiptSummary>>([]);
+    Task<CustomerReceiptSummary?> GetReceiptAsync(Guid receiptId, CancellationToken ct) =>
+        Task.FromResult<CustomerReceiptSummary?>(null);
+    Task<Guid> CreateReceiptAsync(CreateCustomerReceiptRequest request, Guid receivedBy, CancellationToken ct) =>
+        Task.FromResult(Guid.Empty);
+
+    // Sales Returns & Credit Notes
+    Task<IReadOnlyList<SalesReturnSummary>> ListReturnsAsync(Guid? customerId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<SalesReturnSummary>>([]);
+    Task<SalesReturnSummary?> GetReturnAsync(Guid returnId, CancellationToken ct) =>
+        Task.FromResult<SalesReturnSummary?>(null);
+    Task<Guid> CreateReturnAsync(CreateSalesReturnRequest request, Guid createdBy, CancellationToken ct) =>
+        Task.FromResult(Guid.Empty);
+    Task<bool> ApproveReturnAsync(Guid returnId, Guid authorizedBy, CancellationToken ct) =>
+        Task.FromResult(false);
+    Task<IReadOnlyList<SalesCreditNoteSummary>> ListCreditNotesAsync(Guid? customerId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<SalesCreditNoteSummary>>([]);
+    Task<SalesCreditNoteSummary?> GetCreditNoteAsync(Guid creditNoteId, CancellationToken ct) =>
+        Task.FromResult<SalesCreditNoteSummary?>(null);
+    Task<Guid> CreateCreditNoteAsync(CreateSalesCreditNoteRequest request, Guid createdBy, CancellationToken ct) =>
+        Task.FromResult(Guid.Empty);
+    Task<bool> ApproveCreditNoteAsync(Guid creditNoteId, Guid authorizedBy, CancellationToken ct) =>
+        Task.FromResult(false);
+
+    // Accounts Receivable & Statements
+    Task<IReadOnlyList<CustomerArAgingSummary>> ListCustomerArAgingAsync(CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<CustomerArAgingSummary>>([]);
+    Task<CustomerStatementSummary?> GetCustomerStatementAsync(Guid customerId, DateOnly fromDate, DateOnly toDate, CancellationToken ct) =>
+        Task.FromResult<CustomerStatementSummary?>(null);
 }

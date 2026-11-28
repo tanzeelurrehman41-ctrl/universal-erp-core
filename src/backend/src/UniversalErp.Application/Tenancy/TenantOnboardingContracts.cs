@@ -30,7 +30,7 @@ public sealed record TenantDetail(
     string DefaultTimezone,
     DateTimeOffset CreatedAt,
     InitialCompanyDetail Company,
-    TenantSubscriptionDetail Subscription,
+    TenantSubscriptionDetail? Subscription,
     IReadOnlyList<TenantEntitlementDetail> Entitlements,
     TenantAdminUserDetail AdminUser);
 

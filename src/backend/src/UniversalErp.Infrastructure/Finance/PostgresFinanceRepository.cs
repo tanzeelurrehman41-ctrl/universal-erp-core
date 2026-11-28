@@ -3,7 +3,7 @@ using UniversalErp.Application.Finance;
 
 namespace UniversalErp.Infrastructure.Finance;
 
-public sealed class PostgresFinanceRepository(NpgsqlDataSource dataSource) : IFinanceRepository
+public sealed partial class PostgresFinanceRepository(NpgsqlDataSource dataSource) : IFinanceRepository
 {
     // ── Accounts ─────────────────────────────────────────────────────────────
 

@@ -122,6 +122,162 @@ public static class InventoryEndpointMappings
                 : ToFailure(result);
         });
 
+        // ── Phase 5: Stock Reservations & ATP Endpoints ─────────────────────────────────────
+        var listReservations = inventory.MapGet("/reservations", async (
+            Guid? variantId,
+            Guid? warehouseId,
+            string? status,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.ListReservationsAsync(variantId, warehouseId, status, cancellationToken)));
+
+        var createReservation = inventory.MapPost("/reservations", async (
+            HttpRequest httpRequest,
+            CreateStockReservationRequest request,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+        {
+            var idempotencyKey = Guid.TryParse(httpRequest.Headers["Idempotency-Key"], out var parsed)
+                ? parsed
+                : (Guid?)null;
+            return ToCreated(await service.CreateReservationAsync(idempotencyKey, request, cancellationToken));
+        });
+
+        var releaseReservation = inventory.MapPost("/reservations/{reservationId:guid}/release", async (
+            Guid reservationId,
+            ReleaseReservationBody? body,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await service.ReleaseReservationAsync(reservationId, body?.Reason, cancellationToken);
+            return result.IsSuccess ? Results.Ok(result.Value) : ToFailure(result);
+        });
+
+        var getAtp = inventory.MapGet("/atp", async (
+            Guid? variantId,
+            Guid? warehouseId,
+            Guid? binId,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.GetAtpAsync(variantId, warehouseId, binId, cancellationToken)));
+
+        // ── Phase 5: Picking & Dispatch Endpoints ───────────────────────────────────────────
+        var listPickLists = inventory.MapGet("/pick-lists", async (
+            Guid? warehouseId,
+            string? status,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.ListPickListsAsync(warehouseId, status, cancellationToken)));
+
+        var createPickList = inventory.MapPost("/pick-lists", async (
+            HttpRequest httpRequest,
+            CreatePickListRequest request,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+        {
+            var idempotencyKey = Guid.TryParse(httpRequest.Headers["Idempotency-Key"], out var parsed)
+                ? parsed
+                : (Guid?)null;
+            return ToCreated(await service.CreatePickListAsync(idempotencyKey, request, cancellationToken));
+        });
+
+        var recordPicks = inventory.MapPost("/pick-lists/{pickListId:guid}/pick", async (
+            Guid pickListId,
+            IReadOnlyList<RecordPickLineRequest> lines,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await service.RecordPickLinesAsync(pickListId, lines, cancellationToken);
+            return result.IsSuccess ? Results.Ok(result.Value) : ToFailure(result);
+        });
+
+        var dispatchPickList = inventory.MapPost("/pick-lists/{pickListId:guid}/dispatch", async (
+            Guid pickListId,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await service.DispatchPickListAsync(pickListId, cancellationToken);
+            return result.IsSuccess ? Results.Ok(result.Value) : ToFailure(result);
+        });
+
+        // ── Phase 5: Stock Counts & Cycle Counting Endpoints ────────────────────────────────
+        var listCountSessions = inventory.MapGet("/counts", async (
+            Guid? warehouseId,
+            string? status,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.ListCountSessionsAsync(warehouseId, status, cancellationToken)));
+
+        var createCountSession = inventory.MapPost("/counts", async (
+            HttpRequest httpRequest,
+            CreateCountSessionRequest request,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+        {
+            var idempotencyKey = Guid.TryParse(httpRequest.Headers["Idempotency-Key"], out var parsed)
+                ? parsed
+                : (Guid?)null;
+            return ToCreated(await service.CreateCountSessionAsync(idempotencyKey, request, cancellationToken));
+        });
+
+        var recordCountLines = inventory.MapPost("/counts/{sessionId:guid}/lines", async (
+            Guid sessionId,
+            IReadOnlyList<RecordCountLineRequest> lines,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await service.RecordCountLinesAsync(sessionId, lines, cancellationToken);
+            return result.IsSuccess ? Results.Ok(result.Value) : ToFailure(result);
+        });
+
+        var approveCountSession = inventory.MapPost("/counts/{sessionId:guid}/approve", async (
+            Guid sessionId,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await service.ApproveCountSessionAsync(sessionId, cancellationToken);
+            return result.IsSuccess ? Results.Ok(result.Value) : ToFailure(result);
+        });
+
+        // ── Phase 5: Stock Returns Endpoints ────────────────────────────────────────────────
+        var listStockReturns = inventory.MapGet("/returns", async (
+            Guid? warehouseId,
+            string? status,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.ListStockReturnsAsync(warehouseId, status, cancellationToken)));
+
+        var createStockReturn = inventory.MapPost("/returns", async (
+            HttpRequest httpRequest,
+            CreateStockReturnRequest request,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+        {
+            var idempotencyKey = Guid.TryParse(httpRequest.Headers["Idempotency-Key"], out var parsed)
+                ? parsed
+                : (Guid?)null;
+            return ToCreated(await service.CreateStockReturnAsync(idempotencyKey, request, cancellationToken));
+        });
+
+        var processStockReturn = inventory.MapPost("/returns/{returnId:guid}/process", async (
+            Guid returnId,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await service.ProcessStockReturnAsync(returnId, cancellationToken);
+            return result.IsSuccess ? Results.Ok(result.Value) : ToFailure(result);
+        });
+
+        // ── Phase 5: Movement History & Valuation Report Endpoints ──────────────────────────
+        var getMovementHistory = inventory.MapGet("/movement-history", async (
+            Guid? warehouseId,
+            Guid? binId,
+            Guid? variantId,
+            int? limit,
+            InventoryWorkflowService service,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await service.GetBinMovementHistoryAsync(warehouseId, binId, variantId, limit ?? 100, cancellationToken)));
+
         var getValuationReport = inventory.MapGet("/valuation-report", async (
             InventoryWorkflowService service,
             CancellationToken cancellationToken) =>
@@ -144,7 +300,29 @@ public static class InventoryEndpointMappings
             postReceipt.RequireAuthorization("inventory.receipt.create", "inventory.receipt.post");
             postTransfer.RequireAuthorization("inventory.transfer.create");
             postAdjustment.RequireAuthorization("inventory.adjustment.create");
-            getValuationReport.RequireAuthorization("inventory.valuation.view");
+
+            // Phase 5 Authorization
+            listReservations.RequireAuthorization("inventory.reservation.view");
+            createReservation.RequireAuthorization("inventory.reservation.create");
+            releaseReservation.RequireAuthorization("inventory.reservation.release");
+            getAtp.RequireAuthorization("inventory.reservation.view");
+
+            listPickLists.RequireAuthorization("inventory.pick.view");
+            createPickList.RequireAuthorization("inventory.pick.create");
+            recordPicks.RequireAuthorization("inventory.pick.create");
+            dispatchPickList.RequireAuthorization("inventory.pick.dispatch");
+
+            listCountSessions.RequireAuthorization("inventory.count.view");
+            createCountSession.RequireAuthorization("inventory.count.create");
+            recordCountLines.RequireAuthorization("inventory.count.record");
+            approveCountSession.RequireAuthorization("inventory.count.approve");
+
+            listStockReturns.RequireAuthorization("inventory.returns.create");
+            createStockReturn.RequireAuthorization("inventory.returns.create");
+            processStockReturn.RequireAuthorization("inventory.returns.post");
+
+            getMovementHistory.RequireAuthorization("inventory.history.view");
+            getValuationReport.RequireAuthorization("inventory.valuation.report");
         }
 
         return endpoints;

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Npgsql;
 using UniversalErp.Application.Purchasing;
+using UniversalErp.Infrastructure.Finance;
 
 namespace UniversalErp.Infrastructure.Purchasing;
 
@@ -135,6 +136,13 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                     throw new InvalidOperationException("EMPTY_OR_MALFORMED_PAYLOAD: GRN requires at least one line.");
                 }
 
+                var functionalCurrency = await CompanyCurrencyResolver.ResolveFunctionalCurrencyAsync(
+                    connection,
+                    eventTx,
+                    tenantId,
+                    companyId,
+                    cancellationToken);
+
                 // B. Fetch GRN details
                 string grnNumber;
                 DateOnly receivedDate;
@@ -237,7 +245,7 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                                 VALUES
                                     (@tenantId, @companyId, @layerId, @variantId, @whId, @binId, 'available',
                                      'grn', @grnId, @lineNum, @movementId,
-                                     @receivedAt, @qty, @qty, @unitCost, 'PKR')
+                                     @receivedAt, @qty, @qty, @unitCost, @currencyCode)
                                 ON CONFLICT (tenant_id, company_id, source_document_type, source_document_id, source_line_number, bin_id)
                                 WHERE parent_layer_id IS NULL AND source_document_id IS NOT NULL AND source_line_number IS NOT NULL
                                 DO NOTHING;
@@ -256,6 +264,7 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                             layerCmd.Parameters.AddWithValue("receivedAt", occurredAt);
                             layerCmd.Parameters.AddWithValue("qty", line.ReceivedQty);
                             layerCmd.Parameters.AddWithValue("unitCost", line.UnitPrice);
+                            layerCmd.Parameters.AddWithValue("currencyCode", functionalCurrency);
                             await layerCmd.ExecuteNonQueryAsync(cancellationToken);
 
                             var extendedCost = Math.Round(line.ReceivedQty * line.UnitPrice, 4, MidpointRounding.AwayFromZero);
@@ -266,7 +275,7 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                                      quantity, unit_cost, extended_cost, currency_code, posted_at)
                                 VALUES
                                     (@tenantId, @companyId, @valId, @movementId, @variantId, 'receipt_cost',
-                                     @qty, @unitCost, @extCost, 'PKR', @postedAt);
+                                     @qty, @unitCost, @extCost, @currencyCode, @postedAt);
                                 """,
                                 connection,
                                 eventTx);
@@ -278,6 +287,7 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                             valCmd.Parameters.AddWithValue("qty", line.ReceivedQty);
                             valCmd.Parameters.AddWithValue("unitCost", line.UnitPrice);
                             valCmd.Parameters.AddWithValue("extCost", extendedCost);
+                            valCmd.Parameters.AddWithValue("currencyCode", functionalCurrency);
                             valCmd.Parameters.AddWithValue("postedAt", occurredAt);
                             await valCmd.ExecuteNonQueryAsync(cancellationToken);
                         }
@@ -357,7 +367,7 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                                  status, created_by, posted_by, posted_at)
                             VALUES
                                 (@id, @tenantId, @companyId, @no, @date, @periodId, @desc,
-                                 'PKR', 'purchasing', 'grn', @sourceId, @key,
+                                 @functionalCurrency, 'purchasing', 'grn', @sourceId, @key,
                                  'posted', @userId, @userId, now());
                             """;
 
@@ -370,6 +380,7 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                             jourCmd.Parameters.AddWithValue("date", receivedDate);
                             jourCmd.Parameters.AddWithValue("periodId", activePeriodId);
                             jourCmd.Parameters.AddWithValue("desc", desc);
+                            jourCmd.Parameters.AddWithValue("functionalCurrency", functionalCurrency);
                             jourCmd.Parameters.AddWithValue("sourceId", grnId.ToString());
                             jourCmd.Parameters.AddWithValue("key", idempotencyKey);
                             jourCmd.Parameters.AddWithValue("userId", userId);
@@ -382,7 +393,7 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                                  transaction_currency, transaction_amount, exchange_rate, debit_functional, credit_functional)
                             VALUES
                                 (@tenantId, @companyId, @journalId, @lineNo, @accountId, @desc,
-                                 'PKR', @amount, 1.0, @debit, @credit);
+                                 @currencyCode, @amount, 1.0, @debit, @credit);
                             """;
 
                         // Line 1: Debit 1200
@@ -394,6 +405,7 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                             l1Cmd.Parameters.AddWithValue("lineNo", 1);
                             l1Cmd.Parameters.AddWithValue("accountId", inventoryAccountId);
                             l1Cmd.Parameters.AddWithValue("desc", $"Merchandise Inventory - {grnNumber}");
+                            l1Cmd.Parameters.AddWithValue("currencyCode", functionalCurrency);
                             l1Cmd.Parameters.AddWithValue("amount", totalValuation);
                             l1Cmd.Parameters.AddWithValue("debit", totalValuation);
                             l1Cmd.Parameters.AddWithValue("credit", 0m);
@@ -409,6 +421,7 @@ public sealed class PostgresSupplyChainOutboxRepository(NpgsqlDataSource dataSou
                             l2Cmd.Parameters.AddWithValue("lineNo", 2);
                             l2Cmd.Parameters.AddWithValue("accountId", apAccountId);
                             l2Cmd.Parameters.AddWithValue("desc", $"Accounts Payable (Trade Creditors) - {grnNumber}");
+                            l2Cmd.Parameters.AddWithValue("currencyCode", functionalCurrency);
                             l2Cmd.Parameters.AddWithValue("amount", totalValuation);
                             l2Cmd.Parameters.AddWithValue("debit", 0m);
                             l2Cmd.Parameters.AddWithValue("credit", totalValuation);

@@ -1,10 +1,20 @@
 import { useEffect, useState, type FormEvent } from "react";
+import DashboardWorkspace from "./DashboardWorkspace";
 import InventoryWorkspace from "./InventoryWorkspace";
+import WarehouseWorkspace from "./WarehouseWorkspace";
 import PurchasingWorkspace from "./PurchasingWorkspace";
 import SalesWorkspace from "./SalesWorkspace";
 import TenancyWorkspace from "./TenancyWorkspace";
+import SaaSPlatformWorkspace from "./SaaSPlatformWorkspace";
 import FinanceWorkspace from "./FinanceWorkspace";
+import ManufacturingWorkspace from "./ManufacturingWorkspace";
 import FoundationWorkspace from "./FoundationWorkspace";
+import HRWorkspace from "./HRWorkspace";
+import { AnalyticsWorkspace } from "./AnalyticsWorkspace";
+import { ConsolidationWorkspace } from "./ConsolidationWorkspace";
+import { resolveWorkspaceCurrencyDisplay } from "./adminCurrencyHelpers";
+import { BranchDto } from "./branchHelpers";
+import { AppShell, Card, Button, Badge, type NavItem } from "./components";
 import {
   apiFetch,
   apiUrl,
@@ -57,16 +67,45 @@ function readSavedWorkspaces(): TenantCompanyContext[] {
   }
 }
 
+function resolveDefaultWorkspaceKey(available: TenantCompanyContext[]): string {
+  if (available.length === 0) return "";
+  try {
+    const isExplicit = sessionStorage.getItem("universal-erp-workspace-explicit") === "true";
+    const savedKey = sessionStorage.getItem("universal-erp-active-workspace") ?? "";
+    if (isExplicit && savedKey && available.some((w) => workspaceKey(w) === savedKey)) {
+      return savedKey;
+    }
+  } catch {
+    // ignore
+  }
+
+  // Intended default for demo account: DEMO-CLOUD / CLOUD-LOGISTICS
+  const demoCloud = available.find(
+    (w) => w.tenantCode === "DEMO-CLOUD" || w.tenantId === "22222222-2222-4222-8222-222222222222"
+  );
+  if (demoCloud) {
+    return workspaceKey(demoCloud);
+  }
+
+  return workspaceKey(available[0]);
+}
+
 const modulePreview: ModuleSummary[] = [
-  { id: "foundation", name: "Platform foundation", status: "Architecture only", description: "Tenant, company, location, identity, and database foundations." },
+  { id: "foundation", name: "Platform foundation", status: "Active", description: "Tenant, company, location, identity, and RBAC permission foundations." },
   { id: "core", name: "Core application", status: "Starter", description: "API host and web, Windows, and Android application shells." },
-  { id: "inventory", name: "Inventory", status: "In progress", description: "Catalog, units, variants, warehouses, bins, and atomic untracked stock receipts; transfers, reservations, and valuation remain." },
-  { id: "purchasing", name: "Purchasing", status: "In progress", description: "Suppliers, purchase orders, goods receipts, inspections, and invoice matching." },
-  { id: "finance", name: "Finance", status: "In progress", description: "Chart of Accounts, balanced general ledger journals, and real-time trial balance." },
-  { id: "security", name: "Security and access", status: "In progress", description: "OIDC API validation and live membership/permission checks; user provisioning and client sign-in remain." },
-  { id: "offline", name: "Offline sync", status: "In progress", description: "Encrypted local journals, atomic snapshot cursors, and a paged change feed; device grants and inbox remain." },
+  { id: "inventory", name: "Inventory", status: "Active", description: "Catalog, units, variants, warehouses, bins, atomic stock receipts, multi-bin stock transfers, reservations & ATP calculation, and FIFO valuation layer engine." },
+  { id: "purchasing", name: "Purchasing", status: "Active", description: "Suppliers, purchase orders, goods received notes with idempotent posting, inventory outbox events, 3-way invoice matching, and quality inspection workflows." },
+  { id: "finance", name: "Finance", status: "Active", description: "Chart of Accounts, General Ledger, Treasury, Bank Reconciliation, Fixed Assets, Tax, and Period Close." },
+  { id: "manufacturing", name: "Manufacturing", status: "Active", description: "Bill of Materials, Multi-Level Components, Routings, Work Centers, Work Orders, FIFO Material Issues, WIP Accounting, and Quality Control." },
+  { id: "warehouse", name: "Warehouse & Logistics", status: "Active", description: "Zones, aisles, racks, shelf bins, GS1 barcode scanning, directed putaway, wave picking, cartonization packing, replenishment, transfers, and quarantine." },
+  { id: "hr_payroll", name: "HR, Attendance & Payroll", status: "Active", description: "Employee directory, hierarchy, shifts, attendance, leaves, statutory tax slabs, EOBI, PF, loans, payslips, and GL integration." },
+  { id: "security", name: "Security and access", status: "Active", description: "OIDC bearer token validation, network clock synchronization, transparent token refresh, and live membership & RLS permission checks." },
+  { id: "offline", name: "Offline sync", status: "In progress", description: "Encrypted local journals, authenticated device grants, a durable receipt operation inbox, atomic snapshot cursors, and a paged change feed; event-level merge and product inbox processing remain." },
   { id: "reporting", name: "Reporting", status: "Architecture only", description: "Approved datasets, dashboards, exports, and scheduled reports." },
-  { id: "saas", name: "SaaS platform", status: "In progress", description: "Tenant provisioning, plans, entitlements, subscriptions, and billing." },
+  { id: "saas", name: "SaaS Platform & Tenant Management", status: "Active", description: "Automated tenant provisioning, subscription lifecycle, entitlement enforcement, usage metering, and billing engine." },
+  { id: "branches", name: "Multi-Branch Operations", status: "Active", description: "Hierarchical branch master, operating locations, POS terminal binding, and branch switcher." },
+  { id: "consolidation", name: "Intercompany & Group Consolidation", status: "Active", description: "Intercompany relationships, stock transfers, reciprocal Due-To/Due-From clearing, and multi-entity elimination engine." },
+  { id: "integrations", name: "External Integrations Hub", status: "Active", description: "HMAC-SHA256 authenticated webhooks, exponential retry backoff, dead-letter state, and API partner access." },
 ];
 
 export default function App() {
@@ -93,14 +132,31 @@ export default function App() {
   );
   const [activeWorkspaceKey, setActiveWorkspaceKey] = useState(() => {
     try {
-      return sessionStorage.getItem("universal-erp-active-workspace") ?? "";
+      const saved = readSavedWorkspaces();
+      return resolveDefaultWorkspaceKey(saved);
     } catch {
       return "";
     }
   });
   const activeWorkspace = workspaces.find((workspace) => workspaceKey(workspace) === activeWorkspaceKey) ?? null;
   const queueOwnerKey = ownerKeyForUser(authUser);
-  const [activeNavTab, setActiveNavTab] = useState<"inventory" | "purchasing" | "sales" | "finance" | "foundation" | "saas" | "all">("inventory");
+  const [activeNavTab, setActiveNavTab] = useState<
+    | "overview"
+    | "inventory"
+    | "warehouse"
+    | "purchasing"
+    | "sales"
+    | "finance"
+    | "manufacturing"
+    | "foundation"
+    | "hr"
+    | "analytics"
+    | "consolidation"
+    | "saas"
+    | "all"
+  >("overview");
+  const [activeBranchId, setActiveBranchId] = useState<string>("");
+  const [branches, setBranches] = useState<BranchDto[]>([]);
 
   useEffect(() => {
     if (!oidcConfigured) return;
@@ -124,18 +180,18 @@ export default function App() {
 
       try {
         const response = await apiFetch("/api/v1/contexts", {}, undefined, false);
-        if (!response.ok) throw new Error(`Workspace lookup returned HTTP ${response.status}.`);
+        if (!response.ok) {
+          if (response.status === 401) {
+            throw new Error("Authentication expired or invalid. Please sign in again.");
+          }
+          throw new Error(`Workspace lookup returned HTTP ${response.status}.`);
+        }
         const available = (await response.json()) as TenantCompanyContext[];
         if (!isMounted) return;
         setWorkspaces(available);
         try {
           sessionStorage.setItem("universal-erp-workspaces", JSON.stringify(available));
-          const savedKey = sessionStorage.getItem("universal-erp-active-workspace") ?? "";
-          const nextKey = available.some((workspace) => workspaceKey(workspace) === savedKey)
-            ? savedKey
-            : available[0]
-              ? workspaceKey(available[0])
-              : "";
+          const nextKey = resolveDefaultWorkspaceKey(available);
           setActiveWorkspaceKey(nextKey);
           sessionStorage.setItem("universal-erp-active-workspace", nextKey);
         } catch {
@@ -282,6 +338,29 @@ export default function App() {
 
   useEffect(() => {
     if (oidcConfigured) setProducts([]);
+  }, [activeWorkspaceKey]);
+
+  useEffect(() => {
+    if (!activeWorkspace) {
+      setBranches([]);
+      setActiveBranchId("");
+      return;
+    }
+    const loadBranches = async () => {
+      try {
+        const res = await apiFetch("/api/v1/branches", {}, activeWorkspace);
+        if (res.ok) {
+          const data: BranchDto[] = await res.json();
+          setBranches(data);
+          if (data.length > 0 && !activeBranchId) {
+            setActiveBranchId(data[0].id);
+          }
+        }
+      } catch {
+        // Fallback
+      }
+    };
+    loadBranches();
   }, [activeWorkspaceKey]);
 
   const createProduct = async (event: FormEvent<HTMLFormElement>) => {
@@ -448,13 +527,33 @@ export default function App() {
       setAuthMessage(error instanceof Error ? error.message : "Sign-out could not finish.");
     });
   };
+  const refreshWorkspaces = async () => {
+    if (!oidcConfigured || !authUser) return;
+    try {
+      const response = await apiFetch("/api/v1/contexts", {}, undefined, false);
+      if (!response.ok) return;
+      const available = (await response.json()) as TenantCompanyContext[];
+      setWorkspaces(available);
+      try {
+        sessionStorage.setItem("universal-erp-workspaces", JSON.stringify(available));
+      } catch {
+        // ignore storage errors
+      }
+    } catch {
+      // ignore transient refresh failure
+    }
+  };
   const changeWorkspace = (nextKey: string) => {
     setActiveWorkspaceKey(nextKey);
     try {
       sessionStorage.setItem("universal-erp-active-workspace", nextKey);
+      sessionStorage.setItem("universal-erp-workspace-explicit", "true");
     } catch {
       setAuthMessage("This browser could not remember the selected company. Choose it again after reopening.");
     }
+    setProducts([]);
+    setBranches([]);
+    setActiveBranchId("");
   };
   const visibleOfflineOperations = oidcConfigured
     ? offlineOperations.filter((operation) => queueOwnerKey && operation.ownerKey === queueOwnerKey)
@@ -473,278 +572,244 @@ export default function App() {
   const inventoryEnabled = apiStatus === "online" && (!oidcConfigured || Boolean(authUser && !authUser.expired && activeWorkspace));
   const inventoryStorageScope = `${queueOwnerKey ?? "development"}:${activeWorkspace ? workspaceKey(activeWorkspace) : "local"}`;
 
-  return (
-    <main className="shell">
-      <header className="topbar">
-        <div className="brand-mark">UE</div>
-        <div>
-          <strong>Universal ERP</strong>
-          <small>Application foundation</small>
-        </div>
-        <span className={`status status-${apiStatus}`} role="status" aria-live="polite">
-          {apiStatusLabel}
-        </span>
-        {oidcConfigured && (
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            {authUser ? (
-              <>
-                <span style={{ fontSize: "12px", color: "#59677f", fontWeight: 600 }}>
-                  {authUser.displayName || authUser.email || "Authenticated User"}
-                </span>
-                <span style={{ fontSize: "11px", color: "#475569", background: "#f1f5f9", padding: "2px 6px", borderRadius: "4px", fontFamily: "monospace" }} title="Firebase UID">
-                  UID: {authUser.uid}
-                </span>
-                <button
-                  className="auth-button"
-                  disabled={!authReady || isAuthSubmitting}
-                  onClick={handleSignOut}
-                  type="button"
-                >
-                  Sign out
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  className="auth-button"
-                  disabled={!authReady || isAuthSubmitting}
-                  onClick={handleGoogleSignIn}
-                  type="button"
-                >
-                  Sign in with Google
-                </button>
-                <button
-                  className="auth-button"
-                  disabled={!authReady || isAuthSubmitting}
-                  onClick={() => setShowEmailAuth(!showEmailAuth)}
-                  type="button"
-                >
-                  {showEmailAuth ? "Cancel" : "Email & Password"}
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </header>
+  const navItems: NavItem[] = [
+    { id: "overview", label: "Executive Overview", icon: "📊", group: "overview" },
+    { id: "sales", label: "Sales & POS Checkout", icon: "💳", group: "operations" },
+    { id: "inventory", label: "Catalog & Stock", icon: "📦", group: "operations" },
+    { id: "warehouse", label: "Warehouse & Barcode", icon: "🏭", group: "operations" },
+    { id: "purchasing", label: "Purchasing & GRN", icon: "🛒", group: "operations" },
+    { id: "finance", label: "Finance & Ledger", icon: "💰", group: "finance" },
+    { id: "analytics", label: "Analytics & BI", icon: "📈", group: "finance" },
+    { id: "consolidation", label: "Multi-Branch & Group", icon: "🌐", group: "finance" },
+    { id: "manufacturing", label: "Manufacturing & BOM", icon: "⚙️", group: "organization" },
+    { id: "hr", label: "HR & Global Payroll", icon: "👥", group: "organization" },
+    { id: "foundation", label: "Admin & Company Settings", icon: "🏢", group: "organization" },
+    { id: "saas", label: "SaaS Admin & Tenants", icon: "☁️", group: "platform" },
+  ];
 
-      {oidcConfigured && !authUser && showEmailAuth && (
-        <form
-          onSubmit={handleEmailSignIn}
+  return (
+    <AppShell
+      navItems={navItems}
+      activeNavId={activeNavTab}
+      onSelectNav={(id) => setActiveNavTab(id as any)}
+      companyName={activeWorkspace?.companyName || (oidcConfigured ? "Select a company" : "Universal ERP Enterprise")}
+      branchName={branches.find((b) => b.id === activeBranchId)?.branchName}
+      apiStatus={apiStatus}
+      userName={authUser?.displayName || authUser?.email || "System Administrator"}
+      userEmail={authUser?.email || "admin@universal-erp.io"}
+      onSignOut={authUser ? handleSignOut : undefined}
+    >
+      {/* Unauthenticated Login Card */}
+      {oidcConfigured && !authUser && (
+        <Card
+          title="Sign in to Universal ERP"
+          subtitle="Enterprise Multi-Company Authentication (OIDC & Firebase)"
+          icon="🔐"
+          className="mb-6"
+        >
+          <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", marginBottom: "16px" }}>
+            <Button
+              variant="primary"
+              disabled={!authReady || isAuthSubmitting}
+              onClick={handleGoogleSignIn}
+            >
+              Sign in with Google
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={!authReady || isAuthSubmitting}
+              onClick={() => setShowEmailAuth(!showEmailAuth)}
+            >
+              {showEmailAuth ? "Hide Email Form" : "Sign in with Email & Password"}
+            </Button>
+          </div>
+
+          {showEmailAuth && (
+            <form
+              onSubmit={handleEmailSignIn}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr)) auto auto",
+                gap: "12px",
+                alignItems: "end",
+                padding: "16px",
+                background: "var(--bg-subtle)",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border-base)",
+              }}
+            >
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, fontWeight: 600 }}>
+                Email address
+                <input
+                  type="email"
+                  placeholder="name@company.com"
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  required
+                  style={{
+                    height: 38,
+                    padding: "0 10px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border-base)",
+                    background: "var(--bg-surface)",
+                    color: "var(--text-primary)",
+                  }}
+                />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, fontWeight: 600 }}>
+                Password
+                <input
+                  type="password"
+                  placeholder="••••••••"
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  required
+                  style={{
+                    height: 38,
+                    padding: "0 10px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border-base)",
+                    background: "var(--bg-surface)",
+                    color: "var(--text-primary)",
+                  }}
+                />
+              </label>
+              <Button type="submit" variant="primary" disabled={isAuthSubmitting}>
+                Sign in
+              </Button>
+              <Button type="button" variant="outline" disabled={isAuthSubmitting} onClick={handleEmailSignUp}>
+                Create account
+              </Button>
+            </form>
+          )}
+        </Card>
+      )}
+
+      {/* Workspace Context Selector */}
+      {oidcConfigured && authUser && (
+        <div
           style={{
             display: "flex",
-            flexWrap: "wrap",
-            gap: "8px",
             alignItems: "center",
-            padding: "12px 16px",
-            background: "#f4f6fa",
-            borderRadius: "9px",
-            margin: "12px 8px",
-            border: "1px solid #d8deea",
+            gap: "16px",
+            padding: "12px 18px",
+            background: "var(--bg-surface)",
+            borderRadius: "var(--radius-lg)",
+            border: "1px solid var(--border-base)",
+            marginBottom: "var(--space-5)",
+            boxShadow: "var(--shadow-xs)",
+            flexWrap: "wrap",
           }}
         >
-          <input
-            type="email"
-            placeholder="Email address"
-            value={authEmail}
-            onChange={(event) => setAuthEmail(event.target.value)}
-            required
-            style={{ padding: "6px 10px", borderRadius: "6px", border: "1px solid #d8deea", font: "inherit", fontSize: "13px" }}
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={authPassword}
-            onChange={(event) => setAuthPassword(event.target.value)}
-            required
-            style={{ padding: "6px 10px", borderRadius: "6px", border: "1px solid #d8deea", font: "inherit", fontSize: "13px" }}
-          />
-          <button
-            type="submit"
-            className="auth-button"
-            disabled={isAuthSubmitting}
-            style={{ background: "#2563eb", color: "white", borderColor: "#2563eb" }}
-          >
-            Sign in
-          </button>
-          <button
-            type="button"
-            className="auth-button"
-            disabled={isAuthSubmitting}
-            onClick={handleEmailSignUp}
-          >
-            Create account
-          </button>
-        </form>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)" }}>Company:</span>
+            <select
+              id="workspace-select"
+              value={activeWorkspaceKey}
+              onChange={(event) => changeWorkspace(event.target.value)}
+              style={{
+                height: 34,
+                padding: "0 10px",
+                border: "1px solid var(--border-base)",
+                borderRadius: 6,
+                background: "var(--bg-subtle)",
+                color: "var(--text-primary)",
+                fontWeight: 600,
+                fontSize: 13,
+              }}
+            >
+              <option value="">Select a company</option>
+              {workspaces.map((workspace) => {
+                const display = resolveWorkspaceCurrencyDisplay(workspace);
+                return (
+                  <option key={workspaceKey(workspace)} value={workspaceKey(workspace)}>
+                    {workspace.tenantName} · {workspace.companyName} ({display.badgeText || workspace.baseCurrencyCode})
+                  </option>
+                );
+              })}
+            </select>
+            {activeWorkspace && (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  padding: "2px 8px",
+                  borderRadius: "12px",
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  background: activeWorkspace.tenantCode === "DEMO-CLOUD" ? "rgba(34, 197, 94, 0.15)" : "rgba(59, 130, 246, 0.15)",
+                  color: activeWorkspace.tenantCode === "DEMO-CLOUD" ? "var(--success-600)" : "var(--primary-600)",
+                  border: `1px solid ${activeWorkspace.tenantCode === "DEMO-CLOUD" ? "rgba(34, 197, 94, 0.3)" : "rgba(59, 130, 246, 0.3)"}`,
+                }}
+              >
+                {activeWorkspace.tenantCode} · {resolveWorkspaceCurrencyDisplay(activeWorkspace).badgeText || activeWorkspace.baseCurrencyCode}
+              </span>
+            )}
+          </div>
+
+          {branches.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)" }}>Branch:</span>
+              <select
+                id="branch-select"
+                value={activeBranchId}
+                onChange={(event) => setActiveBranchId(event.target.value)}
+                style={{
+                  height: 34,
+                  padding: "0 10px",
+                  border: "1px solid var(--border-base)",
+                  borderRadius: 6,
+                  background: "var(--bg-subtle)",
+                  color: "var(--text-primary)",
+                  fontWeight: 600,
+                  fontSize: 13,
+                }}
+              >
+                <option value="">All Branches / HQ</option>
+                {branches.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.branchCode} · {b.branchName}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div style={{ marginLeft: "auto", fontSize: 12, color: "var(--text-muted)" }}>
+            {authUser.expired ? (
+              <span style={{ color: "var(--danger-600)", fontWeight: 700 }}>Session expired. Sign in again.</span>
+            ) : (
+              <span style={{ color: "var(--success-600)" }}>✓ Active Tenant Session</span>
+            )}
+          </div>
+        </div>
       )}
 
-      <section className="welcome">
-        <p className="eyebrow">MULTI-COMPANY BUSINESS PLATFORM</p>
-        <h1>One workspace for your business operations.</h1>
-        <p className="intro">
-          {oidcConfigured
-            ? "Sign in to access your company catalog. Saved offline entries remain on this device until the shared server confirms them."
-            : "The local product catalog is connected to PostgreSQL. Shared sign-in and hosting are configured separately."}
-        </p>
-      </section>
-
-      {oidcConfigured && authUser && (
-        <section className="workspace-picker" aria-label="Company workspace">
-          <label htmlFor="workspace-select">Company</label>
-          <select
-            id="workspace-select"
-            value={activeWorkspaceKey}
-            onChange={(event) => changeWorkspace(event.target.value)}
-          >
-            <option value="">Select a company</option>
-            {workspaces.map((workspace) => (
-              <option key={workspaceKey(workspace)} value={workspaceKey(workspace)}>
-                {workspace.tenantName} · {workspace.companyName}
-              </option>
-            ))}
-          </select>
-          <span>{authUser.expired ? "Session expired. Sign in again to sync saved work." : "Changes are checked against your current membership."}</span>
-        </section>
-      )}
-      {oidcConfigured && authMessage && <p className="auth-message" role="status">{authMessage}</p>}
-      {!oidcConfigured && !import.meta.env.DEV && (
-        <p className="auth-message" role="status">Shared sign-in is not configured for this deployment.</p>
+      {oidcConfigured && authMessage && (
+        <div
+          style={{
+            padding: "10px 16px",
+            background: "var(--warning-bg)",
+            border: "1px solid var(--warning-border)",
+            borderRadius: "var(--radius-md)",
+            color: "var(--warning-text)",
+            fontSize: 13,
+            marginBottom: "var(--space-4)",
+          }}
+          role="status"
+        >
+          {authMessage}
+        </div>
       )}
 
-      <nav
-        aria-label="ERP Modules"
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: "8px",
-          marginTop: "16px",
-          marginBottom: "16px",
-          padding: "8px 12px",
-          background: "#ffffff",
-          borderRadius: "8px",
-          border: "1px solid #d8deea",
-          boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
-        }}
-      >
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("inventory")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "inventory" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "inventory" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "inventory" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          📦 Catalog & Inventory
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("purchasing")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "purchasing" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "purchasing" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "purchasing" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          🛒 Purchasing & GRN
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("sales")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "sales" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "sales" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "sales" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          💳 Sales & POS
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("finance")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "finance" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "finance" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "finance" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          💰 Finance & Ledger
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("foundation")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "foundation" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "foundation" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "foundation" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          🏢 Foundation & Admin
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("saas")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "saas" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "saas" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "saas" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          🌐 SaaS & Tenants
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveNavTab("all")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "6px",
-            border: "1px solid",
-            borderColor: activeNavTab === "all" ? "#2563eb" : "#e2e8f0",
-            background: activeNavTab === "all" ? "#2563eb" : "#f8fafc",
-            color: activeNavTab === "all" ? "#ffffff" : "#1e293b",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "13px",
-          }}
-        >
-          📑 View All
-        </button>
-      </nav>
+      {/* Dashboard Executive Overview */}
+      {(activeNavTab === "overview" || activeNavTab === "all") && (
+        <DashboardWorkspace
+          key={activeWorkspaceKey || "overview"}
+          workspace={activeWorkspace}
+          onNavigate={(target) => setActiveNavTab(target as any)}
+        />
+      )}
 
       {(activeNavTab === "inventory" || activeNavTab === "all") && (
         <>
@@ -860,6 +925,7 @@ export default function App() {
           </section>
 
           <InventoryWorkspace
+            key={activeWorkspaceKey || "inventory"}
             enabled={inventoryEnabled}
             canQueue={!oidcConfigured || Boolean(queueOwnerKey && activeWorkspace)}
             persistentStorageGranted={persistentStorageGranted}
@@ -875,8 +941,17 @@ export default function App() {
         </>
       )}
 
+      {(activeNavTab === "warehouse" || activeNavTab === "all") && (
+        <WarehouseWorkspace
+          key={activeWorkspaceKey || "warehouse"}
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
+      )}
+
       {(activeNavTab === "purchasing" || activeNavTab === "all") && (
         <PurchasingWorkspace
+          key={activeWorkspaceKey || "purchasing"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -884,6 +959,7 @@ export default function App() {
 
       {(activeNavTab === "sales" || activeNavTab === "all") && (
         <SalesWorkspace
+          key={activeWorkspaceKey || "sales"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -891,6 +967,15 @@ export default function App() {
 
       {(activeNavTab === "finance" || activeNavTab === "all") && (
         <FinanceWorkspace
+          key={activeWorkspaceKey || "finance"}
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
+      )}
+
+      {(activeNavTab === "manufacturing" || activeNavTab === "all") && (
+        <ManufacturingWorkspace
+          key={activeWorkspaceKey || "manufacturing"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
@@ -898,13 +983,44 @@ export default function App() {
 
       {(activeNavTab === "foundation" || activeNavTab === "all") && (
         <FoundationWorkspace
+          key={activeWorkspaceKey || "foundation"}
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+          onCurrencySettingsUpdated={refreshWorkspaces}
+        />
+      )}
+
+      {(activeNavTab === "hr" || activeNavTab === "all") && (
+        <HRWorkspace
+          key={activeWorkspaceKey || "hr"}
           enabled={inventoryEnabled}
           workspace={activeWorkspace}
         />
       )}
 
+      {(activeNavTab === "analytics" || activeNavTab === "all") && (
+        <AnalyticsWorkspace
+          key={activeWorkspaceKey || "analytics"}
+          enabled={inventoryEnabled}
+          workspace={activeWorkspace}
+        />
+      )}
+
+      {(activeNavTab === "consolidation" || activeNavTab === "all") && (
+        <ConsolidationWorkspace
+          key={activeWorkspaceKey || "consolidation"}
+          tenantId={activeWorkspace?.tenantId ?? "development-tenant"}
+          companyId={activeWorkspace?.companyId ?? "development-company"}
+          userId={queueOwnerKey ?? "development-user"}
+        />
+      )}
+
       {(activeNavTab === "saas" || activeNavTab === "all") && (
-        <TenancyWorkspace />
+        <SaaSPlatformWorkspace
+          key={activeWorkspaceKey || "saas"}
+          tenantId={activeWorkspace?.tenantId}
+          companyId={activeWorkspace?.companyId}
+        />
       )}
 
       {apiStatus === "offline" && (
@@ -924,7 +1040,6 @@ export default function App() {
         ))}
       </section>
 
-      <footer>English · Urdu-ready · Web client starter</footer>
-    </main>
+    </AppShell>
   );
 }

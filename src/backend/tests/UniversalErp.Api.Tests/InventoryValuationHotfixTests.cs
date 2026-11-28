@@ -22,8 +22,9 @@ using Xunit;
 namespace UniversalErp.Api.Tests;
 
 /// <summary>
-/// Regression tests for Option A2 currency-aware inventory valuation, FX resolution,
-/// GL currency reconciliation, tenant/company isolation, and valuation authorization.
+/// Regression tests for currency-aware inventory valuation, FX resolution,
+/// GL currency reconciliation, tenant/company isolation, and valuation authorization
+/// (reconciled from main hotfix 060401e to Phase 5 / IAS 21 Rev22 contracts).
 /// </summary>
 public sealed class InventoryValuationHotfixTests
 {
@@ -52,7 +53,7 @@ public sealed class InventoryValuationHotfixTests
                 return Task.FromResult(factory(tenantId, companyId));
             }
 
-            return Task.FromResult(InventoryValuationReportSummary.Empty("PKR"));
+            return Task.FromResult(InventoryValuationCalculator.BuildReport("PKR", "PKR", [], [], 0m, []));
         }
 
         public Task<IReadOnlyList<ProductCategorySummary>> ListCategoriesAsync(Guid tenantId, CancellationToken cancellationToken) => throw new NotImplementedException();
@@ -125,6 +126,22 @@ public sealed class InventoryValuationHotfixTests
             SourceCurrencyCode: sourceCurrency,
             StatusCode: "available");
 
+    private static InventoryValuationExchangeRateInput MakeSpotRate(
+        string fromCurrency,
+        string toCurrency,
+        string effectiveAtIso,
+        decimal rate)
+    {
+        var effectiveAt = DateTimeOffset.Parse(effectiveAtIso);
+        return new InventoryValuationExchangeRateInput(
+            FromCurrencyCode: fromCurrency,
+            ToCurrencyCode: toCurrency,
+            EffectiveAt: effectiveAt,
+            EffectiveDate: DateOnly.FromDateTime(effectiveAt.UtcDateTime),
+            RateType: "spot",
+            Rate: rate);
+    }
+
     [Fact]
     public async Task ValuationReportService_PropagatesTenantAndCompanyIsolation()
     {
@@ -137,11 +154,13 @@ public sealed class InventoryValuationHotfixTests
             cid == companyA
                 ? InventoryValuationCalculator.BuildReport(
                     "USD",
+                    "USD",
                     [MakeLayer("PICK-01", "goods_receipt", DateTimeOffset.Parse("2026-11-10T07:28:34Z"), 20m, 18m, 10m, "USD")],
                     [],
                     18m,
                     [new InventoryValuationGlCurrencyBalanceInput("USD", 1, 180m)])
                 : InventoryValuationCalculator.BuildReport(
+                    "PKR",
                     "PKR",
                     [MakeLayer("RECEIVE-01", "goods_receipt", DateTimeOffset.Parse("2026-11-10T07:28:34Z"), 90m, 90m, 45.2778m, "PKR")],
                     [],
@@ -192,7 +211,8 @@ public sealed class InventoryValuationHotfixTests
         };
 
         var report = InventoryValuationCalculator.BuildReport(
-            companyBaseCurrencyCode: "USD",
+            companyFunctionalCurrencyCode: "USD",
+            companyPresentationCurrencyCode: "USD",
             sourceLayers: layers,
             exchangeRates: [],
             totalPhysicalStock: 30m,
@@ -201,13 +221,13 @@ public sealed class InventoryValuationHotfixTests
         Assert.Equal("USD", report.FunctionalCurrencyCode);
         Assert.Equal(400.00m, report.FunctionalValuation);
         Assert.Equal(400.00m, report.TotalValuation);
-        Assert.Null(report.TotalValuationPkr);
+        Assert.Equal(0m, report.TotalValuationPkr);
         Assert.Equal(400.00m, report.GeneralLedger1200FunctionalBalance);
         Assert.Equal(400.00m, report.GeneralLedger1200Balance);
-        Assert.Null(report.GeneralLedger1200BalancePkr);
+        Assert.Equal(0m, report.GeneralLedger1200BalancePkr);
         Assert.Equal(0m, report.ReconciliationVarianceFunctional);
         Assert.Equal(0m, report.ReconciliationVariance);
-        Assert.Null(report.ReconciliationVariancePkr);
+        Assert.Equal(0m, report.ReconciliationVariancePkr);
         Assert.True(report.IsReconciled);
         Assert.Equal("RECONCILED", report.ReconciliationStatus);
         Assert.True(report.IsFunctionalValuationResolved);
@@ -215,7 +235,7 @@ public sealed class InventoryValuationHotfixTests
         Assert.Equal(0, report.MissingExchangeRateLayerCount);
         Assert.Null(report.UnresolvedCurrencyIssue);
 
-        var totalSourceUsd = Assert.Single(report.SourceValuationByCurrency);
+        var totalSourceUsd = Assert.Single(report.SourceValuationByCurrency!);
         Assert.Equal("USD", totalSourceUsd.CurrencyCode);
         Assert.Equal(400.00m, totalSourceUsd.Amount);
 
@@ -247,11 +267,11 @@ public sealed class InventoryValuationHotfixTests
         var exchangeRates = new[]
         {
             // Historical spot rate applicable on Nov 10: 1 PKR = 0.0036 USD
-            new InventoryValuationExchangeRateInput("PKR", "USD", DateTimeOffset.Parse("2026-11-10T00:00:00Z"), 0.0036m),
+            MakeSpotRate("PKR", "USD", "2026-11-10T00:00:00Z", 0.0036m),
             // Newer historical spot rate applicable on Nov 15 (inverse quote convention: 1 USD = 250 PKR => 0.0040 USD/PKR)
-            new InventoryValuationExchangeRateInput("USD", "PKR", DateTimeOffset.Parse("2026-11-15T00:00:00Z"), 250m),
+            MakeSpotRate("USD", "PKR", "2026-11-15T00:00:00Z", 250m),
             // Future rate after all receipt timestamps — MUST NOT be applied to Nov 10 or Nov 15 layers
-            new InventoryValuationExchangeRateInput("PKR", "USD", DateTimeOffset.Parse("2026-11-25T00:00:00Z"), 0.0100m),
+            MakeSpotRate("PKR", "USD", "2026-11-25T00:00:00Z", 0.0100m),
         };
 
         // Expected USD functional values:
@@ -260,7 +280,8 @@ public sealed class InventoryValuationHotfixTests
         // Layer 3: 135 PKR / 250 = 0.5400 USD
         // Total USD = 8.1540 USD (source total = PKR 2,250.00)
         var report = InventoryValuationCalculator.BuildReport(
-            companyBaseCurrencyCode: "USD",
+            companyFunctionalCurrencyCode: "USD",
+            companyPresentationCurrencyCode: "USD",
             sourceLayers: layers,
             exchangeRates: exchangeRates,
             totalPhysicalStock: 50m,
@@ -271,13 +292,13 @@ public sealed class InventoryValuationHotfixTests
         Assert.Equal(0, report.MissingExchangeRateLayerCount);
         Assert.Equal(8.1540m, report.FunctionalValuation);
         Assert.Equal(8.1540m, report.TotalValuation);
-        Assert.Null(report.TotalValuationPkr);
+        Assert.Equal(0m, report.TotalValuationPkr);
         Assert.Equal(8.1540m, report.GeneralLedger1200FunctionalBalance);
         Assert.Equal(0m, report.ReconciliationVarianceFunctional);
         Assert.True(report.IsReconciled);
         Assert.Equal("RECONCILED", report.ReconciliationStatus);
 
-        var sourcePkr = Assert.Single(report.SourceValuationByCurrency);
+        var sourcePkr = Assert.Single(report.SourceValuationByCurrency!);
         Assert.Equal("PKR", sourcePkr.CurrencyCode);
         Assert.Equal(2250m, sourcePkr.Amount);
         Assert.Equal(50m, sourcePkr.Quantity);
@@ -312,11 +333,12 @@ public sealed class InventoryValuationHotfixTests
         // Include ONLY a later ("today's") exchange rate after layer timestamps — must not be substituted!
         var futureRateOnly = new[]
         {
-            new InventoryValuationExchangeRateInput("PKR", "USD", DateTimeOffset.Parse("2026-11-25T00:00:00Z"), 0.0036m),
+            MakeSpotRate("PKR", "USD", "2026-11-25T00:00:00Z", 0.0036m),
         };
 
         var report = InventoryValuationCalculator.BuildReport(
-            companyBaseCurrencyCode: "USD",
+            companyFunctionalCurrencyCode: "USD",
+            companyPresentationCurrencyCode: "USD",
             sourceLayers: layers,
             exchangeRates: futureRateOnly,
             totalPhysicalStock: 50m,
@@ -330,20 +352,20 @@ public sealed class InventoryValuationHotfixTests
         Assert.Equal(3, report.MissingExchangeRateLayerCount);
         Assert.Null(report.FunctionalValuation);
         Assert.Null(report.TotalValuation);
-        Assert.Null(report.TotalValuationPkr);
+        Assert.Equal(0m, report.TotalValuationPkr);
         Assert.Null(report.GeneralLedger1200FunctionalBalance);
         Assert.Null(report.GeneralLedger1200Balance);
-        Assert.Null(report.GeneralLedger1200BalancePkr);
+        Assert.Equal(0m, report.GeneralLedger1200BalancePkr);
         Assert.Null(report.ReconciliationVarianceFunctional);
         Assert.Null(report.ReconciliationVariance);
-        Assert.Null(report.ReconciliationVariancePkr);
+        Assert.Equal(0m, report.ReconciliationVariancePkr);
         Assert.NotNull(report.UnresolvedCurrencyIssue);
 
-        var sourcePkr = Assert.Single(report.SourceValuationByCurrency);
+        var sourcePkr = Assert.Single(report.SourceValuationByCurrency!);
         Assert.Equal("PKR", sourcePkr.CurrencyCode);
         Assert.Equal(2250m, sourcePkr.Amount);
 
-        var glPkr = Assert.Single(report.GeneralLedger1200BalancesByCurrency);
+        var glPkr = Assert.Single(report.GeneralLedger1200BalancesByCurrency!);
         Assert.Equal("PKR", glPkr.CurrencyCode);
         Assert.Equal(2250m, glPkr.Amount);
 
@@ -363,7 +385,7 @@ public sealed class InventoryValuationHotfixTests
         Assert.Equal("USD", doc.RootElement.GetProperty("functionalCurrencyCode").GetString());
         Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("functionalValuation").ValueKind);
         Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("totalValuation").ValueKind);
-        Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("totalValuationPkr").ValueKind);
+        Assert.Equal(0m, doc.RootElement.GetProperty("totalValuationPkr").GetDecimal());
         Assert.False(doc.RootElement.GetProperty("isReconciled").GetBoolean());
     }
 
@@ -372,7 +394,8 @@ public sealed class InventoryValuationHotfixTests
     {
         // Even if numeric totals match (100 vs 100), PKR GL journals must NEVER reconcile against a USD company!
         var mismatchedGlReport = InventoryValuationCalculator.BuildReport(
-            companyBaseCurrencyCode: "USD",
+            companyFunctionalCurrencyCode: "USD",
+            companyPresentationCurrencyCode: "USD",
             sourceLayers: [MakeLayer("PICK-01", "goods_receipt", DateTimeOffset.Parse("2026-11-10T07:00:00Z"), 10m, 10m, 10m, "USD")],
             exchangeRates: [],
             totalPhysicalStock: 10m,
@@ -388,7 +411,8 @@ public sealed class InventoryValuationHotfixTests
 
         // Local staging parity (PKR company, PKR layers, PKR GL journals) must reconcile cleanly
         var localStagingReport = InventoryValuationCalculator.BuildReport(
-            companyBaseCurrencyCode: "PKR",
+            companyFunctionalCurrencyCode: "PKR",
+            companyPresentationCurrencyCode: "PKR",
             sourceLayers: [MakeLayer("RECEIVE-01", "goods_receipt", DateTimeOffset.Parse("2026-11-10T07:00:00Z"), 90m, 90m, 45.277777778m, "PKR")],
             exchangeRates: [],
             totalPhysicalStock: 90m,
@@ -405,7 +429,7 @@ public sealed class InventoryValuationHotfixTests
     }
 
     [Fact]
-    public async Task InventoryEndpoints_MapOnlyValuationReport_AndRequireDedicatedValuationViewPolicy()
+    public async Task InventoryEndpoints_RequireDedicatedValuationReportPolicy_AndPhase5Routes()
     {
         var builder = WebApplication.CreateBuilder();
         builder.Services.AddSingleton<ITenantContextAccessor>(new StubTenantContextAccessor(
@@ -416,9 +440,9 @@ public sealed class InventoryValuationHotfixTests
         builder.Services.AddSingleton<IAuthorizationHandler>(new StubDatabasePermissionHandler(granted));
         builder.Services.AddAuthorization(options =>
         {
-            options.AddPolicy("inventory.valuation.view", policy => policy
+            options.AddPolicy("inventory.valuation.report", policy => policy
                 .RequireAuthenticatedUser()
-                .AddRequirements(new DatabasePermissionRequirement("inventory.valuation.view")));
+                .AddRequirements(new DatabasePermissionRequirement("inventory.valuation.report")));
         });
 
         var app = builder.Build();
@@ -437,11 +461,10 @@ public sealed class InventoryValuationHotfixTests
             .GetOrderedMetadata<IAuthorizeData>()
             .Select(a => a.Policy)
             .ToList();
-        Assert.Equal(["inventory.valuation.view"], authPolicies);
-        Assert.DoesNotContain("inventory.valuation.report", authPolicies);
+        Assert.Equal(["inventory.valuation.report"], authPolicies);
         Assert.DoesNotContain("inventory.availability.view", authPolicies);
 
-        var nonHotfixPhase5Routes = new[]
+        var expectedPhase5Routes = new[]
         {
             "/api/v1/inventory/reservations",
             "/api/v1/inventory/atp",
@@ -450,10 +473,10 @@ public sealed class InventoryValuationHotfixTests
             "/api/v1/inventory/returns",
             "/api/v1/inventory/movement-history",
         };
-        foreach (var excludedRoute in nonHotfixPhase5Routes)
+        foreach (var route in expectedPhase5Routes)
         {
-            Assert.DoesNotContain(routeEndpoints, e =>
-                (e.RoutePattern.RawText ?? string.Empty).StartsWith(excludedRoute, StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(routeEndpoints, e =>
+                (e.RoutePattern.RawText ?? string.Empty).StartsWith(route, StringComparison.OrdinalIgnoreCase));
         }
 
         // Verify authorization policy enforcement for missing vs granted permission
@@ -466,15 +489,15 @@ public sealed class InventoryValuationHotfixTests
         ], "Firebase"));
 
         granted.Add("inventory.availability.view");
-        var deniedWithoutValuation = await authService.AuthorizeAsync(viewerUser, null, "inventory.valuation.view");
+        var deniedWithoutValuation = await authService.AuthorizeAsync(viewerUser, null, "inventory.valuation.report");
         Assert.False(deniedWithoutValuation.Succeeded);
 
-        granted.Add("inventory.valuation.view");
-        var allowedWithValuation = await authService.AuthorizeAsync(viewerUser, null, "inventory.valuation.view");
+        granted.Add("inventory.valuation.report");
+        var allowedWithValuation = await authService.AuthorizeAsync(viewerUser, null, "inventory.valuation.report");
         Assert.True(allowedWithValuation.Succeeded);
 
         var unauthUser = new ClaimsPrincipal(new ClaimsIdentity());
-        var deniedUnauthenticated = await authService.AuthorizeAsync(unauthUser, null, "inventory.valuation.view");
+        var deniedUnauthenticated = await authService.AuthorizeAsync(unauthUser, null, "inventory.valuation.report");
         Assert.False(deniedUnauthenticated.Succeeded);
     }
 
@@ -528,7 +551,7 @@ public sealed class InventoryValuationHotfixTests
     }
 
     [Fact]
-    public void RepositoryImplementation_HasNoDependencyOnM027OrLaterTables()
+    public void RepositoryImplementation_UsesCompanyScopedValuationAndCurrencySettings()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "UniversalErp.sln")))
@@ -537,28 +560,13 @@ public sealed class InventoryValuationHotfixTests
         }
         Assert.NotNull(dir);
         var repoSource = File.ReadAllText(Path.Combine(
-            dir!.FullName, "src", "UniversalErp.Infrastructure", "Inventory", "PostgresInventoryWorkflowRepository.cs"));
+            dir!.FullName, "src", "UniversalErp.Infrastructure", "Inventory", "PostgresInventoryWorkflowRepository.Phase5.cs"));
 
-        var forbiddenM027Tables = new[]
-        {
-            "stock_pick_list",
-            "stock_pick_line",
-            "stock_count_session",
-            "stock_count_line",
-            "stock_return",
-            "stock_return_line",
-            "stock_reservation",
-        };
-
-        foreach (var table in forbiddenM027Tables)
-        {
-            Assert.DoesNotContain(table, repoSource, StringComparison.OrdinalIgnoreCase);
-        }
-
-        Assert.Contains("identity.get_company_settings", repoSource, StringComparison.Ordinal);
+        Assert.Contains("CompanyCurrencyResolver.ResolveSettingsAsync", repoSource, StringComparison.Ordinal);
         Assert.Contains("erp_inventory.inventory_cost_layer", repoSource, StringComparison.Ordinal);
         Assert.Contains("erp_inventory.stock_balance", repoSource, StringComparison.Ordinal);
         Assert.Contains("finance.exchange_rates", repoSource, StringComparison.Ordinal);
+        Assert.Contains("WHERE tenant_id = @tenantId AND company_id = @companyId", repoSource, StringComparison.Ordinal);
         Assert.Contains("finance.journal_lines", repoSource, StringComparison.Ordinal);
         Assert.Contains("j.functional_currency", repoSource, StringComparison.Ordinal);
     }

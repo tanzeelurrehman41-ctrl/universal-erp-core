@@ -13,6 +13,10 @@ using UniversalErp.Api.Development;
 using UniversalErp.Api.HealthChecks;
 using UniversalErp.Api.Inventory;
 using UniversalErp.Api.Finance;
+using UniversalErp.Api.Manufacturing;
+using UniversalErp.Api.Warehouse;
+using UniversalErp.Api.HrPayroll;
+using UniversalErp.Api.Analytics;
 using UniversalErp.Api.Purchasing;
 using UniversalErp.Api.Sales;
 using UniversalErp.Api.Security;
@@ -22,6 +26,10 @@ using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Finance;
 using UniversalErp.Application.Foundation;
 using UniversalErp.Application.Inventory;
+using UniversalErp.Application.Manufacturing;
+using UniversalErp.Application.Warehouse;
+using UniversalErp.Application.HrPayroll;
+using UniversalErp.Application.Analytics;
 using UniversalErp.Application.Purchasing;
 using UniversalErp.Application.Sales;
 using UniversalErp.Application.Sync;
@@ -29,11 +37,27 @@ using UniversalErp.Application.Tenancy;
 using UniversalErp.Infrastructure.Finance;
 using UniversalErp.Infrastructure.Foundation;
 using UniversalErp.Infrastructure.Inventory;
+using UniversalErp.Infrastructure.Manufacturing;
+using UniversalErp.Infrastructure.Warehouse;
+using UniversalErp.Infrastructure.HrPayroll;
+using UniversalErp.Infrastructure.Analytics;
 using UniversalErp.Infrastructure.Purchasing;
 using UniversalErp.Infrastructure.Sales;
 using UniversalErp.Infrastructure.Sync;
 using UniversalErp.Infrastructure.Tenancy;
 using UniversalErp.Api.Foundation;
+using UniversalErp.Api.Branches;
+using UniversalErp.Api.Consolidations;
+using UniversalErp.Api.Integrations;
+using UniversalErp.Api.SaaS;
+using UniversalErp.Application.Branches;
+using UniversalErp.Application.Consolidations;
+using UniversalErp.Application.Integrations;
+using UniversalErp.Application.SaaS;
+using UniversalErp.Infrastructure.Branches;
+using UniversalErp.Infrastructure.Consolidations;
+using UniversalErp.Infrastructure.Integrations;
+using UniversalErp.Infrastructure.SaaS;
 
 var builder = WebApplication.CreateBuilder(args);
 var isDevelopment = builder.Environment.IsDevelopment();
@@ -93,12 +117,33 @@ builder.Services.AddScoped<ITenantOnboardingRepository, PostgresTenantOnboarding
 builder.Services.AddScoped<TenantOnboardingService>();
 builder.Services.AddScoped<IFinanceRepository, PostgresFinanceRepository>();
 builder.Services.AddScoped<FinanceService>();
+builder.Services.AddScoped<IManufacturingRepository, PostgresManufacturingRepository>();
+builder.Services.AddScoped<ManufacturingService>();
+builder.Services.AddScoped<IWarehouseRepository, PostgresWarehouseRepository>();
+builder.Services.AddScoped<WarehouseService>();
+builder.Services.AddScoped<IHrPayrollRepository, PostgresHrPayrollRepository>();
+builder.Services.AddScoped<HrPayrollService>();
+builder.Services.AddScoped<IAnalyticsRepository, PostgresAnalyticsRepository>();
+builder.Services.AddScoped<AnalyticsService>();
 builder.Services.AddScoped<ISupplyChainOutboxRepository, PostgresSupplyChainOutboxRepository>();
 builder.Services.AddScoped<SupplyChainOutboxService>();
 builder.Services.AddScoped<ISalesRepository, PostgresSalesRepository>();
 builder.Services.AddScoped<SalesService>();
 builder.Services.AddScoped<IFoundationRepository, PostgresFoundationRepository>();
 builder.Services.AddScoped<FoundationService>();
+builder.Services.AddScoped<IBranchesRepository, PostgresBranchesRepository>();
+builder.Services.AddScoped<BranchService>();
+builder.Services.AddSingleton<ConsolidationEliminationEngine>();
+builder.Services.AddScoped<IConsolidationsRepository, PostgresConsolidationsRepository>();
+builder.Services.AddScoped<ConsolidationService>();
+builder.Services.AddSingleton<WebhookSigningEngine>();
+builder.Services.AddScoped<IIntegrationsRepository, PostgresIntegrationsRepository>();
+builder.Services.AddScoped<IntegrationsService>();
+builder.Services.AddSingleton<EntitlementEnforcementEngine>();
+builder.Services.AddSingleton<BillingEngine>();
+builder.Services.AddSingleton<IPaymentProvider, SandboxPaymentProvider>();
+builder.Services.AddScoped<ISaaSRepository, PostgresSaaSRepository>();
+builder.Services.AddScoped<SaaSService>();
 
 var authProvider = builder.Configuration["Authentication:Provider"]?.Trim();
 var isAuthExplicitlyConfigured = !string.IsNullOrWhiteSpace(authProvider);
@@ -326,12 +371,64 @@ else
             "inventory.receipt.create", "inventory.receipt.post",
             "inventory.transfer.create", "inventory.adjustment.create",
             "inventory.availability.view", "inventory.valuation.view",
+            "inventory.reservation.create", "inventory.reservation.release", "inventory.reservation.view",
+            "inventory.pick.create", "inventory.pick.dispatch", "inventory.pick.view",
+            "inventory.count.create", "inventory.count.record", "inventory.count.approve", "inventory.count.view",
+            "inventory.adjustment.approve", "inventory.returns.create", "inventory.returns.post",
+            "inventory.history.view", "inventory.valuation.report",
             "purchasing.supplier.view", "purchasing.supplier.create",
-            "purchasing.po.view", "purchasing.po.create", "purchasing.po.confirm",
+            "purchasing.po.view", "purchasing.po.create", "purchasing.po.confirm", "purchasing.po.approve",
             "purchasing.grn.view", "purchasing.grn.post",
+            "purchasing.invoice.view", "purchasing.invoice.create", "purchasing.invoice.match",
+            "purchasing.inspection.view", "purchasing.inspection.record", "purchasing.quarantine.release",
+            "purchasing.return.view", "purchasing.return.create",
+            "purchasing.debit_note.view", "purchasing.debit_note.create",
+            "purchasing.supplier.balance",
             "sales.customer.view", "sales.customer.create",
             "sales.order.view", "sales.order.create", "sales.order.confirm",
             "sales.invoice.view", "sales.invoice.post",
+            "sales.quotation.create", "sales.quotation.approve",
+            "sales.order.approve",
+            "sales.dispatch.create", "sales.dispatch.confirm",
+            "sales.receipt.create", "sales.receipt.allocate",
+            "sales.return.create", "sales.return.approve",
+            "sales.creditnote.create", "sales.creditnote.approve",
+            "sales.receivable.view",
+            "finance.account.view", "finance.account.manage",
+            "finance.journal.view", "finance.journal.post", "finance.journal.reverse",
+            "finance.period.manage", "finance.period.close", "finance.period.reopen",
+            "finance.bank.manage", "finance.bank.reconcile",
+            "finance.tax.manage", "finance.asset.manage", "finance.asset.depreciate",
+            "finance.reports.view", "finance.exchange_rate.manage",
+            "admin.currency_settings.view", "admin.currency_settings.manage",
+            "mfg.bom.view", "mfg.bom.manage",
+            "mfg.work_center.manage", "mfg.routing.manage",
+            "mfg.work_order.view", "mfg.work_order.create", "mfg.work_order.approve",
+            "mfg.material.reserve", "mfg.material.issue", "mfg.material.return",
+            "mfg.operation.report", "mfg.qc.inspect", "mfg.work_order.complete",
+            "mfg.reports.view",
+            "warehouse.zone.manage", "warehouse.bin.manage",
+            "warehouse.barcode.view", "warehouse.barcode.generate",
+            "warehouse.scan.execute", "warehouse.putaway.execute",
+            "warehouse.wave.manage", "warehouse.pick.execute",
+            "warehouse.pack.manage", "warehouse.dispatch.manage",
+            "warehouse.replenishment.manage", "warehouse.replenishment.execute",
+            "warehouse.transfer.execute", "warehouse.quarantine.manage",
+            "warehouse.reports.view",
+            "hr.employee.read", "hr.employee.manage",
+            "hr.department.manage",
+            "hr.attendance.read", "hr.attendance.manage",
+            "hr.leave.read", "hr.leave.apply", "hr.leave.approve",
+            "payroll.period.manage", "payroll.process", "payroll.approve",
+            "payroll.post_gl", "payroll.reverse", "payroll.salary.view",
+            "payroll.loan.manage", "hr.reports.view",
+            "analytics.dashboard.view", "analytics.financial.view",
+            "analytics.supply_chain.view", "analytics.workforce.view",
+            "analytics.kpi.manage", "analytics.export",
+            "branch.view", "branch.manage", "branch.switch",
+            "intercompany.transfer.create", "intercompany.transfer.receive",
+            "consolidation.run", "consolidation.view",
+            "integrations.webhook.manage", "integrations.partner.manage",
         })
         {
             options.AddPolicy(permissionCode, policy => policy
@@ -358,15 +455,21 @@ if (!effectiveDevMode)
 
 var moduleCatalog = new[]
 {
-    new { id = "foundation", name = "Platform foundation", status = "In progress", description = "Tenant, company, location, identity, and database foundations." },
+    new { id = "foundation", name = "Platform foundation", status = "Active", description = "Tenant, company, location, identity, and RBAC permission foundations." },
     new { id = "core", name = "Core application", status = "Starter", description = "API host and web, Windows, and Android application shells." },
-    new { id = "inventory", name = "Inventory", status = "In progress", description = "Catalog, units, variants, warehouses, bins, and atomic untracked stock receipts; transfers, reservations, and valuation remain." },
-    new { id = "purchasing", name = "Purchasing", status = "In progress", description = "Suppliers, purchase orders, goods received notes with idempotent posting and inventory outbox events; invoice matching and quality inspection remain." },
-    new { id = "finance", name = "Finance", status = "In progress", description = "Chart of Accounts, balanced general ledger journals, and real-time trial balance." },
-    new { id = "security", name = "Security and access", status = "In progress", description = "OIDC bearer validation and live membership/permission checks; user provisioning and client sign-in remain." },
+    new { id = "inventory", name = "Inventory", status = "Active", description = "Catalog, units, variants, warehouses, bins, atomic stock receipts, multi-bin stock transfers, reservations & ATP calculation, and FIFO valuation layer engine." },
+    new { id = "purchasing", name = "Purchasing", status = "Active", description = "Suppliers, purchase orders, goods received notes with idempotent posting, inventory outbox events, 3-way invoice matching, and quality inspection workflows." },
+    new { id = "finance", name = "Finance", status = "Active", description = "Chart of Accounts, General Ledger, Treasury, Bank Reconciliation, Fixed Assets, Tax, and Period Close." },
+    new { id = "manufacturing", name = "Manufacturing", status = "Active", description = "Bill of Materials, Multi-Level Components, Routings, Work Centers, Work Orders, FIFO Material Issues, WIP Accounting, and Quality Control." },
+    new { id = "warehouse", name = "Warehouse & Logistics", status = "Active", description = "Zones, aisles, racks, shelf bins, GS1 barcode scanning, directed putaway, wave picking, cartonization packing, replenishment, transfers, and quarantine." },
+    new { id = "hr_payroll", name = "HR, Attendance & Payroll", status = "Active", description = "Employee directory, hierarchy, shifts, attendance, leaves, statutory tax slabs, EOBI, PF, loans, payslips, and GL integration." },
+    new { id = "security", name = "Security and access", status = "Active", description = "OIDC bearer token validation, network clock synchronization, transparent token refresh, and live membership & RLS permission checks." },
     new { id = "offline", name = "Offline sync", status = "In progress", description = "Encrypted local journals, authenticated device grants, a durable receipt operation inbox, atomic snapshot cursors, and a paged change feed; event-level merge and product inbox processing remain." },
     new { id = "reporting", name = "Reporting", status = "Architecture only", description = "Approved datasets, dashboards, exports, and scheduled reports." },
-    new { id = "saas", name = "SaaS platform", status = "In progress", description = "Tenant provisioning, plans, entitlements, subscriptions, and billing." },
+    new { id = "saas", name = "SaaS Platform & Tenant Management", status = "Active", description = "Automated tenant provisioning, subscription lifecycle, entitlement enforcement, usage metering, and billing engine." },
+    new { id = "branches", name = "Multi-Branch Operations", status = "Active", description = "Hierarchical branch master, operating locations, POS terminal binding, and branch switcher." },
+    new { id = "consolidation", name = "Intercompany & Group Consolidation", status = "Active", description = "Intercompany relationships, stock transfers, reciprocal Due-To/Due-From clearing, and multi-entity elimination engine." },
+    new { id = "integrations", name = "External Integrations Hub", status = "Active", description = "HMAC-SHA256 authenticated webhooks, exponential retry backoff, dead-letter state, and API partner access." },
 };
 
 app.UseExceptionHandler();
@@ -530,7 +633,15 @@ app.MapPurchasingEndpoints(effectiveDevMode);
 app.MapSalesEndpoints(effectiveDevMode);
 app.MapTenantEndpoints(effectiveDevMode);
 app.MapFinanceEndpoints(effectiveDevMode);
-productApi.MapFoundationEndpoints();
+app.MapManufacturingEndpoints(effectiveDevMode);
+app.MapWarehouseEndpoints(effectiveDevMode);
+app.MapHrPayrollEndpoints(effectiveDevMode);
+app.MapAnalyticsEndpoints(effectiveDevMode);
+app.MapBranchEndpoints(effectiveDevMode);
+app.MapConsolidationEndpoints(effectiveDevMode);
+app.MapIntegrationEndpoints(effectiveDevMode);
+app.MapSaaSEndpoints(effectiveDevMode);
+productApi.MapFoundationEndpoints(effectiveDevMode);
 
 app.MapGet("/", () => Results.Ok(new
 {

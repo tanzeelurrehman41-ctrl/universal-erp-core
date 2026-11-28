@@ -389,4 +389,40 @@ public sealed class TenantOnboardingServiceTests
         Assert.False(result.IsSuccess);
         Assert.Equal("INVALID_PLAN_CODE", result.Error);
     }
+
+    [Fact]
+    public async Task GetTenantById_And_ByCode_Support_Null_Subscription()
+    {
+        var repo = new FakeTenantOnboardingRepository();
+        var tenantId = Guid.NewGuid();
+        var tenantWithoutSub = new TenantDetail(
+            tenantId,
+            "demo-cloud",
+            "Universal Cloud Demo Org",
+            "Universal Cloud Demo Org Inc",
+            "active",
+            "PK",
+            "PKR",
+            "Asia/Karachi",
+            DateTimeOffset.UtcNow,
+            new InitialCompanyDetail(Guid.NewGuid(), "MAIN", "Main Co", null, null, "PK", "PKR", "Asia/Karachi", "active"),
+            null, // SAAS-001: Subscription is null
+            [],
+            new TenantAdminUserDetail(Guid.NewGuid(), "admin@demo.pk", "Demo Admin", "active"));
+
+        repo.Tenants.Add(tenantWithoutSub);
+
+        var byId = await repo.GetTenantByIdAsync(tenantId, CancellationToken.None);
+        Assert.NotNull(byId);
+        Assert.Equal(tenantId, byId.TenantId);
+        Assert.Null(byId.Subscription);
+
+        var byCode = await repo.GetTenantByCodeAsync("DEMO-CLOUD", CancellationToken.None);
+        Assert.NotNull(byCode);
+        Assert.Equal("demo-cloud", byCode.TenantCode);
+        Assert.Null(byCode.Subscription);
+
+        var nonexistent = await repo.GetTenantByIdAsync(Guid.NewGuid(), CancellationToken.None);
+        Assert.Null(nonexistent);
+    }
 }

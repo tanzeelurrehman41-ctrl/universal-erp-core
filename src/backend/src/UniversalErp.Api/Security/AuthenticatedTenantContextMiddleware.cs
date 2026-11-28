@@ -14,6 +14,8 @@ public sealed class AuthenticatedTenantContextMiddleware(RequestDelegate next)
         if (context.Request.Path.Equals("/api/v1/contexts", StringComparison.OrdinalIgnoreCase) ||
             context.Request.Path.StartsWithSegments("/api/v1/tenants/register") ||
             context.Request.Path.StartsWithSegments("/api/v1/plans") ||
+            context.Request.Path.StartsWithSegments("/api/v1/saas/plans") ||
+            context.Request.Path.StartsWithSegments("/api/v1/saas/tax-rules") ||
             !context.Request.Path.StartsWithSegments("/api/v1"))
         {
             await next(context);

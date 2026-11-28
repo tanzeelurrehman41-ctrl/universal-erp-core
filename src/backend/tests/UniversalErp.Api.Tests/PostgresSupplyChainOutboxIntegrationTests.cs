@@ -43,15 +43,53 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
         }
     }
 
+    private static string ResolveTargetDatabase()
+    {
+        var db = Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_DB");
+        return string.IsNullOrWhiteSpace(db) ? "universal_erp_disposable_test" : db.Trim();
+    }
+
+    private static bool IsApprovedDisposableDatabase(string? database) =>
+        database is "universal_erp_disposable_test"
+            or "universal_erp_current_disposable_test"
+            or "universal_erp_current_disposable_verify"
+            or "universal_erp_current_disposable_verify_047"
+            or "universal_erp_current_disposable_verify_047b"
+            or "universal_erp_current_disposable_verify_048";
+
+    private static bool IsVerifiedInternalRunnerActive() =>
+        OperatingSystem.IsLinux() &&
+        (string.Equals(Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER"), "true", StringComparison.OrdinalIgnoreCase)
+         || File.Exists("/.dockerenv")) &&
+        string.Equals(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_INTERNAL_CONTAINER_RUNNER"), "true", StringComparison.Ordinal) &&
+        string.Equals(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_HOST"), "postgres-current-test", StringComparison.Ordinal) &&
+        string.Equals(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), "5432", StringComparison.Ordinal) &&
+        Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_DB") is "universal_erp_current_disposable_test" or "universal_erp_current_disposable_verify" or "universal_erp_current_disposable_verify_047" or "universal_erp_current_disposable_verify_047b" or "universal_erp_current_disposable_verify_048";
+
     private static void ValidateApprovedEndpoint(string connectionString, string expectedUser)
     {
         var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        string expectedDatabase = ResolveTargetDatabase();
+        if (IsVerifiedInternalRunnerActive())
+        {
+            if (!string.Equals(builder.Host, "postgres-current-test", StringComparison.OrdinalIgnoreCase) ||
+                builder.Port != 5432 ||
+                !IsApprovedDisposableDatabase(expectedDatabase) ||
+                builder.Database != expectedDatabase ||
+                builder.Username != expectedUser)
+            {
+                throw new InvalidOperationException(
+                    $"[FAIL-CLOSED] Internal runner connection targets unapproved endpoint! Expected Host=postgres-current-test, Port=5432, Database={expectedDatabase}, Username={expectedUser}. Got Host={builder.Host}, Port={builder.Port}, Database={builder.Database}, Username={builder.Username}.");
+            }
+            return;
+        }
+
         bool isLoopback = builder.Host == "127.0.0.1" || builder.Host == "localhost";
         int expectedPort = int.TryParse(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), out var p) ? p : 5434;
-        if (!isLoopback || builder.Port != expectedPort || builder.Database != "universal_erp_disposable_test" || builder.Username != expectedUser)
+        if (!isLoopback || expectedPort <= 0 || expectedPort is 5432 or 5433 || builder.Port != expectedPort || !IsApprovedDisposableDatabase(expectedDatabase) || builder.Database != expectedDatabase || builder.Username != expectedUser)
         {
             throw new InvalidOperationException(
-                $"[FAIL-CLOSED] Connection string targets unapproved endpoint! Expected Host=127.0.0.1, Port={expectedPort}, Database=universal_erp_disposable_test, Username={expectedUser}. Got Host={builder.Host}, Port={builder.Port}, Database={builder.Database}, Username={builder.Username}. Accidental connections to production, staging, or development instances are strictly prevented.");
+                $"[FAIL-CLOSED] Connection string targets unapproved endpoint! Expected Host=127.0.0.1, Port={expectedPort}, Database={expectedDatabase}, Username={expectedUser}. Got Host={builder.Host}, Port={builder.Port}, Database={builder.Database}, Username={builder.Username}. Accidental connections to production, staging, or development instances are strictly prevented.");
         }
     }
 
@@ -65,11 +103,13 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
             return env;
         }
 
+        var targetHost = IsVerifiedInternalRunnerActive() ? "postgres-current-test" : "127.0.0.1";
         int targetPort = int.TryParse(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), out var p) ? p : 5434;
+        string targetDb = ResolveTargetDatabase();
         var pwd = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_APP");
         if (!string.IsNullOrWhiteSpace(pwd))
         {
-            var cs = $"Host=127.0.0.1;Port={targetPort};Database=universal_erp_disposable_test;Username=erp_app;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
+            var cs = $"Host={targetHost};Port={targetPort};Database={targetDb};Username=erp_app;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
             ValidateApprovedEndpoint(cs, expectedUser: "erp_app");
             return cs;
         }
@@ -87,11 +127,13 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
             return env;
         }
 
+        var targetHost = IsVerifiedInternalRunnerActive() ? "postgres-current-test" : "127.0.0.1";
         int targetPort = int.TryParse(Environment.GetEnvironmentVariable("UNIVERSAL_ERP_TEST_TARGET_PORT"), out var p) ? p : 5434;
+        string targetDb = ResolveTargetDatabase();
         var pwd = Environment.GetEnvironmentVariable("PGPASSWORD_ERP_DEV");
         if (!string.IsNullOrWhiteSpace(pwd))
         {
-            var cs = $"Host=127.0.0.1;Port={targetPort};Database=universal_erp_disposable_test;Username=erp_dev;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
+            var cs = $"Host={targetHost};Port={targetPort};Database={targetDb};Username=erp_dev;Password={pwd};Pooling=true;Minimum Pool Size=1;Maximum Pool Size=10";
             ValidateApprovedEndpoint(cs, expectedUser: "erp_dev");
             return cs;
         }
@@ -152,7 +194,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
 
         // 1. Tenant
         await using (var cmd = new NpgsqlCommand(
-            "INSERT INTO platform.tenants (id, tenant_code, display_name, status) VALUES (@id, @code, @name, 'active')", conn))
+            "INSERT INTO platform.tenants (id, tenant_code, display_name, status, default_country_code, default_currency_code, default_timezone) VALUES (@id, @code, @name, 'active', 'PK', 'PKR', 'Asia/Karachi')", conn))
         {
             cmd.Parameters.AddWithValue("id", tenantId);
             cmd.Parameters.AddWithValue("code", $"test-{tenantId:N}"[..20]);
@@ -823,7 +865,12 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
                 Assert.True(await reader.ReadAsync());
                 Assert.Equal("pending", reader.GetString(0));
                 Assert.Equal(1, reader.GetInt32(1));
-                Assert.Contains("PostgreSQL", reader.GetString(2)); // sanitized error details
+                var lastError = reader.GetString(2);
+                Assert.Contains("PostgreSQL 23503", lastError);
+                Assert.Contains("inventory_movement_leg_tenant_id_variant_id_fkey", lastError);
+                Assert.DoesNotContain("42703", lastError);
+                Assert.DoesNotContain("42P01", lastError);
+                Assert.DoesNotContain("42501", lastError);
                 Assert.False(reader.IsDBNull(3)); // next_retry_at is populated
                 Assert.True(reader.GetFieldValue<DateTimeOffset>(3) > DateTimeOffset.UtcNow); // exponential backoff in future
                 Assert.True(reader.IsDBNull(4)); // published_at IS NULL
@@ -885,7 +932,7 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
 
             // Assert transition to 'dead_letter' with attempt_count = 5 and published_at IS NULL
             await using (var cmd = new NpgsqlCommand(
-                "SELECT status, attempt_count, published_at, next_retry_at FROM erp_purchasing.outbox_event WHERE event_id = @e", conn))
+                "SELECT status, attempt_count, published_at, next_retry_at, last_error FROM erp_purchasing.outbox_event WHERE event_id = @e", conn))
             {
                 cmd.Parameters.AddWithValue("e", fixture.OutboxEventId);
                 await using var reader = await cmd.ExecuteReaderAsync();
@@ -894,6 +941,12 @@ public sealed class PostgresSupplyChainOutboxIntegrationTests : IAsyncDisposable
                 Assert.Equal(5, reader.GetInt32(1));
                 Assert.True(reader.IsDBNull(2)); // published_at remains NULL
                 Assert.True(reader.IsDBNull(3)); // next_retry_at is NULL (no automatic retry)
+                var deadLetterError = reader.GetString(4);
+                Assert.Contains("PostgreSQL 23503", deadLetterError);
+                Assert.Contains("inventory_movement_leg_tenant_id_variant_id_fkey", deadLetterError);
+                Assert.DoesNotContain("42703", deadLetterError);
+                Assert.DoesNotContain("42P01", deadLetterError);
+                Assert.DoesNotContain("42501", deadLetterError);
                 await reader.CloseAsync();
             }
 

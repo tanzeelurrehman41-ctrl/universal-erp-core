@@ -17,4 +17,28 @@ export default defineConfig({
       },
     },
   },
+  preview: {
+    host: "127.0.0.1",
+    port: 4173,
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:5080",
+        changeOrigin: true,
+      },
+      "/health": {
+        target: "http://127.0.0.1:5080",
+        changeOrigin: true,
+      },
+    },
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ["react", "react-dom"],
+          firebase: ["@firebase/app", "@firebase/auth"],
+        },
+      },
+    },
+  },
 });

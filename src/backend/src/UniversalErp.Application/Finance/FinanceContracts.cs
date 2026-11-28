@@ -113,3 +113,117 @@ public sealed record FinancialStatementsSummary(
     decimal NetIncome,
     IReadOnlyList<FinancialStatementLine> BalanceSheetLines,
     IReadOnlyList<FinancialStatementLine> IncomeStatementLines);
+
+public sealed record CurrencySummary(
+    string Code,
+    string Name,
+    int MinorUnit,
+    bool IsActive);
+
+public sealed record ExchangeRateSummary(
+    Guid ExchangeRateId,
+    Guid? CompanyId,
+    string FromCurrency,
+    string ToCurrency,
+    decimal Rate,
+    DateOnly EffectiveDate,
+    DateTimeOffset EffectiveAt,
+    string RateType,
+    string Source,
+    string? Reference,
+    Guid? CreatedByUserId,
+    string? CreatedByEmail,
+    string? CreatedByName,
+    DateTimeOffset CreatedAt,
+    Guid? UpdatedByUserId,
+    string? UpdatedByEmail,
+    DateTimeOffset? UpdatedAt);
+
+public sealed record UpsertExchangeRateRequest(
+    string FromCurrency,
+    string ToCurrency,
+    decimal Rate,
+    DateOnly EffectiveDate,
+    string RateType,
+    string? Source,
+    string? Reference);
+
+public sealed record CompanyCurrencyContextInfo(
+    string FunctionalCurrencyCode,
+    string PresentationCurrencyCode,
+    DateOnly CurrencyEffectiveDate);
+
+public sealed record Ias21PostedJournalLineInput(
+    Guid JournalId,
+    DateOnly JournalDate,
+    Guid AccountId,
+    string AccountCode,
+    string AccountName,
+    string AccountType,
+    string NormalBalance,
+    string JournalFunctionalCurrency,
+    decimal DebitFunctional,
+    decimal CreditFunctional);
+
+public sealed record Ias21ExchangeRateInput(
+    Guid ExchangeRateId,
+    string FromCurrency,
+    string ToCurrency,
+    decimal Rate,
+    DateOnly EffectiveDate,
+    string RateType,
+    string Source,
+    DateTimeOffset CreatedAt);
+
+public sealed record MissingExchangeRateDiagnostic(
+    string RequiredFor,
+    string CurrencyPair,
+    string RateType,
+    DateOnly RequiredDate,
+    string Reason);
+
+public sealed record PresentationStatementLine(
+    string AccountCode,
+    string AccountName,
+    string AccountType,
+    decimal FunctionalBalance,
+    decimal? PresentationBalance,
+    decimal? AppliedRate,
+    DateOnly? RateEffectiveDate,
+    string RateTypeUsed,
+    string TranslationStatus);
+
+public sealed record PresentationFinancialStatementsResponse(
+    DateOnly AsOfDate,
+    string FunctionalCurrencyCode,
+    string PresentationCurrencyCode,
+    bool SameCurrency,
+    string TranslationMethod,
+    string TranslationStatus,
+    decimal? ClosingRate,
+    string? ClosingRateDirection,
+    DateOnly? ClosingRateEffectiveDate,
+    string? ClosingRateSource,
+    decimal? TotalAssetsFunctional,
+    decimal? TotalAssetsPresentation,
+    decimal? TotalLiabilitiesFunctional,
+    decimal? TotalLiabilitiesPresentation,
+    decimal? EquityBeforeOciFunctional,
+    decimal? EquityBeforeOciPresentation,
+    decimal? TotalRevenueFunctional,
+    decimal? TotalRevenuePresentation,
+    decimal? TotalCostOfSalesFunctional,
+    decimal? TotalCostOfSalesPresentation,
+    decimal? TotalOperatingExpensesFunctional,
+    decimal? TotalOperatingExpensesPresentation,
+    decimal? TotalExpensesFunctional,
+    decimal? TotalExpensesPresentation,
+    decimal? NetIncomeFunctional,
+    decimal? NetIncomePresentation,
+    decimal? TranslationDifferenceOciPresentation,
+    decimal? TotalLiabilitiesAndEquityIncludingOciPresentation,
+    bool? IsBalanceSheetBalancedPresentation,
+    decimal? BalanceSheetDiscrepancyPresentation,
+    IReadOnlyList<PresentationStatementLine> BalanceSheetLines,
+    IReadOnlyList<PresentationStatementLine> IncomeStatementLines,
+    IReadOnlyList<MissingExchangeRateDiagnostic> MissingRates);

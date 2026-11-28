@@ -242,7 +242,6 @@ public sealed class OfflineSyncServiceTests
         public Task<IReadOnlyList<ProductCategorySummary>> ListCategoriesAsync(Guid tenantId, CancellationToken ct) => Task.FromResult<IReadOnlyList<ProductCategorySummary>>([]);
         public Task<Result<ProductCategorySummary>> CreateCategoryAsync(Guid tenantId, CreateProductCategoryRequest request, CancellationToken ct) => throw new NotImplementedException();
         public Task<IReadOnlyList<InventoryMovementSummary>> ListMovementsAsync(Guid tenantId, Guid companyId, int limit, CancellationToken ct) => Task.FromResult<IReadOnlyList<InventoryMovementSummary>>([]);
-        public Task<InventoryValuationReportSummary> GetInventoryValuationReportAsync(Guid tenantId, Guid companyId, CancellationToken ct) => Task.FromResult(InventoryValuationReportSummary.Empty());
     }
 
     // ── Test helpers that exercise the reservation / complete contract ─────────

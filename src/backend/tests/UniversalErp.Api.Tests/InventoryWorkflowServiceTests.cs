@@ -59,9 +59,6 @@ public sealed class InventoryWorkflowServiceTests
 
         public Task<IReadOnlyList<InventoryMovementSummary>> ListMovementsAsync(Guid tenantId, Guid companyId, int limit, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<InventoryMovementSummary>>([]);
-
-        public Task<InventoryValuationReportSummary> GetInventoryValuationReportAsync(Guid tenantId, Guid companyId, CancellationToken cancellationToken) =>
-            Task.FromResult(InventoryValuationReportSummary.Empty());
     }
 
     private static readonly TenantContext TestContext = new(

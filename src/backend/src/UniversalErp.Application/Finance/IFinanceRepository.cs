@@ -19,8 +19,15 @@ public sealed class FinanceIdempotencyConflictException : Exception
 {
 }
 
+public sealed class ExchangeRateConflictException(string code = "DUPLICATE_OR_AMBIGUOUS_EXCHANGE_RATE")
+    : Exception(code)
+{
+}
+
 public interface IFinanceRepository
 {
+    // ── Phase 4 Foundation ───────────────────────────────────────────────────
+
     Task<IReadOnlyList<AccountSummary>> ListAccountsAsync(
         Guid tenantId,
         Guid companyId,
@@ -66,5 +73,233 @@ public interface IFinanceRepository
     Task<IReadOnlyList<TrialBalanceRow>> GetTrialBalanceAsync(
         Guid tenantId,
         Guid companyId,
+        CancellationToken cancellationToken);
+
+    // ── Phase 8 Finance & Treasury Management ─────────────────────────────────
+
+    Task<JournalSummary> ReverseJournalAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        Guid journalId,
+        string reason,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<BankAccountSummary>> ListBankAccountsAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken);
+
+    Task<BankAccountSummary> CreateBankAccountAsync(
+        Guid tenantId,
+        Guid companyId,
+        CreateBankAccountRequest request,
+        CancellationToken cancellationToken);
+
+    Task<BankAccountSummary?> GetBankAccountAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid bankAccountId,
+        CancellationToken cancellationToken);
+
+    Task<BankStatementSummary> ImportBankStatementAsync(
+        Guid tenantId,
+        Guid companyId,
+        ImportBankStatementRequest request,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<BankStatementSummary>> ListBankStatementsAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid? bankAccountId,
+        CancellationToken cancellationToken);
+
+    Task<BankReconciliationResult> ReconcileBankStatementAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        Guid statementId,
+        string? note,
+        CancellationToken cancellationToken);
+
+    Task<TreasuryPaymentSummary> CreateTreasuryPaymentAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        CreateTreasuryPaymentRequest request,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<TreasuryPaymentSummary>> ListTreasuryPaymentsAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<TaxCodeSummary>> ListTaxCodesAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken);
+
+    Task<TaxCodeSummary> CreateTaxCodeAsync(
+        Guid tenantId,
+        Guid companyId,
+        CreateTaxCodeRequest request,
+        CancellationToken cancellationToken);
+
+    Task<TaxLiabilitySummary> GetTaxLiabilitySummaryAsync(
+        Guid tenantId,
+        Guid companyId,
+        DateOnly fromDate,
+        DateOnly toDate,
+        CancellationToken cancellationToken);
+
+    Task<TaxFilingSummary> CreateTaxFilingAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        CreateTaxFilingRequest request,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<TaxFilingSummary>> ListTaxFilingsAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken);
+
+    Task<TaxFilingSummary> SettleTaxFilingAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        Guid filingId,
+        SettleTaxFilingRequest request,
+        CancellationToken cancellationToken);
+
+    Task<RecurringScheduleSummary> CreateRecurringScheduleAsync(
+        Guid tenantId,
+        Guid companyId,
+        CreateRecurringScheduleRequest request,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<RecurringScheduleSummary>> ListRecurringSchedulesAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken);
+
+    Task<JournalSummary> PostRecurringSchedulePeriodAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        Guid scheduleId,
+        CancellationToken cancellationToken);
+
+    Task<FixedAssetSummary> CreateFixedAssetAsync(
+        Guid tenantId,
+        Guid companyId,
+        CreateFixedAssetRequest request,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<FixedAssetSummary>> ListFixedAssetsAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<AssetDepreciationRunSummary>> ExecuteDepreciationRunAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        ExecuteDepreciationRunRequest request,
+        CancellationToken cancellationToken);
+
+    Task<bool> SoftCloseFiscalPeriodAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        Guid periodId,
+        string? note,
+        CancellationToken cancellationToken);
+
+    Task<bool> CloseFiscalPeriodAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        Guid periodId,
+        string? note,
+        CancellationToken cancellationToken);
+
+    Task<bool> ReopenFiscalPeriodAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        Guid periodId,
+        string reason,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<PeriodCloseChecklistItemSummary>> GetPeriodCloseChecklistAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid periodId,
+        CancellationToken cancellationToken);
+
+    Task<bool> UpdatePeriodCloseChecklistItemAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        Guid itemId,
+        bool isCompleted,
+        string? notes,
+        CancellationToken cancellationToken);
+
+    Task<YearEndCloseSummary> CloseFiscalYearAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        YearEndCloseRequest request,
+        CancellationToken cancellationToken);
+
+    Task<FinanceControlDashboardSummary> GetControlDashboardAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<FinancialAuditLogSummary>> ListAuditLogsAsync(
+        Guid tenantId,
+        Guid companyId,
+        int limit,
+        CancellationToken cancellationToken);
+
+    // ── Company Currencies, Exchange Rates & IAS 21 Presentation Reporting ────
+
+    Task<IReadOnlyList<CurrencySummary>> ListCurrenciesAsync(CancellationToken cancellationToken);
+
+    Task<CompanyCurrencyContextInfo> GetCompanyCurrencyContextAsync(
+        Guid tenantId,
+        Guid companyId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<ExchangeRateSummary>> ListExchangeRatesAsync(
+        Guid tenantId,
+        Guid companyId,
+        string? fromCurrency,
+        string? toCurrency,
+        string? rateType,
+        CancellationToken cancellationToken);
+
+    Task<ExchangeRateSummary> CreateExchangeRateAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        UpsertExchangeRateRequest request,
+        CancellationToken cancellationToken);
+
+    Task<ExchangeRateSummary?> UpdateExchangeRateAsync(
+        Guid tenantId,
+        Guid companyId,
+        Guid userId,
+        Guid exchangeRateId,
+        UpsertExchangeRateRequest request,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<Ias21PostedJournalLineInput>> ListPostedJournalLinesForTranslationAsync(
+        Guid tenantId,
+        Guid companyId,
+        DateOnly asOfDate,
         CancellationToken cancellationToken);
 }

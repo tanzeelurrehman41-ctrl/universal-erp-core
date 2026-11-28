@@ -1,4 +1,4 @@
-# universal-erp-core/run_controlled_tests.ps1
+﻿# universal-erp-core/run_controlled_tests.ps1
 # Master Controlled Test Runner with Fail-Closed Preflight Enforcement
 param(
     [string]$ExpectedHost = "127.0.0.1",
@@ -151,37 +151,50 @@ try {
             --settings $runsettings `
             --filter $Filter `
             --logger "trx;LogFileName=$trxFileName" `
-            --results-directory $resultsDir
+            --results-directory $resultsDir | Out-Host
 
         $testRc = $LASTEXITCODE
-        if ($testRc -ne 0) {
-            throw "Test suite '$SuiteName' FAILED with exit code $testRc!"
-        }
-
         if (-not (Test-Path $trxFullPath)) {
-            throw "TRX results file not generated at '$trxFullPath'!"
+            Write-Host "[FAIL] TRX results file not generated at '$trxFullPath' (ExitCode=$testRc)." -ForegroundColor Red
+            return [PSCustomObject]@{
+                Suite    = $SuiteName
+                Total    = $ExpectedExactTests
+                Executed = 0
+                Passed   = 0
+                Failed   = $ExpectedExactTests
+                Skipped  = 0
+                ExitCode = $testRc
+                CountOk  = $false
+                TrxPath  = $trxFullPath
+            }
         }
 
         [xml]$trx = Get-Content $trxFullPath
+        $total = [int]$trx.TestRun.ResultSummary.Counters.total
         $executed = [int]$trx.TestRun.ResultSummary.Counters.executed
         $passed = [int]$trx.TestRun.ResultSummary.Counters.passed
         $failed = [int]$trx.TestRun.ResultSummary.Counters.failed
+        $skipped = [Math]::Max(0, $total - $executed)
+        $countOk = ($testRc -eq 0 -and $failed -eq 0 -and $skipped -eq 0 -and $passed -eq $ExpectedExactTests -and $executed -eq $ExpectedExactTests)
 
-        if ($failed -gt 0 -or $passed -ne $ExpectedExactTests -or $executed -ne $ExpectedExactTests) {
-            throw "Suite '$SuiteName' count assertion failed! Expected $ExpectedExactTests passed, got Executed=$executed, Passed=$passed, Failed=$failed."
-        }
-
-        Write-Host "[PASS] $SuiteName passed: $passed/$ExpectedExactTests executed cleanly." -ForegroundColor Green
+        $color = if ($countOk) { "Green" } else { "Red" }
+        $label = if ($countOk) { "PASS" } else { "FAIL" }
+        Write-Host "[$label] ${SuiteName}: Executed=$executed Passed=$passed Failed=$failed Skipped=$skipped Expected=$ExpectedExactTests (ExitCode=$testRc)" -ForegroundColor $color
         return [PSCustomObject]@{
             Suite    = $SuiteName
             Total    = $ExpectedExactTests
+            Executed = $executed
             Passed   = $passed
             Failed   = $failed
+            Skipped  = $skipped
+            ExitCode = $testRc
+            CountOk  = $countOk
             TrxPath  = $trxFullPath
         }
     }
 
-    # 5. Execute All Three Controlled Integration Test Suites
+    # 5. Execute Historical Baseline Integration Suites Only (15 Offline Receipt Sync + 10 Legacy Sales Customer/RLS = 25)
+    # Post-026/046 SupplyChainOutbox and FIFO Sales tests belong exclusively to the separate Current-Schema lane.
     $results = @()
     $results += Invoke-ControlledTestRun `
         -Filter "FullyQualifiedName~PostgresOfflineReceiptSyncIntegrationTests" `
@@ -189,25 +202,30 @@ try {
         -ExpectedExactTests 15
 
     $results += Invoke-ControlledTestRun `
-        -Filter "FullyQualifiedName~PostgresSupplyChainOutboxIntegrationTests" `
-        -SuiteName "SupplyChainOutbox" `
-        -ExpectedExactTests 7
-
-    $results += Invoke-ControlledTestRun `
-        -Filter "FullyQualifiedName~PostgresSalesRepositoryIntegrationTests" `
-        -SuiteName "SalesRepository" `
+        -Filter "FullyQualifiedName~PostgresSalesRepositoryIntegrationTests&FullyQualifiedName!~PostInvoiceAsync&FullyQualifiedName!~PostTransferAsync" `
+        -SuiteName "SalesRepositoryHistorical" `
         -ExpectedExactTests 10
+
+    $sumExpected = ($results | Measure-Object -Property Total -Sum).Sum
+    $sumExecuted = ($results | Measure-Object -Property Executed -Sum).Sum
+    $sumPassed = ($results | Measure-Object -Property Passed -Sum).Sum
+    $sumFailed = ($results | Measure-Object -Property Failed -Sum).Sum
+    $sumSkipped = ($results | Measure-Object -Property Skipped -Sum).Sum
+    $allOk = ($results | Where-Object { -not $_.CountOk }).Count -eq 0 -and $sumPassed -eq 25
+
+    if (-not $allOk) {
+        throw "Historical controlled test summary mismatch or failures! Executed=$sumExecuted, Passed=$sumPassed, Failed=$sumFailed, Skipped=$sumSkipped, Expected=$sumExpected."
+    }
 
     Write-Host @"
 
 ====================================================================================
-PHASE 4 CONTROLLED TEST EXECUTION COMPLETE — ALL SUITES PASSED
+HISTORICAL BASELINE CONTROLLED TEST EXECUTION COMPLETE — ALL SUITES PASSED
 ====================================================================================
-Offline Receipt Sync: 15 / 15 Passed
-Supply Chain Outbox:   7 /  7 Passed
-Sales Repository:     10 / 10 Passed
-Total Executed:       32 / 32 Passed (Zero Failures, Zero Skipped)
-TRX Directory:        $resultsDir
+Offline Receipt Sync (001-019): 15 / 15 Passed
+Sales Repository Customer/RLS:  10 / 10 Passed
+Total Executed (Historical):    25 / 25 Passed (Zero Failures, Zero Skipped)
+TRX Directory:                  $resultsDir
 ====================================================================================
 "@ -ForegroundColor Green
     exit 0

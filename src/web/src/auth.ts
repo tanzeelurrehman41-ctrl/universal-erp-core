@@ -1,4 +1,4 @@
-import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
+import { initializeApp, getApps, type FirebaseApp } from "@firebase/app";
 import {
   getAuth,
   signInWithPopup,
@@ -9,7 +9,7 @@ import {
   GoogleAuthProvider,
   type Auth,
   type User as FirebaseUser,
-} from "firebase/auth";
+} from "@firebase/auth";
 
 export type TenantCompanyContext = {
   tenantId: string;
@@ -20,6 +20,9 @@ export type TenantCompanyContext = {
   companyName: string;
   baseCurrencyCode: string;
   timezone: string;
+  functionalCurrencyCode?: string;
+  presentationCurrencyCode?: string;
+  currencyEffectiveDate?: string;
 };
 
 export type ErpAuthUser = {
@@ -49,7 +52,11 @@ export const authConfigured = oidcConfigured;
 const apiBase = (import.meta.env.VITE_API_BASE_URL || "").trim().replace(/\/+$/, "");
 
 export function apiUrl(path: string): string {
-  if (!apiBase) return path;
+  const isLocalHost = typeof window !== "undefined" &&
+    (window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost");
+  if (isLocalHost || !apiBase) {
+    return path.startsWith("/") ? path : `/${path}`;
+  }
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
   return `${apiBase}${cleanPath}`;
 }
@@ -94,11 +101,11 @@ export function mapFirebaseUser(user: FirebaseUser | null): ErpAuthUser | null {
   };
 }
 
-export async function getAccessToken(): Promise<string | null> {
+export async function getAccessToken(forceRefresh = false): Promise<string | null> {
   const firebaseAuth = getFirebaseAuth();
   if (!firebaseAuth || !firebaseAuth.currentUser) return null;
   try {
-    return await firebaseAuth.currentUser.getIdToken();
+    return await firebaseAuth.currentUser.getIdToken(forceRefresh);
   } catch {
     return null;
   }
@@ -147,7 +154,7 @@ export function subscribeAuthState(callback: (user: ErpAuthUser | null) => void)
     callback(null);
     return () => {};
   }
-  return onAuthStateChanged(firebaseAuth, (user) => {
+  return onAuthStateChanged(firebaseAuth, (user: FirebaseUser | null) => {
     callback(mapFirebaseUser(user));
   });
 }
@@ -193,8 +200,22 @@ export async function apiFetch(
     headers.set("X-Company-Id", workspace.companyId);
   }
 
-  return fetch(resolvedInput, {
+  let response = await fetch(resolvedInput, {
     ...init,
     headers,
   });
+
+  // If token expired, perform a transparent single-attempt token refresh and retry
+  if (response.status === 401 && authConfigured) {
+    const freshToken = await getAccessToken(true);
+    if (freshToken && freshToken !== token) {
+      headers.set("Authorization", `Bearer ${freshToken}`);
+      response = await fetch(resolvedInput, {
+        ...init,
+        headers,
+      });
+    }
+  }
+
+  return response;
 }

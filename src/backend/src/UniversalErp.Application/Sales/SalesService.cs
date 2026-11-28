@@ -139,7 +139,7 @@ public sealed class SalesService(
     {
         var order = await repository.GetOrderAsync(orderId, cancellationToken);
         if (order is null) return Result<SalesOrderSummary>.Failure("SALES_ORDER_NOT_FOUND");
-        if (order.OrderStatus != "draft") return Result<SalesOrderSummary>.Failure("ORDER_NOT_IN_DRAFT");
+        if (order.OrderStatus is not ("draft" or "approved")) return Result<SalesOrderSummary>.Failure("ORDER_NOT_IN_DRAFT");
 
         await repository.ConfirmOrderAsync(orderId, cancellationToken);
         var confirmed = await repository.GetOrderAsync(orderId, cancellationToken);
@@ -274,4 +274,404 @@ public sealed class SalesService(
         {
             Lines = invoice.Lines.Select(l => l with { UnitCost = null }).ToList()
         };
+
+    // ── Phase 7 Enhancements ─────────────────────────────────────────────────
+
+    // Quotations
+    public Task<IReadOnlyList<SalesQuotationSummary>> ListQuotationsAsync(CancellationToken ct) =>
+        repository.ListQuotationsAsync(ct);
+
+    public Task<SalesQuotationSummary?> GetQuotationAsync(Guid quotationId, CancellationToken ct) =>
+        repository.GetQuotationAsync(quotationId, ct);
+
+    public async Task<Result<SalesQuotationSummary>> CreateQuotationAsync(
+        CreateSalesQuotationRequest request, CancellationToken ct)
+    {
+        var qNo = request.QuotationNumber?.Trim();
+        if (string.IsNullOrEmpty(qNo) || !CodePattern.IsMatch(qNo))
+            return Result<SalesQuotationSummary>.Failure("INVALID_QUOTATION_NUMBER");
+        if (request.CustomerId == Guid.Empty)
+            return Result<SalesQuotationSummary>.Failure("INVALID_CUSTOMER_ID");
+        if (request.WarehouseId == Guid.Empty)
+            return Result<SalesQuotationSummary>.Failure("INVALID_WAREHOUSE_ID");
+        if (request.Lines is null || request.Lines.Count == 0)
+            return Result<SalesQuotationSummary>.Failure("QUOTATION_REQUIRES_LINES");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var qId = await repository.CreateQuotationAsync(request, userId, ct);
+            var q = await repository.GetQuotationAsync(qId, ct);
+            return q is not null
+                ? Result<SalesQuotationSummary>.Success(q)
+                : Result<SalesQuotationSummary>.Failure("QUOTATION_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesQuotationSummary>.Failure(ex.Message);
+        }
+    }
+
+    public async Task<Result<SalesQuotationSummary>> ApproveQuotationAsync(
+        Guid quotationId, ApproveSalesQuotationRequest request, CancellationToken ct)
+    {
+        var q = await repository.GetQuotationAsync(quotationId, ct);
+        if (q is null) return Result<SalesQuotationSummary>.Failure("QUOTATION_NOT_FOUND");
+        if (q.Status is not ("draft" or "pending_approval"))
+            return Result<SalesQuotationSummary>.Failure("QUOTATION_NOT_PENDING");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var ok = await repository.ApproveQuotationAsync(quotationId, userId, request.Note, ct);
+            if (!ok) return Result<SalesQuotationSummary>.Failure("QUOTATION_APPROVAL_FAILED");
+
+            var updated = await repository.GetQuotationAsync(quotationId, ct);
+            return updated is not null
+                ? Result<SalesQuotationSummary>.Success(updated)
+                : Result<SalesQuotationSummary>.Failure("QUOTATION_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesQuotationSummary>.Failure(ex.Message);
+        }
+    }
+
+    public async Task<Result<SalesOrderSummary>> ConvertQuotationToOrderAsync(
+        Guid quotationId, ConvertQuotationToOrderRequest request, CancellationToken ct)
+    {
+        var q = await repository.GetQuotationAsync(quotationId, ct);
+        if (q is null) return Result<SalesOrderSummary>.Failure("QUOTATION_NOT_FOUND");
+        if (q.Status != "approved")
+            return Result<SalesOrderSummary>.Failure("QUOTATION_NOT_APPROVED");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var orderId = await repository.ConvertQuotationToOrderAsync(quotationId, request, userId, ct);
+            var order = await repository.GetOrderAsync(orderId, ct);
+            return order is not null
+                ? Result<SalesOrderSummary>.Success(order)
+                : Result<SalesOrderSummary>.Failure("ORDER_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesOrderSummary>.Failure(ex.Message);
+        }
+    }
+
+    // Order Approvals & Cancellation
+    public async Task<Result<SalesOrderSummary>> ApproveOrderAsync(
+        Guid orderId, ApproveSalesOrderRequest request, CancellationToken ct)
+    {
+        var order = await repository.GetOrderAsync(orderId, ct);
+        if (order is null) return Result<SalesOrderSummary>.Failure("ORDER_NOT_FOUND");
+        if (order.OrderStatus is not ("draft" or "pending_approval"))
+            return Result<SalesOrderSummary>.Failure("ORDER_NOT_IN_DRAFT_OR_PENDING");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var ok = await repository.ApproveOrderAsync(orderId, userId, request.Note, ct);
+            if (!ok) return Result<SalesOrderSummary>.Failure("ORDER_APPROVAL_FAILED");
+
+            var updated = await repository.GetOrderAsync(orderId, ct);
+            return updated is not null
+                ? Result<SalesOrderSummary>.Success(updated)
+                : Result<SalesOrderSummary>.Failure("ORDER_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesOrderSummary>.Failure(ex.Message);
+        }
+    }
+
+    public async Task<Result<SalesOrderSummary>> CancelOrderAsync(
+        Guid orderId, CancelSalesOrderRequest request, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.Reason))
+            return Result<SalesOrderSummary>.Failure("CANCELLATION_REASON_REQUIRED");
+
+        var order = await repository.GetOrderAsync(orderId, ct);
+        if (order is null) return Result<SalesOrderSummary>.Failure("ORDER_NOT_FOUND");
+        if (order.OrderStatus is "fulfilled" or "cancelled")
+            return Result<SalesOrderSummary>.Failure("ORDER_CANNOT_BE_CANCELLED");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var ok = await repository.CancelOrderAsync(orderId, request.Reason, userId, ct);
+            if (!ok) return Result<SalesOrderSummary>.Failure("ORDER_CANCELLATION_FAILED");
+
+            var updated = await repository.GetOrderAsync(orderId, ct);
+            return updated is not null
+                ? Result<SalesOrderSummary>.Success(updated)
+                : Result<SalesOrderSummary>.Failure("ORDER_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesOrderSummary>.Failure(ex.Message);
+        }
+    }
+
+    // Credit Exposure & Checks
+    public Task<CustomerCreditExposureSummary?> GetCustomerCreditExposureAsync(Guid customerId, CancellationToken ct) =>
+        repository.GetCustomerCreditExposureAsync(customerId, ct);
+
+    public async Task<Result<CreditCheckResult>> CheckCustomerCreditAsync(
+        Guid customerId, decimal newOrderAmount, CancellationToken ct)
+    {
+        var customer = await repository.GetCustomerAsync(customerId, ct);
+        if (customer is null) return Result<CreditCheckResult>.Failure("CUSTOMER_NOT_FOUND");
+
+        var exposure = await repository.GetCustomerCreditExposureAsync(customerId, ct);
+        var uninvoicedOrders = exposure?.UninvoicedOrdersTotal ?? 0m;
+
+        var check = CreditCheckEngine.Evaluate(
+            customer.CreditLimit,
+            customer.OutstandingBalance,
+            uninvoicedOrders,
+            newOrderAmount);
+
+        return Result<CreditCheckResult>.Success(check);
+    }
+
+    // Dispatches
+    public Task<IReadOnlyList<SalesDispatchSummary>> ListDispatchesAsync(Guid? orderId, CancellationToken ct) =>
+        repository.ListDispatchesAsync(orderId, ct);
+
+    public Task<SalesDispatchSummary?> GetDispatchAsync(Guid dispatchId, CancellationToken ct) =>
+        repository.GetDispatchAsync(dispatchId, ct);
+
+    public async Task<Result<SalesDispatchSummary>> CreateDispatchAsync(
+        CreateSalesDispatchRequest request, CancellationToken ct)
+    {
+        var dNo = request.DispatchNumber?.Trim();
+        if (string.IsNullOrEmpty(dNo) || !CodePattern.IsMatch(dNo))
+            return Result<SalesDispatchSummary>.Failure("INVALID_DISPATCH_NUMBER");
+        if (request.OrderId == Guid.Empty)
+            return Result<SalesDispatchSummary>.Failure("INVALID_ORDER_ID");
+        if (request.Lines is null || request.Lines.Count == 0)
+            return Result<SalesDispatchSummary>.Failure("DISPATCH_REQUIRES_LINES");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var dId = await repository.CreateDispatchAsync(request, userId, ct);
+            var dispatch = await repository.GetDispatchAsync(dId, ct);
+            return dispatch is not null
+                ? Result<SalesDispatchSummary>.Success(dispatch)
+                : Result<SalesDispatchSummary>.Failure("DISPATCH_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesDispatchSummary>.Failure(ex.Message);
+        }
+    }
+
+    public async Task<Result<SalesDispatchSummary>> ConfirmDispatchAsync(
+        Guid dispatchId, ConfirmSalesDispatchRequest request, CancellationToken ct)
+    {
+        var d = await repository.GetDispatchAsync(dispatchId, ct);
+        if (d is null) return Result<SalesDispatchSummary>.Failure("DISPATCH_NOT_FOUND");
+        if (d.Status != "draft")
+            return Result<SalesDispatchSummary>.Failure("DISPATCH_ALREADY_CONFIRMED");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var ok = await repository.ConfirmDispatchAsync(dispatchId, userId, request.MarkDelivered, request.Note, ct);
+            if (!ok) return Result<SalesDispatchSummary>.Failure("DISPATCH_CONFIRMATION_FAILED");
+
+            var updated = await repository.GetDispatchAsync(dispatchId, ct);
+            return updated is not null
+                ? Result<SalesDispatchSummary>.Success(updated)
+                : Result<SalesDispatchSummary>.Failure("DISPATCH_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesDispatchSummary>.Failure(ex.Message);
+        }
+    }
+
+    // Invoices from Dispatch
+    public async Task<Result<SalesInvoiceSummary>> CreateInvoiceFromDispatchAsync(
+        CreateInvoiceFromDispatchRequest request, CancellationToken ct)
+    {
+        if (request.ClientTransactionId == Guid.Empty)
+            return Result<SalesInvoiceSummary>.Failure("INVALID_CLIENT_TRANSACTION_ID");
+        var invNo = request.InvoiceNumber?.Trim();
+        if (string.IsNullOrEmpty(invNo) || !CodePattern.IsMatch(invNo))
+            return Result<SalesInvoiceSummary>.Failure("INVALID_INVOICE_NUMBER");
+        if (request.DispatchId == Guid.Empty)
+            return Result<SalesInvoiceSummary>.Failure("INVALID_DISPATCH_ID");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var invId = await repository.CreateInvoiceFromDispatchAsync(request, userId, ct);
+            var invoice = await repository.GetInvoiceAsync(invId, ct);
+            return invoice is not null
+                ? Result<SalesInvoiceSummary>.Success(invoice)
+                : Result<SalesInvoiceSummary>.Failure("SALES_INVOICE_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesInvoiceSummary>.Failure(ex.Message);
+        }
+    }
+
+    // Customer Receipts
+    public Task<IReadOnlyList<CustomerReceiptSummary>> ListReceiptsAsync(Guid? customerId, CancellationToken ct) =>
+        repository.ListReceiptsAsync(customerId, ct);
+
+    public Task<CustomerReceiptSummary?> GetReceiptAsync(Guid receiptId, CancellationToken ct) =>
+        repository.GetReceiptAsync(receiptId, ct);
+
+    public async Task<Result<CustomerReceiptSummary>> CreateReceiptAsync(
+        CreateCustomerReceiptRequest request, CancellationToken ct)
+    {
+        var rNo = request.ReceiptNumber?.Trim();
+        if (string.IsNullOrEmpty(rNo) || !CodePattern.IsMatch(rNo))
+            return Result<CustomerReceiptSummary>.Failure("INVALID_RECEIPT_NUMBER");
+        if (request.CustomerId == Guid.Empty)
+            return Result<CustomerReceiptSummary>.Failure("INVALID_CUSTOMER_ID");
+        if (request.Amount <= 0m)
+            return Result<CustomerReceiptSummary>.Failure("INVALID_RECEIPT_AMOUNT");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var rId = await repository.CreateReceiptAsync(request, userId, ct);
+            var receipt = await repository.GetReceiptAsync(rId, ct);
+            return receipt is not null
+                ? Result<CustomerReceiptSummary>.Success(receipt)
+                : Result<CustomerReceiptSummary>.Failure("RECEIPT_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<CustomerReceiptSummary>.Failure(ex.Message);
+        }
+    }
+
+    // Sales Returns & Credit Notes
+    public Task<IReadOnlyList<SalesReturnSummary>> ListReturnsAsync(Guid? customerId, CancellationToken ct) =>
+        repository.ListReturnsAsync(customerId, ct);
+
+    public Task<SalesReturnSummary?> GetReturnAsync(Guid returnId, CancellationToken ct) =>
+        repository.GetReturnAsync(returnId, ct);
+
+    public async Task<Result<SalesReturnSummary>> CreateReturnAsync(
+        CreateSalesReturnRequest request, CancellationToken ct)
+    {
+        var rNo = request.ReturnNumber?.Trim();
+        if (string.IsNullOrEmpty(rNo) || !CodePattern.IsMatch(rNo))
+            return Result<SalesReturnSummary>.Failure("INVALID_RETURN_NUMBER");
+        if (request.CustomerId == Guid.Empty)
+            return Result<SalesReturnSummary>.Failure("INVALID_CUSTOMER_ID");
+        if (request.Lines is null || request.Lines.Count == 0)
+            return Result<SalesReturnSummary>.Failure("RETURN_REQUIRES_LINES");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var rId = await repository.CreateReturnAsync(request, userId, ct);
+            var ret = await repository.GetReturnAsync(rId, ct);
+            return ret is not null
+                ? Result<SalesReturnSummary>.Success(ret)
+                : Result<SalesReturnSummary>.Failure("RETURN_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesReturnSummary>.Failure(ex.Message);
+        }
+    }
+
+    public async Task<Result<SalesReturnSummary>> ApproveReturnAsync(Guid returnId, CancellationToken ct)
+    {
+        var ret = await repository.GetReturnAsync(returnId, ct);
+        if (ret is null) return Result<SalesReturnSummary>.Failure("RETURN_NOT_FOUND");
+        if (ret.Status != "draft")
+            return Result<SalesReturnSummary>.Failure("RETURN_ALREADY_APPROVED");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var ok = await repository.ApproveReturnAsync(returnId, userId, ct);
+            if (!ok) return Result<SalesReturnSummary>.Failure("RETURN_APPROVAL_FAILED");
+
+            var updated = await repository.GetReturnAsync(returnId, ct);
+            return updated is not null
+                ? Result<SalesReturnSummary>.Success(updated)
+                : Result<SalesReturnSummary>.Failure("RETURN_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesReturnSummary>.Failure(ex.Message);
+        }
+    }
+
+    public Task<IReadOnlyList<SalesCreditNoteSummary>> ListCreditNotesAsync(Guid? customerId, CancellationToken ct) =>
+        repository.ListCreditNotesAsync(customerId, ct);
+
+    public Task<SalesCreditNoteSummary?> GetCreditNoteAsync(Guid creditNoteId, CancellationToken ct) =>
+        repository.GetCreditNoteAsync(creditNoteId, ct);
+
+    public async Task<Result<SalesCreditNoteSummary>> CreateCreditNoteAsync(
+        CreateSalesCreditNoteRequest request, CancellationToken ct)
+    {
+        var cnNo = request.CreditNoteNumber?.Trim();
+        if (string.IsNullOrEmpty(cnNo) || !CodePattern.IsMatch(cnNo))
+            return Result<SalesCreditNoteSummary>.Failure("INVALID_CREDIT_NOTE_NUMBER");
+        if (request.CustomerId == Guid.Empty)
+            return Result<SalesCreditNoteSummary>.Failure("INVALID_CUSTOMER_ID");
+        if (request.SubtotalAmount <= 0m)
+            return Result<SalesCreditNoteSummary>.Failure("INVALID_CREDIT_NOTE_AMOUNT");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var cnId = await repository.CreateCreditNoteAsync(request, userId, ct);
+            var cn = await repository.GetCreditNoteAsync(cnId, ct);
+            return cn is not null
+                ? Result<SalesCreditNoteSummary>.Success(cn)
+                : Result<SalesCreditNoteSummary>.Failure("CREDIT_NOTE_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesCreditNoteSummary>.Failure(ex.Message);
+        }
+    }
+
+    public async Task<Result<SalesCreditNoteSummary>> ApproveCreditNoteAsync(Guid creditNoteId, CancellationToken ct)
+    {
+        var cn = await repository.GetCreditNoteAsync(creditNoteId, ct);
+        if (cn is null) return Result<SalesCreditNoteSummary>.Failure("CREDIT_NOTE_NOT_FOUND");
+        if (cn.Status != "draft")
+            return Result<SalesCreditNoteSummary>.Failure("CREDIT_NOTE_ALREADY_APPROVED");
+
+        try
+        {
+            var userId = tenantContext.Current.UserId;
+            var ok = await repository.ApproveCreditNoteAsync(creditNoteId, userId, ct);
+            if (!ok) return Result<SalesCreditNoteSummary>.Failure("CREDIT_NOTE_APPROVAL_FAILED");
+
+            var updated = await repository.GetCreditNoteAsync(creditNoteId, ct);
+            return updated is not null
+                ? Result<SalesCreditNoteSummary>.Success(updated)
+                : Result<SalesCreditNoteSummary>.Failure("CREDIT_NOTE_NOT_FOUND");
+        }
+        catch (Exception ex)
+        {
+            return Result<SalesCreditNoteSummary>.Failure(ex.Message);
+        }
+    }
+
+    // Accounts Receivable & Statements
+    public Task<IReadOnlyList<CustomerArAgingSummary>> ListCustomerArAgingAsync(CancellationToken ct) =>
+        repository.ListCustomerArAgingAsync(ct);
+
+    public Task<CustomerStatementSummary?> GetCustomerStatementAsync(
+        Guid customerId, DateOnly fromDate, DateOnly toDate, CancellationToken ct) =>
+        repository.GetCustomerStatementAsync(customerId, fromDate, toDate, ct);
 }
