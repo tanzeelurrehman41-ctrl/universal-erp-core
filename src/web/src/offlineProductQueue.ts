@@ -323,6 +323,7 @@ async function syncWithAuthenticatedServer(
     }
 
     try {
+      const batchId = crypto.randomUUID();
       const response = await fetch(apiUrl("/api/v1/sync/products:batch"), {
         method: "POST",
         headers: {
