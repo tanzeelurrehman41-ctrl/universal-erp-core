@@ -293,14 +293,15 @@ export function AnalyticsWorkspace({ enabled, workspace }: AnalyticsWorkspacePro
       const headers = ["Reconciliation Area", "Status", "Metric 1", "Metric 2", "Variance (PKR)"];
       const rows = [
         ["General Ledger Double-Entry", reconciliation.glReconciliation.isBalanced ? "BALANCED" : "DISCREPANCY", `Debits: ${reconciliation.glReconciliation.totalDebits}`, `Credits: ${reconciliation.glReconciliation.totalCredits}`, reconciliation.glReconciliation.discrepancy],
-        ["Model A FIFO Layer Valuation", reconciliation.fifoReconciliation.isReconciled ? "RECONCILED" : "VARIANCE", `FIFO: ${reconciliation.fifoReconciliation.fifoActiveLayersValuationPkr}`, `GL 1200: ${reconciliation.fifoReconciliation.glAccount1200ValuationPkr}`, reconciliation.fifoReconciliation.variancePkr]
+        ["FIFO Layer Valuation", reconciliation.fifoReconciliation.isReconciled ? "RECONCILED" : "VARIANCE", `FIFO: ${reconciliation.fifoReconciliation.fifoActiveLayersValuationPkr}`, `GL 1200: ${reconciliation.fifoReconciliation.glAccount1200ValuationPkr}`, reconciliation.fifoReconciliation.variancePkr]
       ];
       downloadCsv(`${reportType}_audit_report.csv`, buildCsvContent(headers, rows));
-    } else {
-      // Default Executive Summary
+    } else if (reportType === "executive" && dashboard) {
       const headers = ["Metric Code", "KPI Name", "Actual Value", "Target Value", "Variance %", "Status"];
-      const rows = (dashboard?.keyPerformanceIndicators || []).map(k => [k.code, k.name, k.actualValue, k.targetValue, k.variancePercentage, k.status]);
+      const rows = dashboard.keyPerformanceIndicators.map(k => [k.code, k.name, k.actualValue, k.targetValue, k.variancePercentage, k.status]);
       downloadCsv("executive_kpi_summary.csv", buildCsvContent(headers, rows));
+    } else {
+      setError("The selected report is unavailable. Refresh analytics and confirm that your role has the required permission.");
     }
   }
 
@@ -980,85 +981,4 @@ function ExportCard({ title, desc, onExport }: { title: string; desc: string; on
       </button>
     </div>
   );
-}
-
-function getDefaultKpis() {
-  return [
-    { code: "KPI-REV", name: "Monthly Sales Revenue", category: "financial", unit: "PKR", actualValue: 1250000, targetValue: 1000000, variance: 250000, variancePercentage: 25.0, status: "on_track", trendDirection: "up" },
-    { code: "KPI-GM", name: "Gross Margin", category: "financial", unit: "%", actualValue: 38.0, targetValue: 35.0, variance: 3.0, variancePercentage: 8.57, status: "on_track", trendDirection: "up" },
-    { code: "KPI-DSO", name: "Days Sales Outstanding", category: "financial", unit: "days", actualValue: 38.5, targetValue: 45.0, variance: -6.5, variancePercentage: -14.4, status: "on_track", trendDirection: "down" },
-    { code: "KPI-FIFO-VAR", name: "FIFO Valuation Variance", category: "supply_chain", unit: "PKR", actualValue: 0.0, targetValue: 0.0, variance: 0.0, variancePercentage: 0.0, status: "on_track", trendDirection: "flat" },
-    { code: "KPI-SCRAP", name: "Manufacturing Scrap Rate", category: "manufacturing", unit: "%", actualValue: 1.8, targetValue: 2.5, variance: -0.7, variancePercentage: -28.0, status: "on_track", trendDirection: "down" }
-  ];
-}
-
-function getMockDashboard(): ExecutiveDashboard {
-  return {
-    asOfDate: "2026-11-15",
-    financials: {
-      totalRevenuePkr: 1250000,
-      costOfGoodsSoldPkr: 775000,
-      grossProfitPkr: 475000,
-      grossProfitMarginPercentage: 38.0,
-      operatingExpensesPkr: 220000,
-      netIncomePkr: 255000,
-      netProfitMarginPercentage: 20.4,
-      operatingCashFlowPkr: 340000,
-      accountsReceivablePkr: 350000,
-      accountsPayablePkr: 280000,
-      isGeneralLedgerBalanced: true
-    },
-    supplyChain: {
-      totalInventoryValuationPkr: 2250,
-      fifoValuationPkr: 2250,
-      isFifoReconciled: true,
-      activeSkuCount: 1,
-      openSalesOrdersValuePkr: 180000,
-      openSalesOrdersCount: 2,
-      openPurchaseOrdersValuePkr: 95000,
-      openPurchaseOrdersCount: 1,
-      inventoryTurnoverRatio: 6.2,
-      averageBinUtilizationPercentage: 74.2
-    },
-    manufacturing: {
-      totalWorkOrders: 12,
-      completedWorkOrders: 10,
-      workOrderCompletionRatePercentage: 88.5,
-      workInProgressValuationPkr: 75000,
-      totalScrapCostPkr: 4200,
-      scrapRatePercentage: 1.8
-    },
-    workforce: {
-      totalActiveEmployees: 1,
-      monthlyGrossPayrollPkr: 175000,
-      monthlyNetPayrollPkr: 148750,
-      employerStatutoryCostPkr: 14345,
-      averageCostPerEmployeePkr: 175000,
-      overtimeExpenditurePkr: 0
-    },
-    keyPerformanceIndicators: getDefaultKpis()
-  };
-}
-
-function getMockReconciliation(): PlatformReconciliation {
-  return {
-    reconciledAt: new Date().toISOString(),
-    allReconciled: true,
-    glReconciliation: {
-      isBalanced: true,
-      totalDebits: 2250,
-      totalCredits: 2250,
-      discrepancy: 0,
-      totalPostedJournals: 1,
-      totalJournalLines: 2
-    },
-    fifoReconciliation: {
-      isReconciled: true,
-      fifoActiveLayersValuationPkr: 2250,
-      glAccount1200ValuationPkr: 2250,
-      variancePkr: 0,
-      totalActiveLayers: 1,
-      totalActiveQuantity: 50
-    }
-  };
 }
