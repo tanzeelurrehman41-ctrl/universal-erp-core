@@ -208,7 +208,7 @@ public static class AnalyticsEndpointMappings
         {
             var ctx = ResolveContext(httpContext, ctxAccessor);
             var dataPermissions = AnalyticsExportPermissions.GetRequiredPermissions(req.ReportType);
-            if (dataPermissions.Length == 0)
+            if (dataPermissions.Count == 0)
             {
                 return Results.BadRequest(new { code = "UNSUPPORTED_ANALYTICS_EXPORT" });
             }
