@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
+using System.Security.Claims;
 using System.Text;
+using Microsoft.AspNetCore.Authorization;
 using System.Text.Json;
 using UniversalErp.Application.Abstractions;
 using UniversalErp.Application.Inventory;
@@ -18,6 +20,8 @@ public static class OfflineReceiptSyncEndpointMappings
         var sync = endpoints.MapGroup("/api/v1/sync");
         var registerDevice = sync.MapPost("/devices", async (
             RegisterOfflineDeviceRequest request,
+            ClaimsPrincipal principal,
+            IAuthorizationService authorizationService,
             ITenantContextAccessor tenantContextAccessor,
             IOfflineReceiptSyncRepository repository,
             CancellationToken cancellationToken) =>
@@ -28,12 +32,27 @@ public static class OfflineReceiptSyncEndpointMappings
                 return Results.BadRequest(new { code = "INVALID_DEVICE_REGISTRATION" });
             }
 
+            var allowedOperations = new List<string>();
+            if (isDevelopment || (await authorizationService.AuthorizeAsync(principal, "inventory.receipt.post")).Succeeded)
+            {
+                allowedOperations.Add("inventory.receipt.post");
+            }
+            if (isDevelopment || (await authorizationService.AuthorizeAsync(principal, "inventory.product.create")).Succeeded)
+            {
+                allowedOperations.Add("inventory.product.create");
+            }
+            if (allowedOperations.Count == 0)
+            {
+                return Results.Forbid();
+            }
+
             var grant = await repository.RegisterDeviceAsync(
                 tenantContextAccessor.Current,
                 request.ClientDeviceId,
                 request.PlatformCode,
                 string.IsNullOrWhiteSpace(request.DeviceName) ? null : request.DeviceName.Trim(),
-                cancellationToken);
+                cancellationToken,
+                allowedOperations);
             return grant is null
                 ? Results.Conflict(new { code = "DEVICE_REVOKED_OR_INACTIVE" })
                 : Results.Ok(grant);
@@ -89,7 +108,7 @@ public static class OfflineReceiptSyncEndpointMappings
 
         if (!isDevelopment)
         {
-            registerDevice.RequireAuthorization("inventory.receipt.post");
+            registerDevice.RequireAuthorization();
             postOperations.RequireAuthorization("inventory.receipt.post");
         }
         return endpoints;
