@@ -1,6 +1,8 @@
 using System.Text.RegularExpressions;
 using UniversalErp.Application.Abstractions;
+using UniversalErp.Application.Sync;
 using UniversalErp.Domain.Common;
+using UniversalErp.Domain.Tenancy;
 using UniversalErp.Domain.Inventory;
 
 namespace UniversalErp.Application.Inventory;
@@ -21,6 +23,15 @@ public interface IProductRepository
         Guid idempotencyKey,
         string requestHash,
         CreateProductRequest request,
+        CancellationToken cancellationToken);
+
+    Task<ProductSyncOperationResult> CreateOfflineAsync(
+        TenantContext context,
+        ProductSyncBatchRequest batch,
+        ProductSyncOperation operation,
+        CreateProductRequest? normalizedRequest,
+        string requestHash,
+        string? validationError,
         CancellationToken cancellationToken);
 }
 
@@ -55,6 +66,73 @@ public sealed class ProductCatalogService(
             tenantContextAccessor.Current.TenantId,
             productId,
             cancellationToken);
+
+    public async Task<ProductSyncOperationResult> CreateOfflineAsync(
+        ProductSyncBatchRequest batch,
+        ProductSyncOperation operation,
+        CancellationToken cancellationToken)
+    {
+        var request = operation.Payload;
+        string? validationError = null;
+        CreateProductRequest? normalizedRequest = null;
+
+        var productCode = request?.ProductCode?.Trim().ToUpperInvariant();
+        var name = request?.Name?.Trim();
+        var productType = request?.ProductType?.Trim().ToLowerInvariant();
+        var description = string.IsNullOrWhiteSpace(request?.Description)
+            ? null
+            : request.Description.Trim();
+
+        if (!string.Equals(operation.OperationType, "product.create", StringComparison.Ordinal))
+        {
+            validationError = "INVALID_PRODUCT_SYNC_OPERATION";
+        }
+        else if (request is null)
+        {
+            validationError = "INVALID_PRODUCT_PAYLOAD";
+        }
+        else if (string.IsNullOrEmpty(productCode) || !ProductCodePattern.IsMatch(productCode))
+        {
+            validationError = "INVALID_PRODUCT_CODE";
+        }
+        else if (string.IsNullOrEmpty(name) || name.Length > 200)
+        {
+            validationError = "INVALID_PRODUCT_NAME";
+        }
+        else if (productType is null || !ProductTypes.Contains(productType))
+        {
+            validationError = "INVALID_PRODUCT_TYPE";
+        }
+        else if (description?.Length > 2000)
+        {
+            validationError = "DESCRIPTION_TOO_LONG";
+        }
+        else
+        {
+            normalizedRequest = new CreateProductRequest(productCode, name, description, productType);
+        }
+
+        var canonicalPayload = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            command = "product.create",
+            productCode = normalizedRequest?.ProductCode ?? request?.ProductCode,
+            name = normalizedRequest?.Name ?? request?.Name,
+            description = normalizedRequest?.Description ?? request?.Description,
+            productType = normalizedRequest?.ProductType ?? request?.ProductType,
+        });
+        var requestHash = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(canonicalPayload)));
+
+        return await productRepository.CreateOfflineAsync(
+            tenantContextAccessor.Current,
+            batch,
+            operation,
+            normalizedRequest,
+            requestHash,
+            validationError,
+            cancellationToken);
+    }
 
     public async Task<Result<Product>> CreateAsync(
         CreateProductRequest request,
